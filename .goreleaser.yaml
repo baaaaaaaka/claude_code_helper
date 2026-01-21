@@ -1,0 +1,50 @@
+version: 2
+
+project_name: claude-proxy
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: claude-proxy
+    main: ./cmd/claude-proxy
+    binary: claude-proxy
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X gitlab-master.nvidia.com/jawei/claude_code_helper/internal/cli.version={{.Version}}
+      - -X gitlab-master.nvidia.com/jawei/claude_code_helper/internal/cli.commit={{.Commit}}
+      - -X gitlab-master.nvidia.com/jawei/claude_code_helper/internal/cli.date={{.Date}}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: linux
+        goarch: arm64
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - id: binaries
+    formats: [binary]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+

@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt (verify)
+        shell: bash
+        run: |
+          bad="$(gofmt -l .)"
+          if [ -n "$bad" ]; then
+            echo "gofmt required for:"
+            echo "$bad"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test (with coverage)
+        shell: bash
+        run: |
+          go test -coverprofile=coverage.out ./...
+
+      - name: Coverage gate (Linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          threshold="25.0"
+          total="$(go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/,"",$NF); print $NF}')"
+          echo "Total coverage: ${total}% (threshold ${threshold}%)"
+          awk -v total="$total" -v threshold="$threshold" 'BEGIN { if (total+0 < threshold+0) { printf("coverage %.2f%% < %.2f%%\n", total, threshold); exit 1 } }'
+
+      - name: Upload coverage artifact (Linux only)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+
+  linux-distro-smoke:
+    name: Linux distro smoke (CentOS7/Rocky8/Ubuntu20.04)
+    runs-on: ubuntu-latest
+    needs: [test]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build static linux-amd64 binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o dist/claude-proxy ./cmd/claude-proxy
+          chmod +x dist/claude-proxy
+
+      - name: Smoke test in containers (doctor)
+        shell: bash
+        run: |
+          set -euo pipefail
+          for img in centos:7 rockylinux:8 ubuntu:20.04; do
+            echo "==> $img"
+            docker run --rm -v "$PWD/dist:/dist:ro" "$img" /dist/claude-proxy proxy doctor
+          done
+
