@@ -21,36 +21,36 @@ claude-proxy proxy doctor
 
 ## Install (no root)
 
-### Linux / macOS
+### Linux / macOS (one-liner, auto-detects curl/wget)
 
 ```bash
-git clone https://github.com/baaaaaaaka/claude_code_helper.git
-cd claude_code_helper
-
-./install.sh
-```
-
-Install a specific version:
-
-```bash
-./install.sh --version v0.0.1
+sh -c 'url="https://raw.githubusercontent.com/baaaaaaaka/claude_code_helper/main/install.sh"; if command -v curl >/dev/null 2>&1; then curl -fsSL "$url" | sh; elif command -v wget >/dev/null 2>&1; then wget -qO- "$url" | sh; else echo "need curl or wget" >&2; exit 1; fi'
 ```
 
 By default it installs to `~/.local/bin/claude-proxy`.
 
-### Windows (PowerShell)
+If `~/.local/bin` is not on your PATH:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Install a specific version (example):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/baaaaaaaka/claude_code_helper/main/install.sh | sh -s -- --version v0.0.2
+```
+
+### Windows (PowerShell one-liner)
 
 ```powershell
-git clone https://github.com/baaaaaaaka/claude_code_helper.git
-cd claude_code_helper
-
-.\install.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iwr -useb https://raw.githubusercontent.com/baaaaaaaka/claude_code_helper/main/install.ps1 | iex"
 ```
 
 Install a specific version:
 
 ```powershell
-.\install.ps1 -Version v0.0.1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$u='https://raw.githubusercontent.com/baaaaaaaka/claude_code_helper/main/install.ps1'; $p=Join-Path $env:TEMP 'claude-proxy-install.ps1'; iwr -useb $u -OutFile $p; & $p -Version v0.0.2; Remove-Item -Force $p"
 ```
 
 ## Quick start
