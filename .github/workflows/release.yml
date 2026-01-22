@@ -64,3 +64,38 @@ jobs:
           & $exe --version | Select-String ($env:GITHUB_REF_NAME.TrimStart("v")) | Out-Null
           & $exe proxy doctor | Out-Default
 
+  install-container-smoke:
+    name: Install smoke (containers)
+    runs-on: ubuntu-latest
+    needs: [goreleaser]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: ubuntu:20.04
+            fetcher: curl
+          - image: rockylinux:8
+            fetcher: wget
+          - image: centos:7
+            fetcher: curl
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install + run in ${{ matrix.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          tag="${GITHUB_REF_NAME}"
+          img="${{ matrix.image }}"
+          fetcher="${{ matrix.fetcher }}"
+
+          docker run --rm \
+            -v "$PWD/scripts/ci:/ci:ro" \
+            -e REPO="$repo" \
+            -e TAG="$tag" \
+            -e FETCHER="$fetcher" \
+            "$img" bash /ci/container_install_smoke.sh
+
