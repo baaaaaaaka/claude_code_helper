@@ -2,6 +2,7 @@ package stack
 
 import (
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -28,6 +29,34 @@ func TestWaitForTCP_SucceedsWhenListening(t *testing.T) {
 
 	if err := waitForTCP(ln.Addr().String(), 1*time.Second); err != nil {
 		t.Fatalf("waitForTCP: %v", err)
+	}
+}
+
+func TestWaitForTCP_TimesOutAndIncludesCause(t *testing.T) {
+	addr := "127.0.0.1:0"
+	err := waitForTCP(addr, 150*time.Millisecond)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "timeout waiting for") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), addr) {
+		t.Fatalf("expected addr in error: %v", err)
+	}
+}
+
+func TestWaitForTCPTunnel_TimesOutWhenNoTunnelAndNotListening(t *testing.T) {
+	addr := "127.0.0.1:0"
+	err := waitForTCPTunnel(addr, 150*time.Millisecond, nil)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "timeout waiting for") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), addr) {
+		t.Fatalf("expected addr in error: %v", err)
 	}
 }
 
