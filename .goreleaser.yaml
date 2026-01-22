@@ -41,6 +41,12 @@ archives:
 checksum:
   name_template: checksums.txt
 
+release:
+  extra_files:
+    - glob: install.sh
+    - glob: install.ps1
+    - glob: README.md
+
 changelog:
   sort: asc
   filters:

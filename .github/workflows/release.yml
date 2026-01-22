@@ -30,3 +30,37 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  install-smoke:
+    name: Install smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: [goreleaser]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ./install.sh
+          ./install.sh --repo "${GITHUB_REPOSITORY}" --version "${GITHUB_REF_NAME}" --dir "$HOME/.local/bin"
+          "$HOME/.local/bin/claude-proxy" --version | grep -q "${GITHUB_REF_NAME#v}"
+          "$HOME/.local/bin/claude-proxy" proxy doctor || true
+
+      - name: Install (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installDir = Join-Path $env:USERPROFILE ".local\\bin"
+          .\\install.ps1 -Repo $env:GITHUB_REPOSITORY -Version $env:GITHUB_REF_NAME -InstallDir $installDir
+          $exe = Join-Path $installDir "claude-proxy.exe"
+          & $exe --version | Select-String ($env:GITHUB_REF_NAME.TrimStart("v")) | Out-Null
+          & $exe proxy doctor | Out-Default
+
