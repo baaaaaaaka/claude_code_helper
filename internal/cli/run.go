@@ -25,53 +25,87 @@ func newRunCmd(root *rootOptions) *cobra.Command {
 		Short: "Run a command through an SSH-backed local proxy",
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			all := cmd.Flags().Args()
-			dash := cmd.Flags().ArgsLenAtDash()
-
-			before := all
-			after := []string{}
-			if dash >= 0 {
-				before = all[:dash]
-				after = all[dash:]
-			}
-
-			var profileRef string
-			if len(before) > 0 {
-				profileRef = before[0]
-			}
-			if len(before) > 1 {
-				return fmt.Errorf("unexpected args before -- (only profile is allowed)")
-			}
-			if len(after) == 0 {
-				after = []string{"claude"}
-			}
-
-			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-			defer stop()
-
-			store, err := config.NewStore(root.configPath)
-			if err != nil {
-				return err
-			}
-			cfg, err := store.Load()
-			if err != nil {
-				return err
-			}
-
-			profile, err := selectProfile(cfg, profileRef)
-			if err != nil {
-				return err
-			}
-
-			hc := manager.HealthClient{Timeout: 1 * time.Second}
-			if inst := manager.FindReusableInstance(cfg.Instances, profile.ID, hc); inst != nil {
-				return runWithExistingInstance(ctx, hc, *inst, after)
-			}
-
-			return runWithNewStack(ctx, store, profile, after)
+			// Keep `run` working, but also auto-init when no profiles exist.
+			return runLike(cmd, root, true)
 		},
 	}
 	return cmd
+}
+
+func runLike(cmd *cobra.Command, root *rootOptions, autoInit bool) error {
+	all := cmd.Flags().Args()
+	dash := cmd.Flags().ArgsLenAtDash()
+
+	before := all
+	after := []string{}
+	if dash >= 0 {
+		before = all[:dash]
+		after = all[dash:]
+	}
+
+	var profileRef string
+	if len(before) > 0 {
+		profileRef = before[0]
+	}
+	if len(before) > 1 {
+		return fmt.Errorf("unexpected args before -- (only profile is allowed)")
+	}
+	if len(after) == 0 {
+		after = []string{"claude"}
+	}
+
+	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	store, err := config.NewStore(root.configPath)
+	if err != nil {
+		return err
+	}
+
+	cfg, err := store.Load()
+	if err != nil {
+		return err
+	}
+
+	var created *config.Profile
+	if len(cfg.Profiles) == 0 && autoInit {
+		p, err := initProfileInteractive(ctx, store)
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Saved profile %q (%s)\n", p.Name, p.ID)
+		created = &p
+
+		// Reload to pick up any store defaults/migrations.
+		cfg, err = store.Load()
+		if err != nil {
+			return err
+		}
+	}
+
+	var profile config.Profile
+	if created != nil && profileRef == "" {
+		profile = *created
+	} else {
+		p, err := selectProfile(cfg, profileRef)
+		if err != nil {
+			if created != nil {
+				// If the user passed a "profile" arg before init existed, don't fail; run using the newly created profile.
+				profile = *created
+			} else {
+				return err
+			}
+		} else {
+			profile = p
+		}
+	}
+
+	hc := manager.HealthClient{Timeout: 1 * time.Second}
+	if inst := manager.FindReusableInstance(cfg.Instances, profile.ID, hc); inst != nil {
+		return runWithExistingInstance(ctx, hc, *inst, after)
+	}
+
+	return runWithNewStack(ctx, store, profile, after)
 }
 
 func selectProfile(cfg config.Config, ref string) (config.Profile, error) {
@@ -82,12 +116,12 @@ func selectProfile(cfg config.Config, ref string) (config.Profile, error) {
 		return config.Profile{}, fmt.Errorf("profile %q not found", ref)
 	}
 	if len(cfg.Profiles) == 0 {
-		return config.Profile{}, fmt.Errorf("no profiles found; run `claude-proxy init` first")
+		return config.Profile{}, fmt.Errorf("no profiles found; run `claude-proxy init` (or run `claude-proxy` to create one)")
 	}
 	if len(cfg.Profiles) == 1 {
 		return cfg.Profiles[0], nil
 	}
-	return config.Profile{}, fmt.Errorf("multiple profiles exist; specify one: `claude-proxy run <profile> -- ...`")
+	return config.Profile{}, fmt.Errorf("multiple profiles exist; specify one: `claude-proxy <profile>` or `claude-proxy run <profile> -- ...`")
 }
 
 func runWithExistingInstance(ctx context.Context, hc manager.HealthClient, inst config.Instance, cmdArgs []string) error {

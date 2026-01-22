@@ -55,7 +55,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$u='https://raw.githubus
 
 ## Quick start
 
-### 1) Create a profile
+### 1) Create a profile (optional)
 
 ```bash
 claude-proxy init
@@ -63,28 +63,30 @@ claude-proxy init
 
 Config is stored under your OS user config directory (Linux typically `~/.config/claude-proxy/config.json`).
 
+If you skip this step, running `claude-proxy` will start the init flow automatically when no profiles exist.
+
 ### 2) Run `claude` through the proxy
 
 ```bash
-claude-proxy run
+claude-proxy
 ```
 
 If you have multiple profiles:
 
 ```bash
-claude-proxy run <profile>
+claude-proxy <profile>
 ```
 
 ### 3) Run any command through the proxy
 
 ```bash
-claude-proxy run <profile> -- <cmd> [args...]
+claude-proxy <profile> -- <cmd> [args...]
 ```
 
 Example:
 
 ```bash
-claude-proxy run pdx -- curl https://example.com
+claude-proxy pdx -- curl https://example.com
 ```
 
 ## Long-lived instances (optional)

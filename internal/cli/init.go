@@ -29,65 +29,73 @@ func newInitCmd(root *rootOptions) *cobra.Command {
 				return err
 			}
 
-			r := bufio.NewReader(os.Stdin)
-			name := prompt(r, "Profile name (optional)", "")
-			host := promptRequired(r, "SSH host (required)")
-			port := promptInt(r, "SSH port", 22)
-			user := promptRequired(r, "SSH user (required)")
-
-			if name == "" {
-				name = user + "@" + host
-			}
-
-			id, err := ids.New()
+			prof, err := initProfileInteractive(cmd.Context(), store)
 			if err != nil {
 				return err
 			}
-
-			prof := config.Profile{
-				ID:        id,
-				Name:      name,
-				Host:      host,
-				Port:      port,
-				User:      user,
-				CreatedAt: time.Now(),
-			}
-
-			if err := sshProbe(cmd.Context(), prof, false); err != nil {
-				_, _ = fmt.Fprintln(os.Stderr, "Non-interactive SSH probe failed; attempting interactive login...")
-				if err2 := sshProbe(cmd.Context(), prof, true); err2 != nil {
-					return fmt.Errorf("ssh probe failed: %w", err2)
-				}
-			}
-
-			if promptYesNo(r, "Generate and install a dedicated SSH key for this profile?", false) {
-				keyPath, err := generateKeypair(cmd.Context(), store, prof)
-				if err != nil {
-					return err
-				}
-				if err := installPublicKey(cmd.Context(), prof, keyPath+".pub"); err != nil {
-					return err
-				}
-				prof.SSHArgs = []string{"-i", keyPath}
-
-				// Verify key-based login works without prompting.
-				if err := sshProbe(cmd.Context(), prof, false); err != nil {
-					return fmt.Errorf("key-based ssh probe failed: %w", err)
-				}
-			}
-
-			if err := store.Update(func(cfg *config.Config) error {
-				cfg.UpsertProfile(prof)
-				return nil
-			}); err != nil {
-				return err
-			}
-
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Saved profile %q (%s)\n", prof.Name, prof.ID)
 			return nil
 		},
 	}
 	return cmd
+}
+
+func initProfileInteractive(ctx context.Context, store *config.Store) (config.Profile, error) {
+	r := bufio.NewReader(os.Stdin)
+	name := prompt(r, "Profile name (optional)", "")
+	host := promptRequired(r, "SSH host (required)")
+	port := promptInt(r, "SSH port", 22)
+	user := promptRequired(r, "SSH user (required)")
+
+	if name == "" {
+		name = user + "@" + host
+	}
+
+	id, err := ids.New()
+	if err != nil {
+		return config.Profile{}, err
+	}
+
+	prof := config.Profile{
+		ID:        id,
+		Name:      name,
+		Host:      host,
+		Port:      port,
+		User:      user,
+		CreatedAt: time.Now(),
+	}
+
+	if err := sshProbe(ctx, prof, false); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "Non-interactive SSH probe failed; attempting interactive login...")
+		if err2 := sshProbe(ctx, prof, true); err2 != nil {
+			return config.Profile{}, fmt.Errorf("ssh probe failed: %w", err2)
+		}
+	}
+
+	if promptYesNo(r, "Generate and install a dedicated SSH key for this profile?", false) {
+		keyPath, err := generateKeypair(ctx, store, prof)
+		if err != nil {
+			return config.Profile{}, err
+		}
+		if err := installPublicKey(ctx, prof, keyPath+".pub"); err != nil {
+			return config.Profile{}, err
+		}
+		prof.SSHArgs = []string{"-i", keyPath}
+
+		// Verify key-based login works without prompting.
+		if err := sshProbe(ctx, prof, false); err != nil {
+			return config.Profile{}, fmt.Errorf("key-based ssh probe failed: %w", err)
+		}
+	}
+
+	if err := store.Update(func(cfg *config.Config) error {
+		cfg.UpsertProfile(prof)
+		return nil
+	}); err != nil {
+		return config.Profile{}, err
+	}
+
+	return prof, nil
 }
 
 func prompt(r *bufio.Reader, label, def string) string {
