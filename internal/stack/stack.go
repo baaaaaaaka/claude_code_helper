@@ -17,6 +17,8 @@ type Options struct {
 	SocksPort      int
 	HTTPListenAddr string
 
+	SocksReadyTimeout time.Duration
+
 	MaxRestarts     int
 	RestartBackoff  time.Duration
 	TunnelStopGrace time.Duration
@@ -63,6 +65,9 @@ func Start(profile config.Profile, instanceID string, opts Options) (*Stack, err
 	if opts.TunnelStopGrace <= 0 {
 		opts.TunnelStopGrace = 2 * time.Second
 	}
+	if opts.SocksReadyTimeout <= 0 {
+		opts.SocksReadyTimeout = 30 * time.Second
+	}
 
 	socksPort := opts.SocksPort
 	if socksPort == 0 {
@@ -104,7 +109,7 @@ func Start(profile config.Profile, instanceID string, opts Options) (*Stack, err
 		_ = hp.Close(context.Background())
 		return nil, err
 	}
-	if err := waitForTCP(socksAddr, 5*time.Second); err != nil {
+	if err := waitForTCPTunnel(socksAddr, opts.SocksReadyTimeout, tun); err != nil {
 		_ = tun.Stop(opts.TunnelStopGrace)
 		_ = hp.Close(context.Background())
 		return nil, err
@@ -182,7 +187,7 @@ func (s *Stack) monitor(opts Options) {
 			s.fatalCh <- terr
 			return
 		}
-		if terr := waitForTCP(fmt.Sprintf("127.0.0.1:%d", s.SocksPort), 5*time.Second); terr != nil {
+		if terr := waitForTCPTunnel(fmt.Sprintf("127.0.0.1:%d", s.SocksPort), opts.SocksReadyTimeout, tun); terr != nil {
 			_ = tun.Stop(opts.TunnelStopGrace)
 			s.fatalCh <- terr
 			return
@@ -208,13 +213,44 @@ func newTunnel(profile config.Profile, socksPort int) (*ssh.Tunnel, error) {
 
 func waitForTCP(addr string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	var lastErr error
 	for time.Now().Before(deadline) {
 		c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
 		if err == nil {
 			_ = c.Close()
 			return nil
 		}
+		lastErr = err
 		time.Sleep(100 * time.Millisecond)
+	}
+	if lastErr != nil {
+		return fmt.Errorf("timeout waiting for %s: %w", addr, lastErr)
+	}
+	return fmt.Errorf("timeout waiting for %s", addr)
+}
+
+func waitForTCPTunnel(addr string, timeout time.Duration, tun *ssh.Tunnel) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		if tun != nil {
+			select {
+			case <-tun.Done():
+				return fmt.Errorf("ssh tunnel exited before SOCKS ready: %w", tun.Wait())
+			default:
+			}
+		}
+
+		c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err == nil {
+			_ = c.Close()
+			return nil
+		}
+		lastErr = err
+		time.Sleep(100 * time.Millisecond)
+	}
+	if lastErr != nil {
+		return fmt.Errorf("timeout waiting for %s: %w", addr, lastErr)
 	}
 	return fmt.Errorf("timeout waiting for %s", addr)
 }

@@ -48,13 +48,13 @@ func BuildArgs(c TunnelConfig) ([]string, error) {
 
 	args := []string{
 		"-N",
-		"-D", "127.0.0.1:" + strconv.Itoa(c.SocksPort),
-		"-p", strconv.Itoa(c.Port),
 		"-o", "ExitOnForwardFailure=yes",
+		"-o", "ConnectTimeout=15",
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=3",
 		"-o", "TCPKeepAlive=yes",
-		"-o", "ClearAllForwardings=yes",
+		"-p", strconv.Itoa(c.Port),
+		"-D", "127.0.0.1:" + strconv.Itoa(c.SocksPort),
 	}
 
 	if c.BatchMode {
@@ -124,6 +124,8 @@ func (t *Tunnel) Start() error {
 
 	return nil
 }
+
+func (t *Tunnel) Done() <-chan struct{} { return t.done }
 
 func (t *Tunnel) Wait() error {
 	<-t.done

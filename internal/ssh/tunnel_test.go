@@ -22,13 +22,13 @@ func TestBuildArgs_IncludesRequiredOptions(t *testing.T) {
 
 	wantPrefix := []string{
 		"-N",
-		"-D", "127.0.0.1:12345",
-		"-p", "2222",
 		"-o", "ExitOnForwardFailure=yes",
+		"-o", "ConnectTimeout=15",
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=3",
 		"-o", "TCPKeepAlive=yes",
-		"-o", "ClearAllForwardings=yes",
+		"-p", "2222",
+		"-D", "127.0.0.1:12345",
 		"-o", "BatchMode=yes",
 		"-i", "/tmp/key",
 		"alice@example.com",
