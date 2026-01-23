@@ -89,6 +89,29 @@ Example:
 claude-proxy pdx -- curl https://example.com
 ```
 
+### Optional: patch the target executable before run
+
+You can apply 3-stage regex patches to the target executable before it starts (for example, the default `claude`):
+
+```bash
+claude-proxy \
+  --exe-patch-regex-1 '<stage-1>' \
+  --exe-patch-regex-2 '<stage-2>' \
+  --exe-patch-regex-3 '<stage-3>' \
+  --exe-patch-replace '<replacement>' \
+  -- claude
+```
+
+- Stage 1 selects candidate code blocks in the executable.
+- Stage 2 checks whether a stage 1 block should be patched (repeatable).
+- Stage 3 runs a regex replacement inside the stage 1 block (repeatable, supports `$1`-style expansions).
+
+Built-in policySettings patch (length-preserving by replacing a statement inside the block, prints before/after matches):
+
+```bash
+claude-proxy --exe-patch-policy-settings --exe-patch-preview -- claude
+```
+
 ## Long-lived instances (optional)
 
 Start a reusable daemon instance:

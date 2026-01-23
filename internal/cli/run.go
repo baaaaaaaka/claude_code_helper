@@ -3,9 +3,11 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -57,6 +59,14 @@ func runLike(cmd *cobra.Command, root *rootOptions, autoInit bool) error {
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	patchOutcome, err := maybePatchExecutable(after, root.exePatch, root.configPath, cmd.ErrOrStderr())
+	if err != nil {
+		return err
+	}
+	if root.exePatch.dryRun {
+		return nil
+	}
+
 	store, err := config.NewStore(root.configPath)
 	if err != nil {
 		return err
@@ -102,10 +112,10 @@ func runLike(cmd *cobra.Command, root *rootOptions, autoInit bool) error {
 
 	hc := manager.HealthClient{Timeout: 1 * time.Second}
 	if inst := manager.FindReusableInstance(cfg.Instances, profile.ID, hc); inst != nil {
-		return runWithExistingInstance(ctx, hc, *inst, after)
+		return runWithExistingInstance(ctx, hc, *inst, after, patchOutcome)
 	}
 
-	return runWithNewStack(ctx, store, profile, after)
+	return runWithNewStack(ctx, store, profile, after, patchOutcome)
 }
 
 func selectProfile(cfg config.Config, ref string) (config.Profile, error) {
@@ -124,14 +134,14 @@ func selectProfile(cfg config.Config, ref string) (config.Profile, error) {
 	return config.Profile{}, fmt.Errorf("multiple profiles exist; specify one: `claude-proxy <profile>` or `claude-proxy run <profile> -- ...`")
 }
 
-func runWithExistingInstance(ctx context.Context, hc manager.HealthClient, inst config.Instance, cmdArgs []string) error {
+func runWithExistingInstance(ctx context.Context, hc manager.HealthClient, inst config.Instance, cmdArgs []string, patchOutcome *patchOutcome) error {
 	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", inst.HTTPPort)
 	return runTargetSupervised(ctx, cmdArgs, proxyURL, func() error {
 		return hc.CheckHTTPProxy(inst.HTTPPort, inst.ID)
-	})
+	}, patchOutcome, nil)
 }
 
-func runWithNewStack(ctx context.Context, store *config.Store, profile config.Profile, cmdArgs []string) error {
+func runWithNewStack(ctx context.Context, store *config.Store, profile config.Profile, cmdArgs []string, patchOutcome *patchOutcome) error {
 	instanceID, err := ids.New()
 	if err != nil {
 		return err
@@ -179,62 +189,124 @@ func runWithNewStack(ctx context.Context, store *config.Store, profile config.Pr
 		return fmt.Errorf("missing command")
 	}
 
-	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
-	cmd.Env = env.WithProxy(os.Environ(), proxyURL)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-
 	hc := manager.HealthClient{Timeout: 1 * time.Second}
-
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	failures := 0
-	for {
-		select {
-		case err := <-done:
-			return err
-		case err := <-st.Fatal():
-			_ = terminateProcess(cmd.Process, 2*time.Second)
-			<-done
-			return fmt.Errorf("proxy stack failed; terminated target: %w", err)
-		case <-ctx.Done():
-			_ = terminateProcess(cmd.Process, 2*time.Second)
-			<-done
-			return ctx.Err()
-		case <-ticker.C:
-			if err := hc.CheckHTTPProxy(st.HTTPPort, instanceID); err != nil {
-				failures++
-				if failures >= 3 {
-					_ = terminateProcess(cmd.Process, 2*time.Second)
-					<-done
-					return fmt.Errorf("proxy unhealthy; terminated target: %w", err)
-				}
-				continue
-			}
-			failures = 0
-		}
-	}
+	return runTargetSupervised(ctx, cmdArgs, proxyURL, func() error {
+		return hc.CheckHTTPProxy(st.HTTPPort, instanceID)
+	}, patchOutcome, st.Fatal())
 }
 
-func runTargetSupervised(ctx context.Context, cmdArgs []string, proxyURL string, healthCheck func() error) error {
+func runTargetSupervised(
+	ctx context.Context,
+	cmdArgs []string,
+	proxyURL string,
+	healthCheck func() error,
+	patchOutcome *patchOutcome,
+	fatalCh <-chan error,
+) error {
 	if len(cmdArgs) == 0 {
 		return fmt.Errorf("missing command")
 	}
+	return runTargetWithFallback(ctx, cmdArgs, proxyURL, healthCheck, patchOutcome, fatalCh)
+}
 
+func terminateProcess(p *os.Process, grace time.Duration) error {
+	if p == nil {
+		return nil
+	}
+
+	_ = p.Signal(os.Interrupt)
+
+	deadline := time.Now().Add(grace)
+	for time.Now().Before(deadline) {
+		if !proc.IsAlive(p.Pid) {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	return p.Kill()
+}
+
+const maxOutputCaptureBytes = 64 * 1024
+
+type limitedBuffer struct {
+	buf []byte
+	max int
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	if b.max <= 0 || len(p) == 0 {
+		return len(p), nil
+	}
+	if len(p) >= b.max {
+		b.buf = append(b.buf[:0], p[len(p)-b.max:]...)
+		return len(p), nil
+	}
+	if len(b.buf)+len(p) > b.max {
+		overflow := len(b.buf) + len(p) - b.max
+		b.buf = append(b.buf[overflow:], p...)
+		return len(p), nil
+	}
+	b.buf = append(b.buf, p...)
+	return len(p), nil
+}
+
+func (b *limitedBuffer) String() string {
+	return string(b.buf)
+}
+
+func runTargetWithFallback(
+	ctx context.Context,
+	cmdArgs []string,
+	proxyURL string,
+	healthCheck func() error,
+	patchOutcome *patchOutcome,
+	fatalCh <-chan error,
+) error {
+	attempt := 0
+	for {
+		attempt++
+		stdoutBuf := &limitedBuffer{max: maxOutputCaptureBytes}
+		stderrBuf := &limitedBuffer{max: maxOutputCaptureBytes}
+		err := runTargetOnce(ctx, cmdArgs, proxyURL, healthCheck, fatalCh, stdoutBuf, stderrBuf)
+		if err == nil {
+			if patchOutcome != nil && patchOutcome.Applied {
+				cleanupBackup(patchOutcome)
+			}
+			return nil
+		}
+		if patchOutcome != nil && patchOutcome.Applied && attempt == 1 {
+			out := stdoutBuf.String() + stderrBuf.String()
+			if isPatchedBinaryFailure(err, out) {
+				_, _ = fmt.Fprintln(os.Stderr, "exe-patch: detected startup failure; restoring backup")
+				if restoreErr := restoreExecutableFromBackup(patchOutcome); restoreErr != nil {
+					return fmt.Errorf("restore patched executable: %w", restoreErr)
+				}
+				if historyErr := cleanupPatchHistory(patchOutcome); historyErr != nil {
+					return fmt.Errorf("cleanup patch history: %w", historyErr)
+				}
+				patchOutcome = nil
+				continue
+			}
+		}
+		return err
+	}
+}
+
+func runTargetOnce(
+	ctx context.Context,
+	cmdArgs []string,
+	proxyURL string,
+	healthCheck func() error,
+	fatalCh <-chan error,
+	stdoutBuf io.Writer,
+	stderrBuf io.Writer,
+) error {
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
 	cmd.Env = env.WithProxy(os.Environ(), proxyURL)
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = io.MultiWriter(os.Stdout, stdoutBuf)
+	cmd.Stderr = io.MultiWriter(os.Stderr, stderrBuf)
 
 	if err := cmd.Start(); err != nil {
 		return err
@@ -251,6 +323,10 @@ func runTargetSupervised(ctx context.Context, cmdArgs []string, proxyURL string,
 		select {
 		case err := <-done:
 			return err
+		case err := <-fatalCh:
+			_ = terminateProcess(cmd.Process, 2*time.Second)
+			<-done
+			return fmt.Errorf("proxy stack failed; terminated target: %w", err)
 		case <-ctx.Done():
 			_ = terminateProcess(cmd.Process, 2*time.Second)
 			<-done
@@ -273,20 +349,16 @@ func runTargetSupervised(ctx context.Context, cmdArgs []string, proxyURL string,
 	}
 }
 
-func terminateProcess(p *os.Process, grace time.Duration) error {
-	if p == nil {
-		return nil
+func isPatchedBinaryFailure(err error, output string) bool {
+	if err == nil {
+		return false
 	}
-
-	_ = p.Signal(os.Interrupt)
-
-	deadline := time.Now().Add(grace)
-	for time.Now().Before(deadline) {
-		if !proc.IsAlive(p.Pid) {
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
+	lower := strings.ToLower(output)
+	if strings.Contains(lower, "@bun @bytecode") || strings.Contains(lower, "@bun/@bytecode") {
+		return true
 	}
-
-	return p.Kill()
+	if strings.Contains(lower, "module not found") && strings.Contains(lower, "bun") {
+		return true
+	}
+	return false
 }
