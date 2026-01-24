@@ -67,6 +67,20 @@ func TestFindReusableInstance_IgnoresWrongInstanceID(t *testing.T) {
 	}
 }
 
+func TestIsInstanceStale(t *testing.T) {
+	now := time.Now()
+	inst := config.Instance{LastSeenAt: now.Add(-10 * time.Minute)}
+	if !IsInstanceStale(inst, now, 5*time.Minute) {
+		t.Fatalf("expected instance to be stale")
+	}
+	if IsInstanceStale(inst, now, 0) {
+		t.Fatalf("expected maxAge<=0 to disable stale check")
+	}
+	if IsInstanceStale(config.Instance{}, now, 5*time.Minute) {
+		t.Fatalf("expected zero LastSeenAt to be treated as fresh")
+	}
+}
+
 func startHealthServer(t *testing.T, instanceID string) (port int, closeFn func()) {
 	t.Helper()
 

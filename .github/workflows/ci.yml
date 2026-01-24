@@ -37,6 +37,44 @@ jobs:
             exit 1
           fi
 
+      - name: Setup SSHD for integration tests (Linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y openssh-server
+          sudo mkdir -p /run/sshd
+          SSH_TEST_DIR="$(mktemp -d)"
+          ssh-keygen -t ed25519 -N "" -f "$SSH_TEST_DIR/host_key"
+          ssh-keygen -t ed25519 -N "" -f "$SSH_TEST_DIR/test_key"
+          cat "$SSH_TEST_DIR/test_key.pub" > "$SSH_TEST_DIR/authorized_keys"
+          chmod 700 "$SSH_TEST_DIR"
+          chmod 600 "$SSH_TEST_DIR/authorized_keys" "$SSH_TEST_DIR/test_key" "$SSH_TEST_DIR/test_key.pub" "$SSH_TEST_DIR/host_key"
+          cat > "$SSH_TEST_DIR/sshd_config" <<EOF
+          Port 22222
+          ListenAddress 127.0.0.1
+          HostKey $SSH_TEST_DIR/host_key
+          AuthorizedKeysFile $SSH_TEST_DIR/authorized_keys
+          PasswordAuthentication no
+          ChallengeResponseAuthentication no
+          KbdInteractiveAuthentication no
+          UsePAM no
+          PermitRootLogin no
+          PubkeyAuthentication yes
+          StrictModes no
+          PidFile $SSH_TEST_DIR/sshd.pid
+          AllowUsers ${USER}
+          LogLevel ERROR
+          EOF
+          sudo /usr/sbin/sshd -t -f "$SSH_TEST_DIR/sshd_config"
+          sudo /usr/sbin/sshd -f "$SSH_TEST_DIR/sshd_config"
+          echo "SSH_TEST_ENABLED=1" >> "$GITHUB_ENV"
+          echo "SSH_TEST_HOST=127.0.0.1" >> "$GITHUB_ENV"
+          echo "SSH_TEST_PORT=22222" >> "$GITHUB_ENV"
+          echo "SSH_TEST_USER=${USER}" >> "$GITHUB_ENV"
+          echo "SSH_TEST_KEY=$SSH_TEST_DIR/test_key" >> "$GITHUB_ENV"
+
       - name: go vet
         run: go vet ./...
 
@@ -44,6 +82,10 @@ jobs:
         shell: bash
         run: |
           go test -coverprofile=coverage.out ./...
+
+      - name: go test -race (Linux only)
+        if: runner.os == 'Linux'
+        run: go test -race ./...
 
       - name: Coverage gate (Linux only)
         if: runner.os == 'Linux'

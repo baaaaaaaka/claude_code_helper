@@ -79,8 +79,6 @@ type exePatchSpec struct {
 	guard       *regexp.Regexp
 	patch       *regexp.Regexp
 	replace     []byte
-	replaceFunc func([]byte) []byte
-	replaceID   string
 	fixedLength bool
 	label       string
 	apply       func([]byte, io.Writer, bool) ([]byte, exePatchStats, error)
@@ -408,13 +406,6 @@ func patchSpecsHash(specs []exePatchSpec) string {
 		_, _ = io.WriteString(hasher, "\n")
 		_, _ = io.WriteString(hasher, regexString(spec.patch))
 		_, _ = io.WriteString(hasher, "\n")
-		if spec.replaceFunc != nil {
-			_, _ = io.WriteString(hasher, "func\n")
-		} else {
-			_, _ = io.WriteString(hasher, "bytes\n")
-		}
-		_, _ = io.WriteString(hasher, spec.replaceID)
-		_, _ = io.WriteString(hasher, "\n")
 		if spec.fixedLength {
 			_, _ = io.WriteString(hasher, "fixed\n")
 		} else {
@@ -476,29 +467,9 @@ func applyExePatch(data []byte, spec exePatchSpec, log io.Writer, preview bool) 
 		stats.Patched++
 		stats.Replacements += len(replLocs)
 
-		var patched []byte
-		if spec.replaceFunc != nil {
-			var replaceErr error
-			patched = spec.patch.ReplaceAllFunc(segment, func(match []byte) []byte {
-				repl := spec.replaceFunc(match)
-				if repl == nil {
-					replaceErr = fmt.Errorf("stage-3 replacement returned empty")
-					return match
-				}
-				if spec.fixedLength && len(repl) != len(match) {
-					replaceErr = fmt.Errorf("stage-3 replacement changed length (match=%d repl=%d)", len(match), len(repl))
-					return match
-				}
-				return repl
-			})
-			if replaceErr != nil {
-				return nil, stats, replaceErr
-			}
-		} else {
-			patched = spec.patch.ReplaceAll(segment, spec.replace)
-			if spec.fixedLength && len(patched) != len(segment) {
-				return nil, stats, fmt.Errorf("stage-3 replacement changed length (segment=%d patched=%d)", len(segment), len(patched))
-			}
+		patched := spec.patch.ReplaceAll(segment, spec.replace)
+		if spec.fixedLength && len(patched) != len(segment) {
+			return nil, stats, fmt.Errorf("stage-3 replacement changed length (segment=%d patched=%d)", len(segment), len(patched))
 		}
 		if preview {
 			logPatchPreview(log, spec.label, segment, patched)
@@ -585,20 +556,6 @@ func normalizeReplacement(repl string) string {
 	}
 
 	return out.String()
-}
-
-func replaceWithPaddedLiteral(literal string) func([]byte) []byte {
-	return func(match []byte) []byte {
-		if len(match) < len(literal) {
-			return nil
-		}
-		out := make([]byte, len(match))
-		copy(out, literal)
-		for i := len(literal); i < len(out); i++ {
-			out[i] = ' '
-		}
-		return out
-	}
 }
 
 func isIdentChar(b byte) bool {
