@@ -4,12 +4,16 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/config"
 )
 
 func TestRunTargetWithFallbackRestoresAndReruns(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script test on windows")
+	}
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target.bin")
 	backup := filepath.Join(dir, "target.bin.bak")

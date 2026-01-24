@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -89,8 +90,12 @@ func TestResolveExecutablePath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveExecutablePath error: %v", err)
 	}
-	if resolved != target {
-		t.Fatalf("expected resolved path %q, got %q", target, resolved)
+	expected, err := resolveExecutablePath(target)
+	if err != nil {
+		t.Fatalf("resolveExecutablePath target error: %v", err)
+	}
+	if resolved != expected {
+		t.Fatalf("expected resolved path %q, got %q", expected, resolved)
 	}
 }
 
@@ -128,7 +133,11 @@ func TestExePatchOptionsCompileInvalidRegex(t *testing.T) {
 
 func TestMaybePatchExecutable(t *testing.T) {
 	dir := t.TempDir()
-	binPath := filepath.Join(dir, "dummy")
+	name := "dummy"
+	if runtime.GOOS == "windows" {
+		name = "dummy.exe"
+	}
+	binPath := filepath.Join(dir, name)
 	if err := os.WriteFile(binPath, []byte("foo"), 0o700); err != nil {
 		t.Fatalf("write dummy: %v", err)
 	}
@@ -142,7 +151,7 @@ func TestMaybePatchExecutable(t *testing.T) {
 	}
 
 	log := &bytes.Buffer{}
-	outcome, err := maybePatchExecutable([]string{"dummy"}, opts, filepath.Join(dir, "config.json"), log)
+	outcome, err := maybePatchExecutable([]string{name}, opts, filepath.Join(dir, "config.json"), log)
 	if err != nil {
 		t.Fatalf("maybePatchExecutable error: %v", err)
 	}

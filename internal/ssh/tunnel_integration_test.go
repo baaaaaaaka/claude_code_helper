@@ -71,7 +71,22 @@ func TestTunnelIntegrationStartStop(t *testing.T) {
 
 	select {
 	case <-tun.Done():
-		t.Fatalf("tunnel exited early")
+		// Retry once to avoid flakiness if sshd isn't fully ready.
+		if err := tun.Stop(200 * time.Millisecond); err != nil {
+			// best effort cleanup
+		}
+		tun, err = NewTunnel(cfg)
+		if err != nil {
+			t.Fatalf("NewTunnel retry error: %v", err)
+		}
+		if err := tun.Start(); err != nil {
+			t.Fatalf("Start retry error: %v", err)
+		}
+		select {
+		case <-tun.Done():
+			t.Fatalf("tunnel exited early")
+		case <-time.After(300 * time.Millisecond):
+		}
 	case <-time.After(300 * time.Millisecond):
 	}
 

@@ -63,12 +63,24 @@ jobs:
           PermitRootLogin no
           PubkeyAuthentication yes
           StrictModes no
+          AllowTcpForwarding yes
+          PermitOpen any
           PidFile $SSH_TEST_DIR/sshd.pid
           AllowUsers ${USER}
           LogLevel ERROR
           EOF
           sudo /usr/sbin/sshd -t -f "$SSH_TEST_DIR/sshd_config"
           sudo /usr/sbin/sshd -f "$SSH_TEST_DIR/sshd_config"
+          for i in {1..20}; do
+            if ssh -i "$SSH_TEST_DIR/test_key" -p 22222 \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -o BatchMode=yes \
+              "${USER}@127.0.0.1" exit; then
+              break
+            fi
+            sleep 0.2
+          done
           echo "SSH_TEST_ENABLED=1" >> "$GITHUB_ENV"
           echo "SSH_TEST_HOST=127.0.0.1" >> "$GITHUB_ENV"
           echo "SSH_TEST_PORT=22222" >> "$GITHUB_ENV"
