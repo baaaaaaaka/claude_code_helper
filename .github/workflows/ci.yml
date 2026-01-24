@@ -45,6 +45,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y openssh-server
           sudo mkdir -p /run/sshd
+          SSH_TEST_USER="ssh-test"
+          if ! id -u "$SSH_TEST_USER" >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash -p '$6$ci$WiNqQDjl.EMvmwex4uixbzCpYwPdZ5pjMhtV6AMb004JamOVMOgqYaNOYOgWVmv/1Eq9TSb.yuZ94xGrgVNuS/' "$SSH_TEST_USER"
+          fi
           SSH_TEST_DIR="$(mktemp -d)"
           ssh-keygen -t ed25519 -N "" -f "$SSH_TEST_DIR/host_key"
           ssh-keygen -t ed25519 -N "" -f "$SSH_TEST_DIR/test_key"
@@ -66,7 +70,7 @@ jobs:
           AllowTcpForwarding yes
           PermitOpen any
           PidFile $SSH_TEST_DIR/sshd.pid
-          AllowUsers ${USER}
+          AllowUsers ${SSH_TEST_USER}
           LogLevel ERROR
           EOF
           sudo /usr/sbin/sshd -t -f "$SSH_TEST_DIR/sshd_config"
@@ -76,7 +80,7 @@ jobs:
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
               -o BatchMode=yes \
-              "${USER}@127.0.0.1" exit; then
+              "${SSH_TEST_USER}@127.0.0.1" exit; then
               break
             fi
             sleep 0.2
@@ -84,7 +88,7 @@ jobs:
           echo "SSH_TEST_ENABLED=1" >> "$GITHUB_ENV"
           echo "SSH_TEST_HOST=127.0.0.1" >> "$GITHUB_ENV"
           echo "SSH_TEST_PORT=22222" >> "$GITHUB_ENV"
-          echo "SSH_TEST_USER=${USER}" >> "$GITHUB_ENV"
+          echo "SSH_TEST_USER=${SSH_TEST_USER}" >> "$GITHUB_ENV"
           echo "SSH_TEST_KEY=$SSH_TEST_DIR/test_key" >> "$GITHUB_ENV"
 
       - name: go vet
