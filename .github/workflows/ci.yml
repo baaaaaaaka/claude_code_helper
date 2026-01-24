@@ -52,14 +52,15 @@ jobs:
           SSH_TEST_DIR="$(mktemp -d)"
           ssh-keygen -t ed25519 -N "" -f "$SSH_TEST_DIR/host_key"
           ssh-keygen -t ed25519 -N "" -f "$SSH_TEST_DIR/test_key"
-          cat "$SSH_TEST_DIR/test_key.pub" > "$SSH_TEST_DIR/authorized_keys"
+          sudo install -d -m 700 -o "$SSH_TEST_USER" -g "$SSH_TEST_USER" "/home/$SSH_TEST_USER/.ssh"
+          sudo install -m 600 -o "$SSH_TEST_USER" -g "$SSH_TEST_USER" "$SSH_TEST_DIR/test_key.pub" "/home/$SSH_TEST_USER/.ssh/authorized_keys"
           chmod 700 "$SSH_TEST_DIR"
-          chmod 600 "$SSH_TEST_DIR/authorized_keys" "$SSH_TEST_DIR/test_key" "$SSH_TEST_DIR/test_key.pub" "$SSH_TEST_DIR/host_key"
+          chmod 600 "$SSH_TEST_DIR/test_key" "$SSH_TEST_DIR/test_key.pub" "$SSH_TEST_DIR/host_key"
           cat > "$SSH_TEST_DIR/sshd_config" <<EOF
           Port 22222
           ListenAddress 127.0.0.1
           HostKey $SSH_TEST_DIR/host_key
-          AuthorizedKeysFile $SSH_TEST_DIR/authorized_keys
+          AuthorizedKeysFile /home/$SSH_TEST_USER/.ssh/authorized_keys
           PasswordAuthentication no
           ChallengeResponseAuthentication no
           KbdInteractiveAuthentication no
