@@ -65,13 +65,16 @@ Config is stored under your OS user config directory (Linux typically `~/.config
 
 If you skip this step, running `claude-proxy` will start the init flow automatically when no profiles exist.
 
-### 2) Run `claude` through the proxy
+### 2) Browse Claude Code history
 
 ```bash
 claude-proxy
 ```
 
-If you have multiple profiles:
+This opens the TUI. Press Enter to open the selected session in Claude Code
+through the SSH proxy (and apply the optional exe patch if enabled).
+
+If you have multiple profiles, select one:
 
 ```bash
 claude-proxy <profile>
@@ -80,13 +83,13 @@ claude-proxy <profile>
 ### 3) Run any command through the proxy
 
 ```bash
-claude-proxy <profile> -- <cmd> [args...]
+claude-proxy run <profile> -- <cmd> [args...]
 ```
 
 Example:
 
 ```bash
-claude-proxy pdx -- curl https://example.com
+claude-proxy run pdx -- curl https://example.com
 ```
 
 ### Optional: patch the target executable before run
@@ -111,6 +114,76 @@ Built-in policySettings patch (length-preserving by replacing a statement inside
 ```bash
 claude-proxy --exe-patch-policy-settings --exe-patch-preview -- claude
 ```
+
+## Claude Code history
+
+Browse Claude Code history in an interactive terminal UI:
+
+```bash
+claude-proxy tui
+# or
+claude-proxy history tui
+```
+
+If you have multiple proxy profiles:
+
+```bash
+claude-proxy tui --profile <profile>
+```
+
+Default data dir is `~/.claude`. You can override it with:
+
+```bash
+claude-proxy history --claude-dir /path/to/.claude tui
+```
+
+Controls:
+
+- Navigation: Up/Down, PageUp/PageDown
+- Switch pane: Tab / Left / Right
+- Search: `/` then type, Enter apply, Esc cancel
+- Open: Enter (opens in Claude Code and sets cwd)
+- Refresh: `r`
+- Quit: `q`
+- In-app update: `Ctrl+U` (when an update is available)
+
+List sessions as JSON:
+
+```bash
+claude-proxy history list --pretty
+```
+
+Print a full session by id:
+
+```bash
+claude-proxy history show <session-id>
+```
+
+Open a session directly in Claude Code:
+
+```bash
+claude-proxy history open <session-id>
+```
+
+If `claude` is not in PATH:
+
+```bash
+claude-proxy history --claude-path /path/to/claude tui
+```
+
+## Upgrade
+
+Upgrade from GitHub Releases:
+
+```bash
+claude-proxy upgrade
+```
+
+Optional flags:
+
+- `--repo owner/name` (override GitHub repo)
+- `--version vX.Y.Z` (install a specific version)
+- `--install-path /path/to/claude-proxy` (override install path)
 
 ## Long-lived instances (optional)
 

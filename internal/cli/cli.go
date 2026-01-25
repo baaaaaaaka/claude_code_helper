@@ -30,16 +30,14 @@ func newRootCmd() *cobra.Command {
 	opts := &rootOptions{}
 
 	cmd := &cobra.Command{
-		Use:           "claude-proxy [profile] -- [cmd args...]",
-		Short:         "Run a command through an SSH-backed local proxy",
+		Use:           "claude-proxy [profile]",
+		Short:         "Browse Claude Code history in a terminal UI",
 		SilenceErrors: false,
 		SilenceUsage:  true,
 		Version:       buildVersion(),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Default behavior: equivalent to `claude-proxy run`.
-			// If no profiles exist, start the init flow, then run the default command (`claude`).
 			_ = args
-			return runLike(cmd, opts, true)
+			return runDefaultTui(cmd, opts)
 		},
 	}
 
@@ -55,7 +53,10 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(
 		newInitCmd(opts),
 		newRunCmd(opts),
+		newTuiCmd(opts),
 		newProxyCmd(opts),
+		newUpgradeCmd(opts),
+		newHistoryCmd(opts),
 	)
 
 	return cmd

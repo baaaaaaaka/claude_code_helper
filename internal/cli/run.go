@@ -72,50 +72,12 @@ func runLike(cmd *cobra.Command, root *rootOptions, autoInit bool) error {
 		return err
 	}
 
-	cfg, err := store.Load()
+	profile, cfg, err := ensureProfile(ctx, store, profileRef, autoInit, cmd.OutOrStdout())
 	if err != nil {
 		return err
 	}
 
-	var created *config.Profile
-	if len(cfg.Profiles) == 0 && autoInit {
-		p, err := initProfileInteractive(ctx, store)
-		if err != nil {
-			return err
-		}
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Saved profile %q (%s)\n", p.Name, p.ID)
-		created = &p
-
-		// Reload to pick up any store defaults/migrations.
-		cfg, err = store.Load()
-		if err != nil {
-			return err
-		}
-	}
-
-	var profile config.Profile
-	if created != nil && profileRef == "" {
-		profile = *created
-	} else {
-		p, err := selectProfile(cfg, profileRef)
-		if err != nil {
-			if created != nil {
-				// If the user passed a "profile" arg before init existed, don't fail; run using the newly created profile.
-				profile = *created
-			} else {
-				return err
-			}
-		} else {
-			profile = p
-		}
-	}
-
-	hc := manager.HealthClient{Timeout: 1 * time.Second}
-	if inst := manager.FindReusableInstance(cfg.Instances, profile.ID, hc); inst != nil {
-		return runWithExistingInstance(ctx, hc, *inst, after, patchOutcome)
-	}
-
-	return runWithNewStack(ctx, store, profile, after, patchOutcome)
+	return runWithProfile(ctx, store, profile, cfg.Instances, after, patchOutcome)
 }
 
 func selectProfile(cfg config.Config, ref string) (config.Profile, error) {
@@ -135,13 +97,35 @@ func selectProfile(cfg config.Config, ref string) (config.Profile, error) {
 }
 
 func runWithExistingInstance(ctx context.Context, hc manager.HealthClient, inst config.Instance, cmdArgs []string, patchOutcome *patchOutcome) error {
+	return runWithExistingInstanceOptions(ctx, hc, inst, cmdArgs, patchOutcome, runTargetOptions{})
+}
+
+func runWithExistingInstanceOptions(
+	ctx context.Context,
+	hc manager.HealthClient,
+	inst config.Instance,
+	cmdArgs []string,
+	patchOutcome *patchOutcome,
+	opts runTargetOptions,
+) error {
 	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", inst.HTTPPort)
-	return runTargetSupervised(ctx, cmdArgs, proxyURL, func() error {
+	return runTargetSupervisedWithOptions(ctx, cmdArgs, proxyURL, func() error {
 		return hc.CheckHTTPProxy(inst.HTTPPort, inst.ID)
-	}, patchOutcome, nil)
+	}, patchOutcome, nil, opts)
 }
 
 func runWithNewStack(ctx context.Context, store *config.Store, profile config.Profile, cmdArgs []string, patchOutcome *patchOutcome) error {
+	return runWithNewStackOptions(ctx, store, profile, cmdArgs, patchOutcome, runTargetOptions{})
+}
+
+func runWithNewStackOptions(
+	ctx context.Context,
+	store *config.Store,
+	profile config.Profile,
+	cmdArgs []string,
+	patchOutcome *patchOutcome,
+	opts runTargetOptions,
+) error {
 	instanceID, err := ids.New()
 	if err != nil {
 		return err
@@ -190,9 +174,41 @@ func runWithNewStack(ctx context.Context, store *config.Store, profile config.Pr
 	}
 
 	hc := manager.HealthClient{Timeout: 1 * time.Second}
-	return runTargetSupervised(ctx, cmdArgs, proxyURL, func() error {
+	return runTargetSupervisedWithOptions(ctx, cmdArgs, proxyURL, func() error {
 		return hc.CheckHTTPProxy(st.HTTPPort, instanceID)
-	}, patchOutcome, st.Fatal())
+	}, patchOutcome, st.Fatal(), opts)
+}
+
+func runWithProfile(
+	ctx context.Context,
+	store *config.Store,
+	profile config.Profile,
+	instances []config.Instance,
+	cmdArgs []string,
+	patchOutcome *patchOutcome,
+) error {
+	return runWithProfileOptions(ctx, store, profile, instances, cmdArgs, patchOutcome, runTargetOptions{})
+}
+
+func runWithProfileOptions(
+	ctx context.Context,
+	store *config.Store,
+	profile config.Profile,
+	instances []config.Instance,
+	cmdArgs []string,
+	patchOutcome *patchOutcome,
+	opts runTargetOptions,
+) error {
+	hc := manager.HealthClient{Timeout: 1 * time.Second}
+	if inst := manager.FindReusableInstance(instances, profile.ID, hc); inst != nil {
+		return runWithExistingInstanceOptions(ctx, hc, *inst, cmdArgs, patchOutcome, opts)
+	}
+	return runWithNewStackOptions(ctx, store, profile, cmdArgs, patchOutcome, opts)
+}
+
+type runTargetOptions struct {
+	Cwd      string
+	ExtraEnv []string
 }
 
 func runTargetSupervised(
@@ -203,10 +219,22 @@ func runTargetSupervised(
 	patchOutcome *patchOutcome,
 	fatalCh <-chan error,
 ) error {
+	return runTargetSupervisedWithOptions(ctx, cmdArgs, proxyURL, healthCheck, patchOutcome, fatalCh, runTargetOptions{})
+}
+
+func runTargetSupervisedWithOptions(
+	ctx context.Context,
+	cmdArgs []string,
+	proxyURL string,
+	healthCheck func() error,
+	patchOutcome *patchOutcome,
+	fatalCh <-chan error,
+	opts runTargetOptions,
+) error {
 	if len(cmdArgs) == 0 {
 		return fmt.Errorf("missing command")
 	}
-	return runTargetWithFallback(ctx, cmdArgs, proxyURL, healthCheck, patchOutcome, fatalCh)
+	return runTargetWithFallbackWithOptions(ctx, cmdArgs, proxyURL, healthCheck, patchOutcome, fatalCh, opts)
 }
 
 func terminateProcess(p *os.Process, grace time.Duration) error {
@@ -263,12 +291,24 @@ func runTargetWithFallback(
 	patchOutcome *patchOutcome,
 	fatalCh <-chan error,
 ) error {
+	return runTargetWithFallbackWithOptions(ctx, cmdArgs, proxyURL, healthCheck, patchOutcome, fatalCh, runTargetOptions{})
+}
+
+func runTargetWithFallbackWithOptions(
+	ctx context.Context,
+	cmdArgs []string,
+	proxyURL string,
+	healthCheck func() error,
+	patchOutcome *patchOutcome,
+	fatalCh <-chan error,
+	opts runTargetOptions,
+) error {
 	attempt := 0
 	for {
 		attempt++
 		stdoutBuf := &limitedBuffer{max: maxOutputCaptureBytes}
 		stderrBuf := &limitedBuffer{max: maxOutputCaptureBytes}
-		err := runTargetOnce(ctx, cmdArgs, proxyURL, healthCheck, fatalCh, stdoutBuf, stderrBuf)
+		err := runTargetOnceWithOptions(ctx, cmdArgs, proxyURL, healthCheck, fatalCh, stdoutBuf, stderrBuf, opts)
 		if err == nil {
 			if patchOutcome != nil && patchOutcome.Applied {
 				cleanupBackup(patchOutcome)
@@ -302,8 +342,28 @@ func runTargetOnce(
 	stdoutBuf io.Writer,
 	stderrBuf io.Writer,
 ) error {
+	return runTargetOnceWithOptions(ctx, cmdArgs, proxyURL, healthCheck, fatalCh, stdoutBuf, stderrBuf, runTargetOptions{})
+}
+
+func runTargetOnceWithOptions(
+	ctx context.Context,
+	cmdArgs []string,
+	proxyURL string,
+	healthCheck func() error,
+	fatalCh <-chan error,
+	stdoutBuf io.Writer,
+	stderrBuf io.Writer,
+	opts runTargetOptions,
+) error {
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
-	cmd.Env = env.WithProxy(os.Environ(), proxyURL)
+	if opts.Cwd != "" {
+		cmd.Dir = opts.Cwd
+	}
+	envVars := env.WithProxy(os.Environ(), proxyURL)
+	if len(opts.ExtraEnv) > 0 {
+		envVars = append(envVars, opts.ExtraEnv...)
+	}
+	cmd.Env = envVars
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = io.MultiWriter(os.Stdout, stdoutBuf)
 	cmd.Stderr = io.MultiWriter(os.Stderr, stderrBuf)
