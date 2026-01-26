@@ -52,7 +52,11 @@ func runInstallPs1(t *testing.T, apiFail bool, pathAlreadySet bool) {
 	installDir := t.TempDir()
 	tempDir := t.TempDir()
 	profilePath := filepath.Join(t.TempDir(), "profile.ps1")
-	pathValue := os.Getenv("Path")
+	basePath := os.Getenv("SystemRoot")
+	if basePath == "" {
+		basePath = `C:\Windows`
+	}
+	pathValue := filepath.Join(basePath, "System32")
 	if pathAlreadySet {
 		pathValue = installDir + ";" + pathValue
 	}
