@@ -122,6 +122,11 @@ func newHistoryOpenCmd(root *rootOptions, claudeDir *string, claudePath *string,
 				return err
 			}
 
+			resolvedClaudePath, err := ensureClaudeInstalled(cmd.Context(), *claudePath, cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+
 			projects, err := claudehistory.DiscoverProjects(*claudeDir)
 			if err != nil && len(projects) == 0 {
 				return err
@@ -139,7 +144,7 @@ func newHistoryOpenCmd(root *rootOptions, claudeDir *string, claudePath *string,
 				cfg.Instances,
 				session,
 				project,
-				*claudePath,
+				resolvedClaudePath,
 				*claudeDir,
 				cmd.ErrOrStderr(),
 			)
@@ -158,6 +163,11 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 	if err != nil {
 		return err
 	}
+	resolvedClaudePath, err := ensureClaudeInstalled(ctx, claudePath, cmd.ErrOrStderr())
+	if err != nil {
+		return err
+	}
+	claudePath = resolvedClaudePath
 
 	selection, err := tui.SelectSession(ctx, tui.Options{
 		LoadProjects: func(ctx context.Context) ([]claudehistory.Project, error) {

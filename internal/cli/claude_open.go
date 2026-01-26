@@ -60,6 +60,11 @@ func runClaudeSessionWithProxyForProfile(
 	claudeDir string,
 	log io.Writer,
 ) error {
+	claudePathResolved, err := ensureClaudeInstalled(ctx, claudePath, log)
+	if err != nil {
+		return err
+	}
+	claudePath = claudePathResolved
 	path, args, cwd, err := buildClaudeResumeCommand(claudePath, session, project)
 	if err != nil {
 		return err
