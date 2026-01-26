@@ -27,11 +27,16 @@ type exePatchOptions struct {
 }
 
 type patchOutcome struct {
-	Applied      bool
-	TargetPath   string
-	BackupPath   string
-	SpecsHash    string
-	HistoryStore *config.PatchHistoryStore
+	Applied        bool
+	TargetPath     string
+	BackupPath     string
+	SpecsHash      string
+	HistoryStore   *config.PatchHistoryStore
+	TargetSHA256   string
+	TargetVersion  string
+	IsClaude       bool
+	AlreadyPatched bool
+	ConfigPath     string
 }
 
 func (o exePatchOptions) enabled() bool {
@@ -197,6 +202,34 @@ func maybePatchExecutable(cmdArgs []string, opts exePatchOptions, configPath str
 		return nil, err
 	}
 
+	isClaude := isClaudeExecutable(cmdArgs[0], resolvedPath)
+	targetVersion := ""
+	targetSHA := ""
+	if isClaude {
+		targetVersion = resolveClaudeVersion(resolvedPath)
+		if targetVersion == "" {
+			if sha, err := hashFileSHA256(resolvedPath); err == nil {
+				targetSHA = sha
+			}
+		}
+		if skip, skipErr := shouldSkipPatchFailure(configPath, currentProxyVersion(), targetVersion, targetSHA); skipErr == nil && skip {
+			if targetVersion != "" {
+				_, _ = fmt.Fprintf(log, "exe-patch: skip (previous failure) for claude %s with proxy %s\n", targetVersion, currentProxyVersion())
+			} else {
+				_, _ = fmt.Fprintf(log, "exe-patch: skip (previous failure) for claude binary with proxy %s\n", currentProxyVersion())
+			}
+			return &patchOutcome{
+				TargetPath:    resolvedPath,
+				TargetVersion: targetVersion,
+				TargetSHA256:  targetSHA,
+				IsClaude:      true,
+				ConfigPath:    configPath,
+			}, nil
+		} else if skipErr != nil {
+			_, _ = fmt.Fprintf(log, "exe-patch: failed to read patch failure config: %v\n", skipErr)
+		}
+	}
+
 	historyStore, err := config.NewPatchHistoryStore(configPath)
 	if err != nil {
 		return nil, err
@@ -205,6 +238,30 @@ func maybePatchExecutable(cmdArgs []string, opts exePatchOptions, configPath str
 	outcome, err := patchExecutable(resolvedPath, specs, log, opts.preview, opts.dryRun, historyStore)
 	if err != nil {
 		return nil, err
+	}
+	if outcome != nil {
+		outcome.TargetVersion = targetVersion
+		if outcome.TargetSHA256 == "" {
+			outcome.TargetSHA256 = targetSHA
+		}
+		outcome.IsClaude = isClaude
+		outcome.ConfigPath = configPath
+		if outcome.Applied && outcome.IsClaude {
+			out, probeErr := runClaudeProbe(resolvedPath, "--version")
+			if probeErr != nil {
+				_, _ = fmt.Fprintln(log, "exe-patch: detected startup failure; restoring backup")
+				if restoreErr := restoreExecutableFromBackup(outcome); restoreErr != nil {
+					return nil, fmt.Errorf("restore patched executable: %w", restoreErr)
+				}
+				if historyErr := cleanupPatchHistory(outcome); historyErr != nil {
+					return nil, fmt.Errorf("cleanup patch history: %w", historyErr)
+				}
+				if recordErr := recordPatchFailure(configPath, outcome, formatFailureReason(probeErr, out)); recordErr != nil {
+					_, _ = fmt.Fprintf(log, "exe-patch: failed to record patch failure: %v\n", recordErr)
+				}
+				return nil, nil
+			}
+		}
 	}
 	return outcome, nil
 }
@@ -240,10 +297,15 @@ func patchExecutable(path string, specs []exePatchSpec, log io.Writer, preview b
 		}
 
 		currentHash := hashBytes(data)
+		outcome.TargetSHA256 = currentHash
 		if history.IsPatched(path, specsHash, currentHash) {
+			outcome.AlreadyPatched = true
 			logAlreadyPatched(log, path)
 			return outcome, nil
 		}
+	}
+	if outcome.TargetSHA256 == "" {
+		outcome.TargetSHA256 = hashBytes(data)
 	}
 
 	patched, stats, err := applyExePatches(data, specs, log, preview)

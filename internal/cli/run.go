@@ -211,7 +211,9 @@ type runTargetOptions struct {
 	ExtraEnv []string
 	UseProxy bool
 	// PreserveTTY keeps stdout/stderr attached to the terminal for interactive CLIs.
-	PreserveTTY bool
+	PreserveTTY    bool
+	YoloEnabled    bool
+	OnYoloFallback func() error
 }
 
 func defaultRunTargetOptions() runTargetOptions {
@@ -311,6 +313,8 @@ func runTargetWithFallbackWithOptions(
 	opts runTargetOptions,
 ) error {
 	attempt := 0
+	yoloRetried := false
+	patchChecked := false
 	for {
 		attempt++
 		stdoutBuf := &limitedBuffer{max: maxOutputCaptureBytes}
@@ -322,15 +326,28 @@ func runTargetWithFallbackWithOptions(
 			}
 			return nil
 		}
-		if patchOutcome != nil && patchOutcome.Applied && attempt == 1 {
-			out := stdoutBuf.String() + stderrBuf.String()
-			if isPatchedBinaryFailure(err, out) {
+		out := stdoutBuf.String() + stderrBuf.String()
+		if opts.YoloEnabled && !yoloRetried && isYoloFailure(err, out) {
+			yoloRetried = true
+			if opts.OnYoloFallback != nil {
+				_ = opts.OnYoloFallback()
+			}
+			cmdArgs = stripYoloArgs(cmdArgs)
+			opts.YoloEnabled = false
+			continue
+		}
+		if patchOutcome != nil && patchOutcome.Applied && !patchChecked {
+			patchChecked = true
+			if isPatchedBinaryStartupFailure(err, out) {
 				_, _ = fmt.Fprintln(os.Stderr, "exe-patch: detected startup failure; restoring backup")
 				if restoreErr := restoreExecutableFromBackup(patchOutcome); restoreErr != nil {
 					return fmt.Errorf("restore patched executable: %w", restoreErr)
 				}
 				if historyErr := cleanupPatchHistory(patchOutcome); historyErr != nil {
 					return fmt.Errorf("cleanup patch history: %w", historyErr)
+				}
+				if recordErr := recordPatchFailure(patchOutcome.ConfigPath, patchOutcome, formatFailureReason(err, out)); recordErr != nil {
+					_, _ = fmt.Fprintf(os.Stderr, "exe-patch: failed to record patch failure: %v\n", recordErr)
 				}
 				patchOutcome = nil
 				continue

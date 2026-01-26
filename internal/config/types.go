@@ -5,11 +5,21 @@ import "time"
 const CurrentVersion = 1
 
 type Config struct {
-	Version      int        `json:"version"`
-	ProxyEnabled *bool      `json:"proxyEnabled,omitempty"`
-	YoloEnabled  *bool      `json:"yoloEnabled,omitempty"`
-	Profiles     []Profile  `json:"profiles"`
-	Instances    []Instance `json:"instances"`
+	Version       int            `json:"version"`
+	ProxyEnabled  *bool          `json:"proxyEnabled,omitempty"`
+	YoloEnabled   *bool          `json:"yoloEnabled,omitempty"`
+	Profiles      []Profile      `json:"profiles"`
+	Instances     []Instance     `json:"instances"`
+	PatchFailures []PatchFailure `json:"patchFailures,omitempty"`
+}
+
+type PatchFailure struct {
+	ProxyVersion  string    `json:"proxyVersion"`
+	ClaudeVersion string    `json:"claudeVersion,omitempty"`
+	ClaudePath    string    `json:"claudePath,omitempty"`
+	ClaudeSHA256  string    `json:"claudeSha256,omitempty"`
+	FailedAt      time.Time `json:"failedAt"`
+	Reason        string    `json:"reason,omitempty"`
 }
 
 type Profile struct {

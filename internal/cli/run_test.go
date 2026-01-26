@@ -104,6 +104,36 @@ func TestTerminateProcess(t *testing.T) {
 	}
 }
 
+func TestRunTargetWithFallbackDisablesYolo(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script test on windows")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "yolo.sh")
+	content := "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"--permission-mode\" ]; then\n    echo \"unknown flag: --permission-mode\" >&2\n    exit 2\n  fi\n done\nexit 0\n"
+	if err := os.WriteFile(script, []byte(content), 0o700); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	disabled := false
+	opts := runTargetOptions{
+		UseProxy:    false,
+		PreserveTTY: false,
+		YoloEnabled: true,
+		OnYoloFallback: func() error {
+			disabled = true
+			return nil
+		},
+	}
+	cmdArgs := []string{script, "--permission-mode", "bypassPermissions"}
+	if err := runTargetWithFallbackWithOptions(context.Background(), cmdArgs, "", nil, nil, nil, opts); err != nil {
+		t.Fatalf("runTargetWithFallbackWithOptions error: %v", err)
+	}
+	if !disabled {
+		t.Fatalf("expected yolo to be disabled on failure")
+	}
+}
+
 func TestLimitedBufferWrite(t *testing.T) {
 	buf := &limitedBuffer{max: 5}
 	if _, err := buf.Write([]byte("abc")); err != nil {

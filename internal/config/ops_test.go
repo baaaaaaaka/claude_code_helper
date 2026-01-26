@@ -56,3 +56,37 @@ func TestConfigInstanceOps(t *testing.T) {
 		t.Fatalf("expected p1 instances removed, got %#v", got)
 	}
 }
+
+func TestConfigPatchFailureOps(t *testing.T) {
+	cfg := Config{Version: CurrentVersion}
+	entry := PatchFailure{
+		ProxyVersion:  "v1.2.3",
+		ClaudeVersion: "2.1.19",
+		ClaudeSHA256:  "abc",
+		ClaudePath:    "/tmp/claude",
+	}
+
+	if cfg.HasPatchFailure("v1.2.3", "2.1.19", "") {
+		t.Fatalf("expected no patch failure initially")
+	}
+	cfg.UpsertPatchFailure(entry)
+	if !cfg.HasPatchFailure("v1.2.3", "2.1.19", "") {
+		t.Fatalf("expected patch failure by version")
+	}
+	if !cfg.HasPatchFailure("v1.2.3", "", "abc") {
+		t.Fatalf("expected patch failure by sha fallback")
+	}
+	if cfg.HasPatchFailure("v1.2.4", "2.1.19", "") {
+		t.Fatalf("expected mismatch by proxy version")
+	}
+
+	updated := entry
+	updated.Reason = "failed"
+	cfg.UpsertPatchFailure(updated)
+	if len(cfg.PatchFailures) != 1 {
+		t.Fatalf("expected 1 patch failure, got %d", len(cfg.PatchFailures))
+	}
+	if cfg.PatchFailures[0].Reason != "failed" {
+		t.Fatalf("expected updated patch failure, got %#v", cfg.PatchFailures[0])
+	}
+}

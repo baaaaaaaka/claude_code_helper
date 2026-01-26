@@ -84,6 +84,11 @@ func runClaudeSession(
 		return err
 	}
 	claudePath = claudePathResolved
+
+	if useYolo && !supportsYoloFlag(claudePath) {
+		_ = persistYoloEnabled(store, false)
+		useYolo = false
+	}
 	path, args, cwd, err := buildClaudeResumeCommand(claudePath, session, project, useYolo)
 	if err != nil {
 		return err
@@ -108,6 +113,10 @@ func runClaudeSession(
 		ExtraEnv:    extraEnv,
 		UseProxy:    useProxy,
 		PreserveTTY: true,
+		YoloEnabled: useYolo,
+		OnYoloFallback: func() error {
+			return persistYoloEnabled(store, false)
+		},
 	}
 	if useProxy {
 		if profile == nil {
@@ -141,6 +150,10 @@ func runClaudeNewSession(
 		return err
 	}
 	claudePath = claudePathResolved
+	if useYolo && !supportsYoloFlag(claudePath) {
+		_ = persistYoloEnabled(store, false)
+		useYolo = false
+	}
 	cmdArgs := []string{claudePath}
 	if useYolo {
 		cmdArgs = append(cmdArgs, "--permission-mode", "bypassPermissions")
@@ -164,6 +177,10 @@ func runClaudeNewSession(
 		ExtraEnv:    extraEnv,
 		UseProxy:    useProxy,
 		PreserveTTY: true,
+		YoloEnabled: useYolo,
+		OnYoloFallback: func() error {
+			return persistYoloEnabled(store, false)
+		},
 	}
 	if useProxy {
 		if profile == nil {
