@@ -24,6 +24,10 @@ EOF
 repo="${CLAUDE_PROXY_REPO:-baaaaaaaka/claude_code_helper}"
 version="${CLAUDE_PROXY_VERSION:-latest}"
 install_dir="${CLAUDE_PROXY_INSTALL_DIR:-${HOME:-}/.local/bin}"
+api_base="${CLAUDE_PROXY_API_BASE:-https://api.github.com}"
+release_base="${CLAUDE_PROXY_RELEASE_BASE:-https://github.com}"
+api_base="${api_base%/}"
+release_base="${release_base%/}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -89,11 +93,60 @@ http_get() {
   return 1
 }
 
+get_latest_tag_from_redirect() {
+  url="$release_base/$repo/releases/latest"
+  tag=""
+
+  if have_cmd curl; then
+    if final="$(curl -fsSL -o /dev/null -w '%{url_effective}' "$url")"; then
+      tag="${final##*/}"
+      if [ -n "${tag:-}" ] && [ "$tag" != "latest" ]; then
+        printf "%s" "$tag"
+        return 0
+      fi
+    fi
+  fi
+
+  if have_cmd wget; then
+    headers="$(wget -qO /dev/null --max-redirect=0 --server-response "$url" 2>&1 || true)"
+    if [ -n "${headers:-}" ]; then
+      if have_cmd awk; then
+        location="$(printf "%s" "$headers" | awk '/^  Location: /{print $2}' | head -n 1)"
+      elif have_cmd sed; then
+        location="$(printf "%s" "$headers" | sed -n 's/^  Location: //p' | head -n 1)"
+      else
+        location=""
+      fi
+      location="$(printf "%s" "$location" | tr -d '\r')"
+      case "$location" in
+        http*) final="$location" ;;
+        /*) final="https://github.com$location" ;;
+        *) final="" ;;
+      esac
+      tag="${final##*/}"
+      if [ -n "${tag:-}" ] && [ "$tag" != "latest" ]; then
+        printf "%s" "$tag"
+        return 0
+      fi
+    fi
+  fi
+
+  return 1
+}
+
 get_latest_tag() {
   tmp="$1"
-  http_get "https://api.github.com/repos/$repo/releases/latest" "$tmp"
-  if have_cmd sed; then
-    tag="$(sed -n 's/.*\"tag_name\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' "$tmp" | head -n 1 || true)"
+  tag=""
+  if http_get "$api_base/repos/$repo/releases/latest" "$tmp"; then
+    if have_cmd sed; then
+      tag="$(sed -n 's/.*\"tag_name\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' "$tmp" | head -n 1 || true)"
+    fi
+  fi
+  if [ -n "${tag:-}" ]; then
+    printf "%s" "$tag"
+    return 0
+  fi
+  if tag="$(get_latest_tag_from_redirect)"; then
     if [ -n "${tag:-}" ]; then
       printf "%s" "$tag"
       return 0
@@ -113,7 +166,8 @@ fi
 ver_nov="${version#v}"
 asset="claude-proxy_${ver_nov}_${os}_${arch}"
 url="https://github.com/$repo/releases/download/$version/$asset"
-checksums_url="https://github.com/$repo/releases/download/$version/checksums.txt"
+url="$release_base/$repo/releases/download/$version/$asset"
+checksums_url="$release_base/$repo/releases/download/$version/checksums.txt"
 
 bin_tmp="$tmpdir/$asset"
 http_get "$url" "$bin_tmp"

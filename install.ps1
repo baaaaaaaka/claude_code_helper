@@ -13,11 +13,42 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+$apiBase = $env:CLAUDE_PROXY_API_BASE
+if ([string]::IsNullOrWhiteSpace($apiBase)) {
+  $apiBase = "https://api.github.com"
+}
+$apiBase = $apiBase.TrimEnd("/")
+
+$releaseBase = $env:CLAUDE_PROXY_RELEASE_BASE
+if ([string]::IsNullOrWhiteSpace($releaseBase)) {
+  $releaseBase = "https://github.com"
+}
+$releaseBase = $releaseBase.TrimEnd("/")
+
 function Get-LatestTag([string]$repo) {
-  $uri = "https://api.github.com/repos/$repo/releases/latest"
-  $resp = Invoke-RestMethod -Uri $uri -Headers @{ "User-Agent" = "claude-proxy-install" }
-  if (-not $resp.tag_name) { throw "Failed to determine latest tag from $uri" }
-  return [string]$resp.tag_name
+  $apiUri = "$apiBase/repos/$repo/releases/latest"
+  try {
+    $resp = Invoke-RestMethod -Uri $apiUri -Headers @{ "User-Agent" = "claude-proxy-install" }
+    if ($resp.tag_name) { return [string]$resp.tag_name }
+  } catch {
+    # Fall back to parsing the redirect URL below.
+  }
+
+  $latestUri = "$releaseBase/$repo/releases/latest"
+  try {
+    $resp = Invoke-WebRequest -Uri $latestUri -Headers @{ "User-Agent" = "claude-proxy-install" } -UseBasicParsing
+    $finalUri = $resp.BaseResponse.ResponseUri
+    if ($finalUri -and $finalUri.AbsolutePath) {
+      $tag = ($finalUri.AbsolutePath.TrimEnd("/") -split "/")[-1]
+      if (-not [string]::IsNullOrWhiteSpace($tag) -and $tag -ne "latest") {
+        return [string]$tag
+      }
+    }
+  } catch {
+    throw "Failed to determine latest tag from $latestUri"
+  }
+
+  throw "Failed to determine latest tag from $apiUri"
 }
 
 $tag = $Version
@@ -28,8 +59,8 @@ if ([string]::IsNullOrWhiteSpace($tag) -or $tag -eq "latest") {
 $verNoV = $tag.TrimStart("v")
 $arch = "amd64"
 $asset = "claude-proxy_${verNoV}_windows_${arch}.exe"
-$url = "https://github.com/$Repo/releases/download/$tag/$asset"
-$checksumsUrl = "https://github.com/$Repo/releases/download/$tag/checksums.txt"
+$url = "$releaseBase/$Repo/releases/download/$tag/$asset"
+$checksumsUrl = "$releaseBase/$Repo/releases/download/$tag/checksums.txt"
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 

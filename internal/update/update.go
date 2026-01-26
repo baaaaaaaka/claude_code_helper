@@ -240,6 +240,20 @@ func normalizeVersion(v string) string {
 }
 
 func fetchLatestRelease(ctx context.Context, repo string, timeout time.Duration) (string, string, error) {
+	tag, ver, err := fetchLatestReleaseAPI(ctx, repo, timeout)
+	if err == nil {
+		return tag, ver, nil
+	}
+
+	tag, ver, redirectErr := fetchLatestReleaseRedirect(ctx, repo, timeout)
+	if redirectErr == nil {
+		return tag, ver, nil
+	}
+
+	return "", "", fmt.Errorf("release lookup failed: %v; redirect fallback failed: %v", err, redirectErr)
+}
+
+func fetchLatestReleaseAPI(ctx context.Context, repo string, timeout time.Duration) (string, string, error) {
 	url := fmt.Sprintf("%s/repos/%s/releases/latest", githubAPIBase, repo)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -273,6 +287,49 @@ func fetchLatestRelease(ctx context.Context, repo string, timeout time.Duration)
 	}
 	ver := strings.TrimPrefix(tag, "v")
 	return tag, ver, nil
+}
+
+func fetchLatestReleaseRedirect(ctx context.Context, repo string, timeout time.Duration) (string, string, error) {
+	url := fmt.Sprintf("%s/%s/releases/latest", githubReleaseBase, repo)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("User-Agent", "claude-proxy")
+	req.Header.Set("Accept", "text/html")
+
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		return "", "", fmt.Errorf("release redirect lookup failed: %s", resp.Status)
+	}
+
+	tag := latestTagFromPath(resp.Request.URL.Path)
+	if tag == "" || strings.EqualFold(tag, "latest") {
+		return "", "", fmt.Errorf("missing tag in redirect URL")
+	}
+	ver := strings.TrimPrefix(tag, "v")
+	if ver == "" {
+		return "", "", fmt.Errorf("invalid latest tag %q", tag)
+	}
+	return tag, ver, nil
+}
+
+func latestTagFromPath(path string) string {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	for i := len(parts) - 2; i >= 0; i-- {
+		if parts[i] == "tag" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	if len(parts) > 0 {
+		return parts[len(parts)-1]
+	}
+	return ""
 }
 
 func assetName(version, goos, goarch string) (string, error) {

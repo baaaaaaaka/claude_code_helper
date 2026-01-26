@@ -16,6 +16,7 @@ import (
 )
 
 func TestCheckForUpdateAvailable(t *testing.T) {
+	requireRuntimeAsset(t)
 	tag := "v1.2.3"
 	ver := "1.2.3"
 	asset, err := assetName(ver, runtime.GOOS, runtime.GOARCH)
@@ -46,6 +47,31 @@ func TestCheckForUpdateAvailable(t *testing.T) {
 	}
 }
 
+func TestCheckForUpdateFallbackRedirect(t *testing.T) {
+	requireRuntimeAsset(t)
+	tag := "v1.4.0"
+	ver := "1.4.0"
+
+	server := newRedirectReleaseServer(t, "owner/name", tag)
+	defer server.Close()
+
+	restore := overrideGitHubBases(server.URL)
+	defer restore()
+
+	st := CheckForUpdate(context.Background(), CheckOptions{
+		Repo:             "owner/name",
+		InstalledVersion: "1.0.0",
+		Timeout:          time.Second,
+	})
+
+	if !st.Supported {
+		t.Fatalf("expected supported update check, got error=%q", st.Error)
+	}
+	if st.RemoteVersion != ver {
+		t.Fatalf("expected remote version %s, got %s", ver, st.RemoteVersion)
+	}
+}
+
 func TestCheckForUpdateRejectsDev(t *testing.T) {
 	st := CheckForUpdate(context.Background(), CheckOptions{InstalledVersion: "dev"})
 	if st.Supported {
@@ -54,6 +80,7 @@ func TestCheckForUpdateRejectsDev(t *testing.T) {
 }
 
 func TestPerformUpdateExplicitVersion(t *testing.T) {
+	requireRuntimeAsset(t)
 	tag := "v1.2.3"
 	ver := "1.2.3"
 	asset, err := assetName(ver, runtime.GOOS, runtime.GOARCH)
@@ -96,6 +123,7 @@ func TestPerformUpdateExplicitVersion(t *testing.T) {
 }
 
 func TestPerformUpdateChecksumMismatch(t *testing.T) {
+	requireRuntimeAsset(t)
 	tag := "v2.0.0"
 	ver := "2.0.0"
 	asset, err := assetName(ver, runtime.GOOS, runtime.GOARCH)
@@ -123,6 +151,7 @@ func TestPerformUpdateChecksumMismatch(t *testing.T) {
 }
 
 func TestPerformUpdateLatest(t *testing.T) {
+	requireRuntimeAsset(t)
 	tag := "v3.1.0"
 	ver := "3.1.0"
 	asset, err := assetName(ver, runtime.GOOS, runtime.GOARCH)
@@ -158,6 +187,13 @@ func TestAssetNameErrors(t *testing.T) {
 	}
 }
 
+func requireRuntimeAsset(t *testing.T) {
+	t.Helper()
+	if _, err := assetName("1.0.0", runtime.GOOS, runtime.GOARCH); err != nil {
+		t.Skipf("runtime asset unsupported: %v", err)
+	}
+}
+
 func newReleaseServer(t *testing.T, tag, asset string, payload []byte) *httptest.Server {
 	sum := sha256.Sum256(payload)
 	checksum := hex.EncodeToString(sum[:])
@@ -177,6 +213,26 @@ func newReleaseServerWithChecksum(t *testing.T, tag, asset string, payload []byt
 		case strings.HasSuffix(r.URL.Path, "/"+asset) || strings.Contains(r.URL.Path, "/"+asset):
 			w.Header().Set("Content-Type", "application/octet-stream")
 			_, _ = w.Write(payload)
+		default:
+			http.NotFound(w, r)
+		}
+	}
+	return httptest.NewServer(http.HandlerFunc(handler))
+}
+
+func newRedirectReleaseServer(t *testing.T, repo, tag string) *httptest.Server {
+	t.Helper()
+	tagPath := "/" + repo + "/releases/tag/" + tag
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/repos/") && strings.Contains(r.URL.Path, "/releases/latest"):
+			http.Error(w, "api unavailable", http.StatusServiceUnavailable)
+		case strings.Contains(r.URL.Path, "/releases/latest"):
+			w.Header().Set("Location", tagPath)
+			w.WriteHeader(http.StatusFound)
+		case strings.Contains(r.URL.Path, tagPath):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
 		default:
 			http.NotFound(w, r)
 		}
