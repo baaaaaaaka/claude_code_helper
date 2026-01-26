@@ -8,10 +8,50 @@ Run `claude` (or any command) through an SSH-backed local proxy stack:
 
 This project is designed to ship as a **single binary** per OS/arch.
 
+## Quick start
+
+### 1) **Install**
+
+Linux / macOS:
+
+```bash
+sh -c 'url="https://raw.githubusercontent.com/baaaaaaaka/claude_code_helper/main/install.sh"; if command -v curl >/dev/null 2>&1; then curl -fsSL "$url" | sh; elif command -v wget >/dev/null 2>&1; then wget -qO- "$url" | sh; else echo "need curl or wget" >&2; exit 1; fi'
+```
+
+Windows (PowerShell):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iwr -useb https://raw.githubusercontent.com/baaaaaaaka/claude_code_helper/main/install.ps1 | iex"
+```
+
+The installer tries to add the install directory to PATH and adds an alias
+`clp` → `claude-proxy`. Open a new shell if the command is not found.
+
+### 2) **Run**
+
+```bash
+claude-proxy
+# or
+clp
+```
+
+On first run you'll be asked whether to use the SSH proxy. Choose **no** for
+direct connections. Choose **yes** to enter SSH host/port/user and let the
+tool create a dedicated key if needed. You can toggle proxy mode later with
+`Ctrl+P` in the TUI.
+
+### 3) Next steps
+
+- Press Enter to open a Claude Code session.
+- If you have multiple profiles, select one with `claude-proxy <profile>`.
+- Run any command through the proxy (requires a profile):
+  `claude-proxy run <profile> -- <cmd> [args...]`.
+- Example: `claude-proxy run pdx -- curl https://example.com`.
+
 ## Requirements (runtime)
 
 - `ssh` (OpenSSH client) is required
-- `ssh-keygen` is optional (only needed if you generate keys via `claude-proxy init`)
+- `ssh-keygen` is optional (only needed when proxy mode creates a dedicated key)
 
 Check your environment:
 
@@ -29,7 +69,9 @@ sh -c 'url="https://raw.githubusercontent.com/baaaaaaaka/claude_code_helper/main
 
 By default it installs to `~/.local/bin/claude-proxy`.
 
-If `~/.local/bin` is not on your PATH:
+The installer tries to add `~/.local/bin` to PATH and adds an alias
+`clp` → `claude-proxy`. Open a new shell if the command is not found.
+If you need to update PATH manually:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
@@ -53,68 +95,6 @@ Install a specific version:
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$u='https://raw.githubusercontent.com/baaaaaaaka/claude_code_helper/main/install.ps1'; $p=Join-Path $env:TEMP 'claude-proxy-install.ps1'; iwr -useb $u -OutFile $p; & $p -Version v0.0.2; Remove-Item -Force $p"
 ```
 
-## Quick start
-
-### 1) Create a profile (optional)
-
-```bash
-claude-proxy init
-```
-
-Config is stored under your OS user config directory (Linux typically `~/.config/claude-proxy/config.json`).
-
-If you skip this step, running `claude-proxy` will start the init flow automatically when no profiles exist.
-
-### 2) Browse Claude Code history
-
-```bash
-claude-proxy
-```
-
-This opens the TUI. Press Enter to open the selected session in Claude Code
-through the SSH proxy (and apply the optional exe patch if enabled).
-
-If you have multiple profiles, select one:
-
-```bash
-claude-proxy <profile>
-```
-
-### 3) Run any command through the proxy
-
-```bash
-claude-proxy run <profile> -- <cmd> [args...]
-```
-
-Example:
-
-```bash
-claude-proxy run pdx -- curl https://example.com
-```
-
-### Optional: patch the target executable before run
-
-You can apply 3-stage regex patches to the target executable before it starts (for example, the default `claude`):
-
-```bash
-claude-proxy \
-  --exe-patch-regex-1 '<stage-1>' \
-  --exe-patch-regex-2 '<stage-2>' \
-  --exe-patch-regex-3 '<stage-3>' \
-  --exe-patch-replace '<replacement>' \
-  -- claude
-```
-
-- Stage 1 selects candidate code blocks in the executable.
-- Stage 2 checks whether a stage 1 block should be patched (repeatable).
-- Stage 3 runs a regex replacement inside the stage 1 block (repeatable, supports `$1`-style expansions).
-
-Built-in policySettings patch (length-preserving by replacing a statement inside the block, prints before/after matches):
-
-```bash
-claude-proxy --exe-patch-policy-settings --exe-patch-preview -- claude
-```
-
 ## Claude Code history
 
 Browse Claude Code history in an interactive terminal UI:
@@ -124,6 +104,11 @@ claude-proxy tui
 # or
 claude-proxy history tui
 ```
+
+This opens the TUI. Press Enter to open the selected session in Claude Code
+using the current proxy mode (direct or SSH proxy). Toggle proxy mode with
+`Ctrl+P`; if proxy is enabled but not configured, you will be prompted to
+enter SSH host/port/user.
 
 If you have multiple proxy profiles:
 
@@ -139,13 +124,16 @@ claude-proxy history --claude-dir /path/to/.claude tui
 
 Controls:
 
-- Navigation: Up/Down, PageUp/PageDown
-- Switch pane: Tab / Left / Right
-- Search: `/` then type, Enter apply, Esc cancel
+- Navigation: Up/Down, PageUp/PageDown (also `j`/`k`)
+- Switch pane: Tab / Left / Right (also `h`/`l`)
+- Search: `/` then type, Enter apply, Esc cancel (`n`/`N` next/prev in preview)
 - Open: Enter (opens in Claude Code and sets cwd)
-- Refresh: `r`
-- Quit: `q`
+- Proxy mode: `Ctrl+P` toggle (status shows `Proxy: on/off`)
+- Refresh: `r` (or `Ctrl+R`)
+- Quit: `q`, `Esc`, `Ctrl+C`
 - In-app update: `Ctrl+U` (when an update is available)
+
+If the update check fails, the status bar shows the error.
 
 List sessions as JSON:
 
@@ -164,6 +152,9 @@ Open a session directly in Claude Code:
 ```bash
 claude-proxy history open <session-id>
 ```
+
+This uses the current proxy mode (direct or SSH proxy). If proxy mode is
+enabled but no profile exists, you will be prompted to configure SSH.
 
 If `claude` is not in PATH:
 
