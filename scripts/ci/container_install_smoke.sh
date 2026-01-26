@@ -184,7 +184,7 @@ cat >"$cfg" <<EOF
 }
 EOF
 
-"$HOME/.local/bin/claude-proxy" --exe-patch-policy-settings=false --config "$cfg" -- true
+"$HOME/.local/bin/claude-proxy" run --exe-patch-policy-settings=false --config "$cfg" -- true
 EOS
 
   chmod +x /tmp/claude-proxy-user-smoke.sh
