@@ -23,6 +23,11 @@ type sessionEnvelope struct {
 	Timestamp string          `json:"timestamp"`
 }
 
+type sessionEnvelopeMeta struct {
+	sessionEnvelope
+	Cwd string `json:"cwd"`
+}
+
 type sessionMessage struct {
 	Role    string          `json:"role"`
 	Content json.RawMessage `json:"content"`
@@ -132,6 +137,10 @@ func parseLineMessage(line []byte) (Message, bool) {
 	if err := json.Unmarshal(line, &env); err != nil {
 		return Message{}, false
 	}
+	return parseEnvelopeMessage(env)
+}
+
+func parseEnvelopeMessage(env sessionEnvelope) (Message, bool) {
 	if env.IsMeta || env.Type == "file-history-snapshot" {
 		return Message{}, false
 	}

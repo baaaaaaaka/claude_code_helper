@@ -61,36 +61,24 @@ func DiscoverProjects(claudeDir string) ([]Project, error) {
 		return nil, fmt.Errorf("read projects dir: %w", err)
 	}
 
+	history, historyErr := loadHistoryIndex(root)
+
 	var firstErr error
 	var projects []Project
+	if historyErr != nil {
+		firstErr = fmt.Errorf("read history index: %w", historyErr)
+	}
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
 		key := entry.Name()
-		indexPath := filepath.Join(projectsDir, key, "sessions-index.json")
-		data, err := os.ReadFile(indexPath)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("read sessions index %s: %w", indexPath, err)
-			}
+		project, err := loadProject(projectsDir, key, history)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+		if len(project.Sessions) == 0 && strings.TrimSpace(project.Path) == "" {
 			continue
-		}
-		var parsed sessionsIndex
-		if err := json.Unmarshal(data, &parsed); err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("parse sessions index %s: %w", indexPath, err)
-			}
-			continue
-		}
-		projectPath := strings.TrimSpace(parsed.OriginalPath)
-		if projectPath == "" {
-			projectPath = parsed.EntriesProjectPath()
-		}
-		project := Project{
-			Key:      key,
-			Path:     projectPath,
-			Sessions: parseSessions(parsed.Entries),
 		}
 		projects = append(projects, project)
 	}
@@ -146,6 +134,156 @@ func parseTime(raw string) time.Time {
 	return time.Time{}
 }
 
+func loadProject(projectsDir string, key string, history historyIndex) (Project, error) {
+	dir := filepath.Join(projectsDir, key)
+	indexPath := filepath.Join(dir, "sessions-index.json")
+	data, err := os.ReadFile(indexPath)
+	if err == nil {
+		var parsed sessionsIndex
+		if err := json.Unmarshal(data, &parsed); err == nil {
+			sessions := parseSessions(parsed.Entries)
+			for i := range sessions {
+				if info, ok := history.lookup(sessions[i].SessionID); ok {
+					if sessions[i].ProjectPath == "" && info.ProjectPath != "" {
+						sessions[i].ProjectPath = info.ProjectPath
+					}
+					if sessions[i].FirstPrompt == "" && info.FirstPrompt != "" {
+						sessions[i].FirstPrompt = info.FirstPrompt
+					}
+					if sessions[i].CreatedAt.IsZero() && !info.FirstPromptTime.IsZero() {
+						sessions[i].CreatedAt = info.FirstPromptTime
+					}
+				}
+			}
+			projectPath := strings.TrimSpace(parsed.OriginalPath)
+			if projectPath == "" {
+				projectPath = parsed.EntriesProjectPath()
+			}
+			if projectPath == "" {
+				projectPath = selectProjectPath(sessions)
+			}
+			sessions, validFiles, rehydrateErr := rehydrateSessionsFromFiles(dir, sessions, true)
+			projectPath = resolveProjectPath(projectPath, sessions)
+			if projectPath != "" {
+				for i := range sessions {
+					if strings.TrimSpace(sessions[i].ProjectPath) == "" {
+						sessions[i].ProjectPath = projectPath
+					}
+				}
+			}
+			if len(sessions) == 0 || validFiles == 0 {
+				scanned, scanErr := loadProjectFromSessionFilesWithOptions(dir, key, history, true)
+				if scanErr == nil && len(scanned.Sessions) > 0 {
+					scanned.Path = resolveProjectPath(projectPath, scanned.Sessions)
+					if scanned.Path != "" {
+						for i := range scanned.Sessions {
+							if strings.TrimSpace(scanned.Sessions[i].ProjectPath) == "" {
+								scanned.Sessions[i].ProjectPath = scanned.Path
+							}
+						}
+					}
+					return scanned, nil
+				}
+				if scanErr != nil {
+					return Project{
+						Key:      key,
+						Path:     projectPath,
+						Sessions: sessions,
+					}, scanErr
+				}
+			}
+			return Project{
+				Key:      key,
+				Path:     projectPath,
+				Sessions: sessions,
+			}, rehydrateErr
+		}
+	}
+
+	project, scanErr := loadProjectFromSessionFilesWithOptions(dir, key, history, true)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		if scanErr != nil {
+			return project, fmt.Errorf("read sessions index %s: %w", indexPath, err)
+		}
+		return project, fmt.Errorf("read sessions index %s: %w", indexPath, err)
+	}
+	return project, scanErr
+}
+
+func loadProjectFromSessionFiles(dir string, key string, history historyIndex) (Project, error) {
+	return loadProjectFromSessionFilesWithOptions(dir, key, history, false)
+}
+
+func loadProjectFromSessionFilesWithOptions(dir string, key string, history historyIndex, recursive bool) (Project, error) {
+	files, err := collectSessionFiles(dir, recursive)
+	if err != nil {
+		return Project{Key: key}, err
+	}
+	var firstErr error
+	var sessions []Session
+	seen := map[string]bool{}
+	for _, filePath := range files {
+		name := filepath.Base(filePath)
+		if !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		sessionID := strings.TrimSuffix(name, ".jsonl")
+		if strings.TrimSpace(sessionID) == "" || seen[sessionID] {
+			continue
+		}
+		seen[sessionID] = true
+		meta, err := readSessionFileMeta(filePath)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("read session %s: %w", filePath, err)
+			}
+			continue
+		}
+		if info, ok := history.lookup(sessionID); ok {
+			if info.ProjectPath != "" {
+				meta.ProjectPath = info.ProjectPath
+			}
+			if meta.FirstPrompt == "" && info.FirstPrompt != "" {
+				meta.FirstPrompt = info.FirstPrompt
+			}
+			if meta.CreatedAt.IsZero() && !info.FirstPromptTime.IsZero() {
+				meta.CreatedAt = info.FirstPromptTime
+			}
+			if meta.ModifiedAt.IsZero() && !info.FirstPromptTime.IsZero() {
+				meta.ModifiedAt = info.FirstPromptTime
+			}
+		}
+		sessions = append(sessions, Session{
+			SessionID:    sessionID,
+			Summary:      "",
+			FirstPrompt:  meta.FirstPrompt,
+			MessageCount: meta.MessageCount,
+			CreatedAt:    meta.CreatedAt,
+			ModifiedAt:   meta.ModifiedAt,
+			ProjectPath:  strings.TrimSpace(meta.ProjectPath),
+			FilePath:     filePath,
+		})
+	}
+
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].ModifiedAt.After(sessions[j].ModifiedAt)
+	})
+	projectPath := resolveProjectPath("", sessions)
+	if projectPath != "" {
+		for i := range sessions {
+			if strings.TrimSpace(sessions[i].ProjectPath) == "" {
+				sessions[i].ProjectPath = projectPath
+			}
+		}
+	}
+
+	return Project{
+		Key:      key,
+		Path:     projectPath,
+		Sessions: sessions,
+	}, firstErr
+}
+
 func FindSessionByID(projects []Project, sessionID string) (Session, bool) {
 	for _, project := range projects {
 		for _, sess := range project.Sessions {
@@ -169,11 +307,19 @@ func FindSessionWithProject(projects []Project, sessionID string) (Session, Proj
 }
 
 func SessionWorkingDir(session Session, project Project) string {
-	if strings.TrimSpace(session.ProjectPath) != "" {
-		return strings.TrimSpace(session.ProjectPath)
+	sessionPath := strings.TrimSpace(session.ProjectPath)
+	projectPath := strings.TrimSpace(project.Path)
+	if isDir(sessionPath) {
+		return sessionPath
 	}
-	if strings.TrimSpace(project.Path) != "" {
-		return strings.TrimSpace(project.Path)
+	if isDir(projectPath) {
+		return projectPath
+	}
+	if sessionPath != "" {
+		return sessionPath
+	}
+	if projectPath != "" {
+		return projectPath
 	}
 	return ""
 }
