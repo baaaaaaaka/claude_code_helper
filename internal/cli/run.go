@@ -97,7 +97,7 @@ func selectProfile(cfg config.Config, ref string) (config.Profile, error) {
 }
 
 func runWithExistingInstance(ctx context.Context, hc manager.HealthClient, inst config.Instance, cmdArgs []string, patchOutcome *patchOutcome) error {
-	return runWithExistingInstanceOptions(ctx, hc, inst, cmdArgs, patchOutcome, runTargetOptions{})
+	return runWithExistingInstanceOptions(ctx, hc, inst, cmdArgs, patchOutcome, defaultRunTargetOptions())
 }
 
 func runWithExistingInstanceOptions(
@@ -115,7 +115,7 @@ func runWithExistingInstanceOptions(
 }
 
 func runWithNewStack(ctx context.Context, store *config.Store, profile config.Profile, cmdArgs []string, patchOutcome *patchOutcome) error {
-	return runWithNewStackOptions(ctx, store, profile, cmdArgs, patchOutcome, runTargetOptions{})
+	return runWithNewStackOptions(ctx, store, profile, cmdArgs, patchOutcome, defaultRunTargetOptions())
 }
 
 func runWithNewStackOptions(
@@ -187,7 +187,7 @@ func runWithProfile(
 	cmdArgs []string,
 	patchOutcome *patchOutcome,
 ) error {
-	return runWithProfileOptions(ctx, store, profile, instances, cmdArgs, patchOutcome, runTargetOptions{})
+	return runWithProfileOptions(ctx, store, profile, instances, cmdArgs, patchOutcome, defaultRunTargetOptions())
 }
 
 func runWithProfileOptions(
@@ -209,6 +209,11 @@ func runWithProfileOptions(
 type runTargetOptions struct {
 	Cwd      string
 	ExtraEnv []string
+	UseProxy bool
+}
+
+func defaultRunTargetOptions() runTargetOptions {
+	return runTargetOptions{UseProxy: true}
 }
 
 func runTargetSupervised(
@@ -219,7 +224,7 @@ func runTargetSupervised(
 	patchOutcome *patchOutcome,
 	fatalCh <-chan error,
 ) error {
-	return runTargetSupervisedWithOptions(ctx, cmdArgs, proxyURL, healthCheck, patchOutcome, fatalCh, runTargetOptions{})
+	return runTargetSupervisedWithOptions(ctx, cmdArgs, proxyURL, healthCheck, patchOutcome, fatalCh, defaultRunTargetOptions())
 }
 
 func runTargetSupervisedWithOptions(
@@ -291,7 +296,7 @@ func runTargetWithFallback(
 	patchOutcome *patchOutcome,
 	fatalCh <-chan error,
 ) error {
-	return runTargetWithFallbackWithOptions(ctx, cmdArgs, proxyURL, healthCheck, patchOutcome, fatalCh, runTargetOptions{})
+	return runTargetWithFallbackWithOptions(ctx, cmdArgs, proxyURL, healthCheck, patchOutcome, fatalCh, defaultRunTargetOptions())
 }
 
 func runTargetWithFallbackWithOptions(
@@ -342,7 +347,7 @@ func runTargetOnce(
 	stdoutBuf io.Writer,
 	stderrBuf io.Writer,
 ) error {
-	return runTargetOnceWithOptions(ctx, cmdArgs, proxyURL, healthCheck, fatalCh, stdoutBuf, stderrBuf, runTargetOptions{})
+	return runTargetOnceWithOptions(ctx, cmdArgs, proxyURL, healthCheck, fatalCh, stdoutBuf, stderrBuf, defaultRunTargetOptions())
 }
 
 func runTargetOnceWithOptions(
@@ -359,7 +364,10 @@ func runTargetOnceWithOptions(
 	if opts.Cwd != "" {
 		cmd.Dir = opts.Cwd
 	}
-	envVars := env.WithProxy(os.Environ(), proxyURL)
+	envVars := os.Environ()
+	if opts.UseProxy {
+		envVars = env.WithProxy(envVars, proxyURL)
+	}
 	if len(opts.ExtraEnv) > 0 {
 		envVars = append(envVars, opts.ExtraEnv...)
 	}

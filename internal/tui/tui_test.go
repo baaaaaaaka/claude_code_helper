@@ -10,6 +10,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/claudehistory"
+	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/update"
 )
 
 func newTestScreen(t *testing.T, w, h int) tcell.Screen {
@@ -89,6 +90,9 @@ func TestHandleKeyEnterSelectsSession(t *testing.T) {
 	if selection == nil || selection.Session.SessionID != "sess-1" {
 		t.Fatalf("expected session sess-1, got %#v", selection)
 	}
+	if selection.UseProxy {
+		t.Fatalf("expected proxy to be disabled by default")
+	}
 }
 
 func TestHandleKeyCtrlJSelectsSession(t *testing.T) {
@@ -110,6 +114,41 @@ func TestHandleKeyCtrlJSelectsSession(t *testing.T) {
 	}
 	if selection == nil || selection.Session.SessionID != "sess-2" {
 		t.Fatalf("expected session sess-2, got %#v", selection)
+	}
+	if selection.UseProxy {
+		t.Fatalf("expected proxy to be disabled by default")
+	}
+}
+
+func TestHandleKeyProxyToggleRequiresConfig(t *testing.T) {
+	screen := newTestScreen(t, 80, 20)
+	state := newTestState([]claudehistory.Project{{Key: "one", Path: "/tmp"}})
+	state.proxyEnabled = false
+	state.proxyConfigured = false
+
+	_, err := handleKey(context.Background(), screen, state, Options{}, tcell.NewEventKey(tcell.KeyCtrlP, 0, 0))
+	var toggle ProxyToggleRequested
+	if !errors.As(err, &toggle) {
+		t.Fatalf("expected proxy toggle error, got %v", err)
+	}
+	if !toggle.Enable || !toggle.RequireConfig {
+		t.Fatalf("expected enable=true requireConfig=true, got %+v", toggle)
+	}
+}
+
+func TestHandleKeyProxyToggleDisablesProxy(t *testing.T) {
+	screen := newTestScreen(t, 80, 20)
+	state := newTestState([]claudehistory.Project{{Key: "one", Path: "/tmp"}})
+	state.proxyEnabled = true
+	state.proxyConfigured = true
+
+	_, err := handleKey(context.Background(), screen, state, Options{}, tcell.NewEventKey(tcell.KeyCtrlP, 0, 0))
+	var toggle ProxyToggleRequested
+	if !errors.As(err, &toggle) {
+		t.Fatalf("expected proxy toggle error, got %v", err)
+	}
+	if toggle.Enable || toggle.RequireConfig {
+		t.Fatalf("expected enable=false requireConfig=false, got %+v", toggle)
 	}
 }
 
@@ -186,4 +225,76 @@ func TestPreviewSearchMatches(t *testing.T) {
 	if len(state.previewMatches) != 2 {
 		t.Fatalf("expected 2 matches, got %d", len(state.previewMatches))
 	}
+}
+
+func TestHandleKeyCtrlURequestsUpdateWhenAvailable(t *testing.T) {
+	screen := newTestScreen(t, 80, 20)
+	state := newTestState([]claudehistory.Project{{Key: "one", Path: "/tmp"}})
+	state.updateStatus = &update.Status{Supported: true, UpdateAvailable: true}
+
+	_, err := handleKey(context.Background(), screen, state, Options{}, tcell.NewEventKey(tcell.KeyCtrlU, 0, 0))
+	if !errors.As(err, &UpdateRequested{}) {
+		t.Fatalf("expected update requested error, got %v", err)
+	}
+}
+
+func TestHandleKeyCtrlUIgnoredWhenNoUpdate(t *testing.T) {
+	screen := newTestScreen(t, 80, 20)
+	state := newTestState([]claudehistory.Project{{Key: "one", Path: "/tmp"}})
+	state.updateStatus = &update.Status{Supported: true, UpdateAvailable: false}
+
+	_, err := handleKey(context.Background(), screen, state, Options{}, tcell.NewEventKey(tcell.KeyCtrlU, 0, 0))
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+}
+
+func TestDrawShowsUpdateHintWhenAvailable(t *testing.T) {
+	screen := newTestScreen(t, 120, 20)
+	state := newTestState([]claudehistory.Project{})
+	state.updateStatus = &update.Status{Supported: true, UpdateAvailable: true}
+
+	previewCh := make(chan previewEvent, 1)
+	if err := draw(screen, state, Options{Version: "1.0.0"}, previewCh); err != nil {
+		t.Fatalf("draw error: %v", err)
+	}
+
+	_, h := screen.Size()
+	line := readScreenLine(screen, h-1)
+	if !strings.Contains(line, "Ctrl+U upgrade") {
+		t.Fatalf("expected update hint in status line, got %q", strings.TrimSpace(line))
+	}
+}
+
+func TestDrawShowsUpdateErrorWhenCheckFails(t *testing.T) {
+	screen := newTestScreen(t, 160, 20)
+	state := newTestState([]claudehistory.Project{})
+	state.updateStatus = &update.Status{Supported: false, Error: "network timeout"}
+
+	previewCh := make(chan previewEvent, 1)
+	if err := draw(screen, state, Options{Version: "1.0.0"}, previewCh); err != nil {
+		t.Fatalf("draw error: %v", err)
+	}
+
+	_, h := screen.Size()
+	line := readScreenLine(screen, h-1)
+	if !strings.Contains(line, "Update check failed: network timeout") {
+		t.Fatalf("expected update error in status line, got %q", strings.TrimSpace(line))
+	}
+	if !strings.Contains(line, "update failed") {
+		t.Fatalf("expected update failed hint in status line, got %q", strings.TrimSpace(line))
+	}
+}
+
+func readScreenLine(screen tcell.Screen, y int) string {
+	w, _ := screen.Size()
+	var buf strings.Builder
+	for x := 0; x < w; x++ {
+		ch, _, _, _ := screen.GetContent(x, y)
+		if ch == 0 {
+			ch = ' '
+		}
+		buf.WriteRune(ch)
+	}
+	return buf.String()
 }

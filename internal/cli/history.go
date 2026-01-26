@@ -117,14 +117,20 @@ func newHistoryOpenCmd(root *rootOptions, claudeDir *string, claudePath *string,
 			if err != nil {
 				return err
 			}
-			profile, cfg, err := ensureProfile(cmd.Context(), store, *profileRef, true, cmd.OutOrStdout())
+
+			useProxy, cfg, err := ensureProxyPreference(cmd.Context(), store, *profileRef, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
 
-			resolvedClaudePath, err := ensureClaudeInstalled(cmd.Context(), *claudePath, cmd.ErrOrStderr())
-			if err != nil {
-				return err
+			var profile *config.Profile
+			if useProxy {
+				p, cfgWithProfile, err := ensureProfile(cmd.Context(), store, *profileRef, true, cmd.OutOrStdout())
+				if err != nil {
+					return err
+				}
+				cfg = cfgWithProfile
+				profile = &p
 			}
 
 			projects, err := claudehistory.DiscoverProjects(*claudeDir)
@@ -136,7 +142,7 @@ func newHistoryOpenCmd(root *rootOptions, claudeDir *string, claudePath *string,
 			if !ok {
 				return fmt.Errorf("session %q not found", sessionID)
 			}
-			return runClaudeSessionWithProxyForProfile(
+			return runClaudeSession(
 				cmd.Context(),
 				root,
 				store,
@@ -144,8 +150,9 @@ func newHistoryOpenCmd(root *rootOptions, claudeDir *string, claudePath *string,
 				cfg.Instances,
 				session,
 				project,
-				resolvedClaudePath,
+				*claudePath,
 				*claudeDir,
+				useProxy,
 				cmd.ErrOrStderr(),
 			)
 		},
@@ -159,51 +166,80 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 	if err != nil {
 		return err
 	}
-	profile, cfg, err := ensureProfile(ctx, store, profileRef, true, cmd.OutOrStdout())
-	if err != nil {
-		return err
-	}
-	resolvedClaudePath, err := ensureClaudeInstalled(ctx, claudePath, cmd.ErrOrStderr())
-	if err != nil {
-		return err
-	}
-	claudePath = resolvedClaudePath
 
-	selection, err := tui.SelectSession(ctx, tui.Options{
-		LoadProjects: func(ctx context.Context) ([]claudehistory.Project, error) {
-			return claudehistory.DiscoverProjects(claudeDir)
-		},
-		Version: version,
-		CheckUpdate: func(ctx context.Context) update.Status {
-			return update.CheckForUpdate(ctx, update.CheckOptions{
-				InstalledVersion: version,
-				Timeout:          8 * time.Second,
-			})
-		},
-	})
-	if err != nil {
-		var upd tui.UpdateRequested
-		if errors.As(err, &upd) {
-			return handleUpdateAndRestart(ctx, cmd)
+	for {
+		useProxy, cfg, err := ensureProxyPreference(ctx, store, profileRef, cmd.ErrOrStderr())
+		if err != nil {
+			return err
 		}
-		if errors.Is(err, context.Canceled) {
+
+		var profile *config.Profile
+		if useProxy {
+			p, cfgWithProfile, err := ensureProfile(ctx, store, profileRef, true, cmd.OutOrStdout())
+			if err != nil {
+				return err
+			}
+			cfg = cfgWithProfile
+			profile = &p
+		}
+
+		resolvedClaudePath, err := ensureClaudeInstalled(ctx, claudePath, cmd.ErrOrStderr())
+		if err != nil {
+			return err
+		}
+		claudePath = resolvedClaudePath
+
+		selection, err := tui.SelectSession(ctx, tui.Options{
+			LoadProjects: func(ctx context.Context) ([]claudehistory.Project, error) {
+				return claudehistory.DiscoverProjects(claudeDir)
+			},
+			Version:         version,
+			ProxyEnabled:    useProxy,
+			ProxyConfigured: len(cfg.Profiles) > 0,
+			CheckUpdate: func(ctx context.Context) update.Status {
+				return update.CheckForUpdate(ctx, update.CheckOptions{
+					InstalledVersion: version,
+					Timeout:          8 * time.Second,
+				})
+			},
+		})
+		if err != nil {
+			var upd tui.UpdateRequested
+			if errors.As(err, &upd) {
+				return handleUpdateAndRestart(ctx, cmd)
+			}
+			var toggle tui.ProxyToggleRequested
+			if errors.As(err, &toggle) {
+				if err := persistProxyPreference(store, toggle.Enable); err != nil {
+					return err
+				}
+				if toggle.Enable && toggle.RequireConfig {
+					if _, err := initProfileInteractive(ctx, store); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
+			return err
+		}
+		if selection == nil {
 			return nil
 		}
-		return err
+		return runClaudeSession(
+			ctx,
+			root,
+			store,
+			profile,
+			cfg.Instances,
+			selection.Session,
+			selection.Project,
+			claudePath,
+			claudeDir,
+			selection.UseProxy,
+			cmd.ErrOrStderr(),
+		)
 	}
-	if selection == nil {
-		return nil
-	}
-	return runClaudeSessionWithProxyForProfile(
-		ctx,
-		root,
-		store,
-		profile,
-		cfg.Instances,
-		selection.Session,
-		selection.Project,
-		claudePath,
-		claudeDir,
-		cmd.ErrOrStderr(),
-	)
 }

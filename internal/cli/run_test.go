@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -48,6 +49,35 @@ func TestRunTargetSupervisedSuccess(t *testing.T) {
 
 	if err := runTargetSupervised(context.Background(), []string{script}, "", nil, nil, nil); err != nil {
 		t.Fatalf("runTargetSupervised error: %v", err)
+	}
+}
+
+func TestRunTargetOnceWithOptionsNoProxyKeepsEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script test on windows")
+	}
+	dir := t.TempDir()
+	outFile := filepath.Join(dir, "env.txt")
+	script := filepath.Join(dir, "print.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf \"%s\" \"$HTTP_PROXY\" > \"$OUT_FILE\"\n"), 0o700); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	t.Setenv("HTTP_PROXY", "http://example.com")
+	opts := runTargetOptions{
+		ExtraEnv: []string{"OUT_FILE=" + outFile},
+		UseProxy: false,
+	}
+
+	if err := runTargetOnceWithOptions(context.Background(), []string{script}, "http://127.0.0.1:9999", nil, nil, &bytes.Buffer{}, &bytes.Buffer{}, opts); err != nil {
+		t.Fatalf("runTargetOnceWithOptions error: %v", err)
+	}
+	content, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read env file: %v", err)
+	}
+	if got := string(content); got != "http://example.com" {
+		t.Fatalf("expected HTTP_PROXY preserved, got %q", got)
 	}
 }
 

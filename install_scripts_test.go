@@ -14,14 +14,18 @@ import (
 )
 
 func TestInstallShLatestViaAPI(t *testing.T) {
-	runInstallSh(t, false)
+	runInstallSh(t, false, false)
 }
 
 func TestInstallShLatestViaRedirect(t *testing.T) {
-	runInstallSh(t, true)
+	runInstallSh(t, true, false)
 }
 
-func runInstallSh(t *testing.T, apiFail bool) {
+func TestInstallShSkipsPathUpdateWhenAlreadySet(t *testing.T) {
+	runInstallSh(t, false, true)
+}
+
+func runInstallSh(t *testing.T, apiFail bool, pathAlreadySet bool) {
 	t.Helper()
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
@@ -39,6 +43,7 @@ func runInstallSh(t *testing.T, apiFail bool) {
 	}
 	writeStubCurl(t, binDir)
 
+	homeDir := t.TempDir()
 	installDir := t.TempDir()
 	version := "v1.2.3"
 	verNoV := strings.TrimPrefix(version, "v")
@@ -49,9 +54,15 @@ func runInstallSh(t *testing.T, apiFail bool) {
 	apiJSON := fmt.Sprintf("{\"tag_name\":\"%s\"}", version)
 	latestURL := "https://github.com/owner/name/releases/tag/" + version
 
+	pathValue := binDir + string(os.PathListSeparator) + os.Getenv("PATH")
+	if pathAlreadySet {
+		pathValue = installDir + string(os.PathListSeparator) + pathValue
+	}
 	env := append([]string{}, os.Environ()...)
 	env = append(env,
-		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"PATH="+pathValue,
+		"HOME="+homeDir,
+		"SHELL=/bin/bash",
 		"CLAUDE_PROXY_REPO=owner/name",
 		"CLAUDE_PROXY_VERSION=latest",
 		"CLAUDE_PROXY_INSTALL_DIR="+installDir,
@@ -78,6 +89,26 @@ func runInstallSh(t *testing.T, apiFail bool) {
 	}
 	if string(got) != string(assetData) {
 		t.Fatalf("installed payload mismatch")
+	}
+
+	configPath := expectedBashConfigPath(homeDir)
+	contents, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read shell config: %v", err)
+	}
+	text := string(contents)
+	pathLine := fmt.Sprintf("export PATH=\"%s:$PATH\"", installDir)
+	if pathAlreadySet {
+		if strings.Contains(text, pathLine) {
+			t.Fatalf("unexpected PATH update in shell config")
+		}
+	} else {
+		if !strings.Contains(text, pathLine) {
+			t.Fatalf("missing PATH update in shell config")
+		}
+	}
+	if !strings.Contains(text, "alias clp='claude-proxy'") {
+		t.Fatalf("missing clp alias in shell config")
 	}
 }
 
@@ -149,4 +180,11 @@ esac
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write stub curl: %v", err)
 	}
+}
+
+func expectedBashConfigPath(home string) string {
+	if runtime.GOOS == "darwin" {
+		return filepath.Join(home, ".bash_profile")
+	}
+	return filepath.Join(home, ".bashrc")
 }

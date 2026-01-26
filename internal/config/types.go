@@ -5,9 +5,10 @@ import "time"
 const CurrentVersion = 1
 
 type Config struct {
-	Version   int        `json:"version"`
-	Profiles  []Profile  `json:"profiles"`
-	Instances []Instance `json:"instances"`
+	Version      int        `json:"version"`
+	ProxyEnabled *bool      `json:"proxyEnabled,omitempty"`
+	Profiles     []Profile  `json:"profiles"`
+	Instances    []Instance `json:"instances"`
 }
 
 type Profile struct {

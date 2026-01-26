@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,22 +41,52 @@ func newInitCmd(root *rootOptions) *cobra.Command {
 	return cmd
 }
 
-func initProfileInteractive(ctx context.Context, store *config.Store) (config.Profile, error) {
-	r := bufio.NewReader(os.Stdin)
-	name := prompt(r, "Profile name (optional)", "")
-	host := promptRequired(r, "SSH host (required)")
-	port := promptInt(r, "SSH port", 22)
-	user := promptRequired(r, "SSH user (required)")
+type sshOps interface {
+	probe(ctx context.Context, prof config.Profile, interactive bool) error
+	generateKeypair(ctx context.Context, store *config.Store, prof config.Profile) (string, error)
+	installPublicKey(ctx context.Context, prof config.Profile, pubKeyPath string) error
+}
 
-	if name == "" {
-		name = user + "@" + host
+type defaultSSHOps struct{}
+
+func (defaultSSHOps) probe(ctx context.Context, prof config.Profile, interactive bool) error {
+	return sshProbe(ctx, prof, interactive)
+}
+
+func (defaultSSHOps) generateKeypair(ctx context.Context, store *config.Store, prof config.Profile) (string, error) {
+	return generateKeypair(ctx, store, prof)
+}
+
+func (defaultSSHOps) installPublicKey(ctx context.Context, prof config.Profile, pubKeyPath string) error {
+	return installPublicKey(ctx, prof, pubKeyPath)
+}
+
+func initProfileInteractive(ctx context.Context, store *config.Store) (config.Profile, error) {
+	return initProfileInteractiveWithDeps(ctx, store, bufio.NewReader(os.Stdin), defaultSSHOps{}, os.Stderr)
+}
+
+func initProfileInteractiveWithDeps(
+	ctx context.Context,
+	store *config.Store,
+	reader *bufio.Reader,
+	ops sshOps,
+	out io.Writer,
+) (config.Profile, error) {
+	if out != nil {
+		_, _ = fmt.Fprintln(out, "Proxy mode uses an SSH tunnel to reach Claude through your network.")
+		_, _ = fmt.Fprintln(out, "Enter your SSH host, port, and username to establish that tunnel.")
 	}
+
+	host := promptRequired(reader, "SSH host (required)")
+	port := promptInt(reader, "SSH port", 22)
+	user := promptRequired(reader, "SSH user (required)")
 
 	id, err := ids.New()
 	if err != nil {
 		return config.Profile{}, err
 	}
 
+	name := user + "@" + host
 	prof := config.Profile{
 		ID:        id,
 		Name:      name,
@@ -65,25 +96,20 @@ func initProfileInteractive(ctx context.Context, store *config.Store) (config.Pr
 		CreatedAt: time.Now(),
 	}
 
-	if err := sshProbe(ctx, prof, false); err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, "Non-interactive SSH probe failed; attempting interactive login...")
-		if err2 := sshProbe(ctx, prof, true); err2 != nil {
-			return config.Profile{}, fmt.Errorf("ssh probe failed: %w", err2)
+	if err := ops.probe(ctx, prof, false); err != nil {
+		if out != nil {
+			_, _ = fmt.Fprintln(out, "Direct SSH access failed; creating a dedicated claude-proxy key and installing it.")
 		}
-	}
-
-	if promptYesNo(r, "Generate and install a dedicated SSH key for this profile?", false) {
-		keyPath, err := generateKeypair(ctx, store, prof)
+		keyPath, err := ops.generateKeypair(ctx, store, prof)
 		if err != nil {
 			return config.Profile{}, err
 		}
-		if err := installPublicKey(ctx, prof, keyPath+".pub"); err != nil {
+		if err := ops.installPublicKey(ctx, prof, keyPath+".pub"); err != nil {
 			return config.Profile{}, err
 		}
 		prof.SSHArgs = []string{"-i", keyPath}
 
-		// Verify key-based login works without prompting.
-		if err := sshProbe(ctx, prof, false); err != nil {
+		if err := ops.probe(ctx, prof, false); err != nil {
 			return config.Profile{}, fmt.Errorf("key-based ssh probe failed: %w", err)
 		}
 	}
@@ -188,9 +214,9 @@ func generateKeypair(ctx context.Context, store *config.Store, prof config.Profi
 		return "", err
 	}
 
-	keyPath := filepath.Join(keyDir, "id_ed25519_"+prof.ID)
-	if _, err := os.Stat(keyPath); err == nil {
-		return "", fmt.Errorf("key already exists: %s", keyPath)
+	keyPath, err := nextAvailableKeyPath(filepath.Join(keyDir, "id_ed25519_"+prof.ID))
+	if err != nil {
+		return "", err
 	}
 
 	args := []string{
@@ -207,6 +233,20 @@ func generateKeypair(ctx context.Context, store *config.Store, prof config.Profi
 		return "", err
 	}
 	return keyPath, nil
+}
+
+func nextAvailableKeyPath(base string) (string, error) {
+	path := base
+	for i := 0; ; i++ {
+		_, err := os.Stat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return path, nil
+			}
+			return "", err
+		}
+		path = fmt.Sprintf("%s_%d", base, i+1)
+	}
 }
 
 func installPublicKey(ctx context.Context, prof config.Profile, pubKeyPath string) error {

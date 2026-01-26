@@ -48,16 +48,17 @@ func buildClaudeResumeCommand(
 	return path, args, cwd, nil
 }
 
-func runClaudeSessionWithProxyForProfile(
+func runClaudeSession(
 	ctx context.Context,
 	root *rootOptions,
 	store *config.Store,
-	profile config.Profile,
+	profile *config.Profile,
 	instances []config.Instance,
 	session claudehistory.Session,
 	project claudehistory.Project,
 	claudePath string,
 	claudeDir string,
+	useProxy bool,
 	log io.Writer,
 ) error {
 	claudePathResolved, err := ensureClaudeInstalled(ctx, claudePath, log)
@@ -84,8 +85,16 @@ func runClaudeSessionWithProxyForProfile(
 		extraEnv = append(extraEnv, claudehistory.EnvClaudeDir+"="+claudeDir)
 	}
 
-	return runWithProfileOptions(ctx, store, profile, instances, cmdArgs, patchOutcome, runTargetOptions{
+	opts := runTargetOptions{
 		Cwd:      cwd,
 		ExtraEnv: extraEnv,
-	})
+		UseProxy: useProxy,
+	}
+	if useProxy {
+		if profile == nil {
+			return fmt.Errorf("proxy mode enabled but no profile configured")
+		}
+		return runWithProfileOptions(ctx, store, *profile, instances, cmdArgs, patchOutcome, opts)
+	}
+	return runTargetWithFallbackWithOptions(ctx, cmdArgs, "", nil, patchOutcome, nil, opts)
 }

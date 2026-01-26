@@ -16,14 +16,18 @@ import (
 )
 
 func TestInstallPs1LatestViaAPI(t *testing.T) {
-	runInstallPs1(t, false)
+	runInstallPs1(t, false, false)
 }
 
 func TestInstallPs1LatestViaRedirect(t *testing.T) {
-	runInstallPs1(t, true)
+	runInstallPs1(t, true, false)
 }
 
-func runInstallPs1(t *testing.T, apiFail bool) {
+func TestInstallPs1SkipsPathUpdateWhenAlreadySet(t *testing.T) {
+	runInstallPs1(t, false, true)
+}
+
+func runInstallPs1(t *testing.T, apiFail bool, pathAlreadySet bool) {
 	t.Helper()
 	if _, err := exec.LookPath("powershell"); err != nil {
 		t.Skip("powershell not available")
@@ -47,6 +51,11 @@ func runInstallPs1(t *testing.T, apiFail bool) {
 
 	installDir := t.TempDir()
 	tempDir := t.TempDir()
+	profilePath := filepath.Join(t.TempDir(), "profile.ps1")
+	pathValue := os.Getenv("Path")
+	if pathAlreadySet {
+		pathValue = installDir + ";" + pathValue
+	}
 
 	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath,
 		"-Repo", repo,
@@ -57,6 +66,9 @@ func runInstallPs1(t *testing.T, apiFail bool) {
 	cmd.Env = append(cmd.Env,
 		"CLAUDE_PROXY_API_BASE="+server.URL,
 		"CLAUDE_PROXY_RELEASE_BASE="+server.URL,
+		"CLAUDE_PROXY_PROFILE_PATH="+profilePath,
+		"CLAUDE_PROXY_SKIP_PATH_UPDATE=1",
+		"Path="+pathValue,
 		"TEMP="+tempDir,
 	)
 	output, err := cmd.CombinedOutput()
@@ -71,6 +83,24 @@ func runInstallPs1(t *testing.T, apiFail bool) {
 	}
 	if !bytes.Equal(got, assetData) {
 		t.Fatalf("installed payload mismatch")
+	}
+
+	profile, err := os.ReadFile(profilePath)
+	if err != nil {
+		t.Fatalf("read profile: %v", err)
+	}
+	profileText := string(profile)
+	if !strings.Contains(profileText, "Set-Alias -Name clp -Value claude-proxy") {
+		t.Fatalf("missing clp alias in profile")
+	}
+	if pathAlreadySet {
+		if strings.Contains(profileText, "$env:Path") && strings.Contains(profileText, installDir) {
+			t.Fatalf("unexpected PATH update in profile")
+		}
+	} else {
+		if !strings.Contains(profileText, "$env:Path") || !strings.Contains(profileText, installDir) {
+			t.Fatalf("missing PATH update in profile")
+		}
 	}
 }
 

@@ -18,11 +18,19 @@ type UpdateRequested struct{}
 
 func (UpdateRequested) Error() string { return "update requested" }
 
+type ProxyToggleRequested struct {
+	Enable        bool
+	RequireConfig bool
+}
+
+func (ProxyToggleRequested) Error() string { return "proxy toggle requested" }
+
 var errQuit = errors.New("quit")
 
 type Selection struct {
-	Project claudehistory.Project
-	Session claudehistory.Session
+	Project  claudehistory.Project
+	Session  claudehistory.Session
+	UseProxy bool
 }
 
 type Options struct {
@@ -30,6 +38,8 @@ type Options struct {
 	Version         string
 	CheckUpdate     func(context.Context) update.Status
 	PreviewMessages int
+	ProxyEnabled    bool
+	ProxyConfigured bool
 }
 
 type uiEvent struct {
@@ -98,6 +108,9 @@ type uiState struct {
 	updateStatus   *update.Status
 	updateChecking bool
 
+	proxyEnabled    bool
+	proxyConfigured bool
+
 	previewCache     map[string]string
 	previewError     map[string]string
 	previewLoading   map[string]bool
@@ -115,13 +128,15 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 
 	projects, err := opts.LoadProjects(ctx)
 	state := &uiState{
-		projects:       projects,
-		loadError:      err,
-		focus:          "projects",
-		lastListFocus:  "projects",
-		previewCache:   map[string]string{},
-		previewError:   map[string]string{},
-		previewLoading: map[string]bool{},
+		projects:        projects,
+		loadError:       err,
+		focus:           "projects",
+		lastListFocus:   "projects",
+		proxyEnabled:    opts.ProxyEnabled,
+		proxyConfigured: opts.ProxyConfigured,
+		previewCache:    map[string]string{},
+		previewError:    map[string]string{},
+		previewLoading:  map[string]bool{},
 	}
 
 	screen, err := tcell.NewScreen()
@@ -301,6 +316,12 @@ func handleKey(
 			return nil, UpdateRequested{}
 		}
 		return nil, nil
+	case tcell.KeyCtrlP:
+		enable := !state.proxyEnabled
+		if enable && !state.proxyConfigured {
+			return nil, ProxyToggleRequested{Enable: true, RequireConfig: true}
+		}
+		return nil, ProxyToggleRequested{Enable: enable}
 	case tcell.KeyCtrlR:
 		refreshState(ctx, state, opts)
 		return nil, nil
@@ -412,7 +433,7 @@ func handleKey(
 		}
 	}
 	if enterPressed && selectedSession != nil {
-		return &Selection{Project: selectedProject, Session: *selectedSession}, nil
+		return &Selection{Project: selectedProject, Session: *selectedSession, UseProxy: state.proxyEnabled}, nil
 	}
 
 	if state.focus == "preview" && isPreviewNavKey(ev) {
@@ -619,17 +640,24 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 
 	drawPreview(screen, layoutMode.preview, lines, state.previewState.scroll, lineAttrs)
 
-	status := "Tab/Left/Right: switch  /: search  Enter: open  r: refresh  q: quit"
+	proxyLabel := "Proxy: off"
+	if state.proxyEnabled {
+		proxyLabel = "Proxy: on"
+	}
+	status := "Tab/Left/Right: switch  /: search  Enter: open  r: refresh  " + proxyLabel + "  Ctrl+P: toggle  q: quit"
 	if state.inputMode != "" {
-		status = "Type to search. Enter: apply  Esc: cancel"
+		status = "Type to search. Enter: apply  Esc: cancel  " + proxyLabel + "  Ctrl+P: toggle"
 	} else if state.focus == "preview" {
-		status = "Up/Down PgUp/PgDn: scroll  /: search  Enter: open  Tab/Left/Right: switch  q: quit"
+		status = "Up/Down PgUp/PgDn: scroll  /: search  Enter: open  Tab/Left/Right: switch  " + proxyLabel + "  Ctrl+P: toggle  q: quit"
 		if state.previewSearch != "" && len(state.previewMatches) > 0 {
 			status = status + "  n/N: next/prev"
 		}
 	}
 	if state.loadError != nil {
 		status = fmt.Sprintf("Load error: %v", state.loadError)
+	}
+	if state.loadError == nil && state.updateStatus != nil && !state.updateStatus.Supported && state.updateStatus.Error != "" && state.inputMode == "" {
+		status = fmt.Sprintf("Update check failed: %s", state.updateStatus.Error)
 	}
 
 	updateRight := versionLabel(opts.Version)
@@ -644,6 +672,9 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 			} else {
 				updateRight = updateRight + " latest"
 			}
+		} else if state.updateStatus.Error != "" {
+			updateRight = updateRight + " update failed"
+			updateBold = true
 		}
 	}
 

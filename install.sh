@@ -76,6 +76,11 @@ case "$arch" in
     ;;
 esac
 
+shell_name="$(basename "${SHELL:-}")"
+if [ -z "${shell_name:-}" ]; then
+  shell_name="sh"
+fi
+
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 http_get() {
@@ -91,6 +96,149 @@ http_get() {
   fi
   echo "Missing downloader: need curl or wget" >&2
   return 1
+}
+
+CONFIG_UPDATED=0
+SOURCE_FILES=""
+
+add_source_file() {
+  file="$1"
+  case " $SOURCE_FILES " in
+    *" $file "*) ;;
+    *) SOURCE_FILES="$SOURCE_FILES $file" ;;
+  esac
+}
+
+ensure_line() {
+  file="$1"
+  line="$2"
+  if [ -z "${file:-}" ] || [ -z "${line:-}" ]; then
+    return 0
+  fi
+  dir="$(dirname "$file")"
+  if [ -n "${dir:-}" ]; then
+    mkdir -p "$dir" 2>/dev/null || true
+  fi
+  if [ ! -f "$file" ]; then
+    : > "$file"
+  fi
+  if ! grep -Fqx "$line" "$file" 2>/dev/null; then
+    printf "\n%s\n" "$line" >> "$file"
+    CONFIG_UPDATED=1
+    add_source_file "$file"
+  fi
+}
+
+path_has_dir() {
+  target="${1%/}"
+  old_ifs="$IFS"
+  IFS=":"
+  for part in $PATH; do
+    part="${part%/}"
+    if [ "$part" = "$target" ]; then
+      IFS="$old_ifs"
+      return 0
+    fi
+  done
+  IFS="$old_ifs"
+  return 1
+}
+
+source_config_file() {
+  file="$1"
+  if [ -z "${file:-}" ] || [ ! -f "$file" ]; then
+    return 0
+  fi
+  case "$shell_name" in
+    bash)
+      if have_cmd bash; then
+        bash -c ". \"$file\"" >/dev/null 2>&1 || true
+      fi
+      ;;
+    zsh)
+      if have_cmd zsh; then
+        zsh -c "source \"$file\"" >/dev/null 2>&1 || true
+      fi
+      ;;
+    fish)
+      if have_cmd fish; then
+        fish -c "source \"$file\"" >/dev/null 2>&1 || true
+      fi
+      ;;
+    *)
+      . "$file" >/dev/null 2>&1 || true
+      ;;
+  esac
+}
+
+update_shell_config() {
+  if [ -z "${HOME:-}" ]; then
+    return 0
+  fi
+
+  install_dir_resolved="$install_dir"
+  if [ -d "$install_dir" ]; then
+    resolved="$(cd "$install_dir" 2>/dev/null && pwd -P || true)"
+    if [ -n "${resolved:-}" ]; then
+      install_dir_resolved="$resolved"
+    fi
+  fi
+
+  path_needs_update=1
+  if path_has_dir "$install_dir" || path_has_dir "$install_dir_resolved"; then
+    path_needs_update=0
+  fi
+
+  path_line="export PATH=\"$install_dir:\$PATH\""
+  alias_line="alias clp='claude-proxy'"
+  path_file=""
+  alias_file=""
+
+  case "$shell_name" in
+    bash)
+      if [ "$os" = "darwin" ]; then
+        path_file="$HOME/.bash_profile"
+      else
+        if [ -f "$HOME/.bashrc" ]; then
+          path_file="$HOME/.bashrc"
+        elif [ -f "$HOME/.bash_profile" ]; then
+          path_file="$HOME/.bash_profile"
+        else
+          path_file="$HOME/.bashrc"
+        fi
+      fi
+      alias_file="$path_file"
+      ;;
+    zsh)
+      if [ "$os" = "darwin" ] || [ -f "$HOME/.zprofile" ]; then
+        path_file="$HOME/.zprofile"
+      else
+        path_file="$HOME/.zshrc"
+      fi
+      alias_file="$HOME/.zshrc"
+      ;;
+    fish)
+      path_file="$HOME/.config/fish/config.fish"
+      alias_file="$path_file"
+      path_line="set -gx PATH \"$install_dir\" \$PATH"
+      alias_line="alias clp \"claude-proxy\""
+      ;;
+    *)
+      path_file="$HOME/.profile"
+      alias_file="$path_file"
+      ;;
+  esac
+
+  if [ "$path_needs_update" -eq 1 ]; then
+    ensure_line "$path_file" "$path_line"
+  fi
+  ensure_line "$alias_file" "$alias_line"
+
+  if [ "$CONFIG_UPDATED" -eq 1 ]; then
+    for file in $SOURCE_FILES; do
+      source_config_file "$file"
+    done
+  fi
 }
 
 get_latest_tag_from_redirect() {
@@ -200,5 +348,7 @@ dst="$install_dir/claude-proxy"
 mv -f "$bin_tmp" "$dst"
 
 echo "Installed: $dst"
+update_shell_config
 echo "Run: $dst proxy doctor"
+echo "Shell config checked for PATH and alias 'clp' (reload attempted)"
 
