@@ -85,7 +85,7 @@ func TestNormalizeWorkingDirResolvesRelative(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normalizeWorkingDir error: %v", err)
 	}
-	if got != dir {
+	if canonicalPath(t, got) != canonicalPath(t, dir) {
 		t.Fatalf("expected %s, got %s", dir, got)
 	}
 }
@@ -134,7 +134,9 @@ func TestRunClaudeNewSessionUsesCwdDirect(t *testing.T) {
 		t.Fatalf("read output: %v", err)
 	}
 	if strings.TrimSpace(string(got)) != dir {
-		t.Fatalf("expected cwd %s, got %q", dir, strings.TrimSpace(string(got)))
+		if canonicalPath(t, strings.TrimSpace(string(got))) != canonicalPath(t, dir) {
+			t.Fatalf("expected cwd %s, got %q", dir, strings.TrimSpace(string(got)))
+		}
 	}
 }
 
@@ -160,4 +162,20 @@ func TestRunClaudeNewSessionRejectsProxyWithoutProfile(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error when proxy enabled without profile")
 	}
+}
+
+func canonicalPath(t *testing.T, path string) string {
+	t.Helper()
+	if path == "" {
+		return path
+	}
+	abs, err := filepath.Abs(path)
+	if err == nil {
+		path = abs
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		return resolved
+	}
+	return filepath.Clean(path)
 }
