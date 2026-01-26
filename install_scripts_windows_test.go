@@ -79,6 +79,7 @@ func runInstallPs1(t *testing.T, apiFail bool, pathAlreadySet bool) {
 	if err != nil {
 		t.Fatalf("install.ps1 failed: %v\n%s", err, string(output))
 	}
+	installDirResolved := resolvePathViaPowerShell(t, cmd.Env, installDir)
 
 	installed := filepath.Join(installDir, "claude-proxy.exe")
 	got, err := os.ReadFile(installed)
@@ -98,11 +99,11 @@ func runInstallPs1(t *testing.T, apiFail bool, pathAlreadySet bool) {
 		t.Fatalf("missing clp alias in profile")
 	}
 	if pathContainsInstall {
-		if hasPathLineForDir(profileText, installDir) {
+		if hasPathLineForDir(profileText, installDirResolved) {
 			t.Fatalf("unexpected PATH update in profile")
 		}
 	} else {
-		if !hasPathLineForDir(profileText, installDir) {
+		if !hasPathLineForDir(profileText, installDirResolved) {
 			t.Fatalf("missing PATH update in profile")
 		}
 	}
@@ -138,6 +139,19 @@ func pathInEnvViaPowerShell(t *testing.T, env []string, installDir string) bool 
 		t.Fatalf("compute pathInEnv: %v", err)
 	}
 	return strings.EqualFold(strings.TrimSpace(string(out)), "true")
+}
+
+func resolvePathViaPowerShell(t *testing.T, env []string, installDir string) string {
+	t.Helper()
+	script := `[IO.Path]::GetFullPath($env:TEST_INSTALL_DIR)`
+	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
+	cmd.Env = append([]string{}, env...)
+	cmd.Env = append(cmd.Env, "TEST_INSTALL_DIR="+installDir)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("resolve path: %v", err)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func filterEnvWithoutKey(env []string, key string) []string {
