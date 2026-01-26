@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -86,13 +87,17 @@ type previewState struct {
 }
 
 type projectItem struct {
-	label   string
-	project claudehistory.Project
+	label         string
+	project       claudehistory.Project
+	isCurrent     bool
+	alwaysVisible bool
 }
 
 type sessionItem struct {
-	label   string
-	session claudehistory.Session
+	label         string
+	session       claudehistory.Session
+	isNew         bool
+	alwaysVisible bool
 }
 
 type uiState struct {
@@ -418,7 +423,7 @@ func handleKey(
 		listFocus = state.lastListFocus
 	}
 
-	projects := buildProjectItems(state.projects)
+	projects := buildProjectItems(state.projects, opts.DefaultCwd)
 	filteredProjects := filterProjects(projects, state.projectFilter)
 	state.projectState.clamp(len(filteredProjects))
 	selectedProject := selectedProject(filteredProjects, state.projectState.selected)
@@ -426,7 +431,7 @@ func handleKey(
 	sessions := buildSessionItems(selectedProject)
 	filteredSessions := filterSessions(sessions, state.sessionFilter)
 	state.sessionState.clamp(len(filteredSessions))
-	selectedSession := selectedSession(filteredSessions, state.sessionState.selected)
+	selectedSession, selectedIsNew := selectedSessionItem(filteredSessions, state.sessionState.selected)
 
 	if ev.Key() == tcell.KeyCtrlN {
 		if cwd := newSessionCwd(selectedProject, opts.DefaultCwd); cwd != "" {
@@ -445,14 +450,16 @@ func handleKey(
 		if selectedSession != nil {
 			return &Selection{Project: selectedProject, Session: *selectedSession, UseProxy: state.proxyEnabled}, nil
 		}
-		if cwd := newSessionCwd(selectedProject, opts.DefaultCwd); cwd != "" {
-			return &Selection{Project: selectedProject, Cwd: cwd, UseProxy: state.proxyEnabled}, nil
+		if selectedIsNew {
+			if cwd := newSessionCwd(selectedProject, opts.DefaultCwd); cwd != "" {
+				return &Selection{Project: selectedProject, Cwd: cwd, UseProxy: state.proxyEnabled}, nil
+			}
 		}
 	}
 
 	if state.focus == "preview" && isPreviewNavKey(ev) {
 		previewText := previewTextForSession(state, selectedSession)
-		lines := buildPreviewLines(selectedProject, selectedSession, state, previewText, opts)
+		lines := buildPreviewLines(selectedProject, selectedSession, selectedIsNew, state, previewText, opts)
 		lines = buildWrappedLines(lines, max(0, layoutMode.preview.w-2))
 		applyPreviewNavigation(&state.previewState, len(lines), max(0, layoutMode.preview.h-2), ev)
 		return nil, nil
@@ -480,7 +487,7 @@ func handleKey(
 
 	if state.focus == "preview" {
 		previewText := previewTextForSession(state, selectedSession)
-		lines := buildPreviewLines(selectedProject, selectedSession, state, previewText, opts)
+		lines := buildPreviewLines(selectedProject, selectedSession, selectedIsNew, state, previewText, opts)
 		lines = buildWrappedLines(lines, max(0, layoutMode.preview.w-2))
 		applyPreviewNavigation(&state.previewState, len(lines), max(0, layoutMode.preview.h-2), ev)
 		return nil, nil
@@ -548,7 +555,7 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 
 	layoutMode := computeLayout(screen)
 
-	projects := buildProjectItems(state.projects)
+	projects := buildProjectItems(state.projects, opts.DefaultCwd)
 	filteredProjects := filterProjects(projects, state.projectFilter)
 	state.projectState.clamp(len(filteredProjects))
 	state.projectState.ensureVisible(layoutMode.projects.h-2, len(filteredProjects))
@@ -560,7 +567,7 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 	state.sessionState.clamp(len(filteredSessions))
 	state.sessionState.ensureVisible(layoutMode.sessions.h-2, len(filteredSessions))
 
-	selectedSession := selectedSession(filteredSessions, state.sessionState.selected)
+	selectedSession, selectedIsNew := selectedSessionItem(filteredSessions, state.sessionState.selected)
 
 	listFocus := state.focus
 	if layoutMode.mode == "1col" && state.focus == "preview" {
@@ -625,7 +632,7 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 		previewFilter = state.previewSearch
 	}
 	drawBox(screen, layoutMode.preview, "Preview", state.focus == "preview", previewFilter)
-	lines := buildPreviewLines(selectedProject, selectedSession, state, previewText, opts)
+	lines := buildPreviewLines(selectedProject, selectedSession, selectedIsNew, state, previewText, opts)
 	lines = buildWrappedLines(lines, max(0, layoutMode.preview.w-2))
 	viewH := max(0, layoutMode.preview.h-2)
 	state.previewState.scroll = clamp(state.previewState.scroll, 0, max(0, len(lines)-viewH))
@@ -663,7 +670,7 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 	newHint := ""
 	if newSessionPath != "" {
 		newHint = "  Ctrl+N: new"
-		if selectedSession == nil {
+		if selectedIsNew {
 			openLabel = "Enter: new"
 		}
 	}
@@ -738,8 +745,12 @@ func ensurePreview(screen tcell.Screen, state *uiState, opts Options, session cl
 	}(session, maxMessages)
 }
 
-func buildProjectItems(projects []claudehistory.Project) []projectItem {
-	items := make([]projectItem, 0, len(projects))
+func buildProjectItems(projects []claudehistory.Project, defaultCwd string) []projectItem {
+	items := make([]projectItem, 0, len(projects)+1)
+	currentPath := strings.TrimSpace(defaultCwd)
+	currentResolved := normalizePathForCompare(currentPath)
+	currentIdx := -1
+
 	for _, project := range projects {
 		label := project.Path
 		if label == "" {
@@ -751,13 +762,46 @@ func buildProjectItems(projects []claudehistory.Project) []projectItem {
 		if len(project.Sessions) > 0 {
 			label = fmt.Sprintf("%s  (%d)", label, len(project.Sessions))
 		}
-		items = append(items, projectItem{label: label, project: project})
+		isCurrent := currentResolved != "" && isSamePath(project.Path, currentResolved)
+		if isCurrent {
+			label = "[current] " + label
+		}
+		items = append(items, projectItem{
+			label:         label,
+			project:       project,
+			isCurrent:     isCurrent,
+			alwaysVisible: isCurrent,
+		})
+		if isCurrent {
+			currentIdx = len(items) - 1
+		}
 	}
+
+	if currentResolved != "" {
+		if currentIdx == -1 {
+			project := claudehistory.Project{Path: currentPath}
+			label := "[current] " + currentPath
+			items = append([]projectItem{{
+				label:         label,
+				project:       project,
+				isCurrent:     true,
+				alwaysVisible: true,
+			}}, items...)
+		} else if currentIdx != 0 {
+			cur := items[currentIdx]
+			items = append([]projectItem{cur}, append(items[:currentIdx], items[currentIdx+1:]...)...)
+		}
+	}
+
 	return items
 }
 
 func buildSessionItems(project claudehistory.Project) []sessionItem {
-	items := []sessionItem{}
+	items := []sessionItem{{
+		label:         "(New Agent)",
+		isNew:         true,
+		alwaysVisible: true,
+	}}
 	for _, session := range project.Sessions {
 		title := session.DisplayTitle()
 		ts := "unknown"
@@ -777,11 +821,36 @@ func selectedProject(items []projectItem, idx int) claudehistory.Project {
 	return items[idx].project
 }
 
-func selectedSession(items []sessionItem, idx int) *claudehistory.Session {
+func selectedSessionItem(items []sessionItem, idx int) (*claudehistory.Session, bool) {
 	if idx < 0 || idx >= len(items) {
-		return nil
+		return nil, false
 	}
-	return &items[idx].session
+	item := items[idx]
+	if item.isNew {
+		return nil, true
+	}
+	return &item.session, false
+}
+
+func normalizePathForCompare(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return filepath.Clean(path)
+}
+
+func isSamePath(path string, currentResolved string) bool {
+	if strings.TrimSpace(path) == "" || currentResolved == "" {
+		return false
+	}
+	return normalizePathForCompare(path) == currentResolved
 }
 
 func newSessionCwd(project claudehistory.Project, defaultCwd string) string {
@@ -797,6 +866,7 @@ func newSessionCwd(project claudehistory.Project, defaultCwd string) string {
 func buildPreviewLines(
 	project claudehistory.Project,
 	session *claudehistory.Session,
+	selectedIsNew bool,
 	state *uiState,
 	previewText string,
 	opts Options,
@@ -812,6 +882,18 @@ func buildPreviewLines(
 	if project.Path != "" {
 		lines = append(lines, "Project:")
 		lines = append(lines, "  "+project.Path)
+	}
+	if selectedIsNew {
+		cwd := newSessionCwd(project, opts.DefaultCwd)
+		if cwd != "" {
+			lines = append(lines, "")
+			lines = append(lines, "Start a new Claude session in:")
+			lines = append(lines, "  "+cwd)
+		} else {
+			lines = append(lines, "")
+			lines = append(lines, "Start a new Claude session in the current directory.")
+		}
+		return lines
 	}
 	if session == nil {
 		lines = append(lines, "")
@@ -851,7 +933,7 @@ func renderProjectRows(items []projectItem, focused bool, state listState, viewH
 	start := clamp(state.scroll, 0, max(0, len(items)))
 	end := min(len(items), start+max(0, viewH))
 	for i := start; i < end; i++ {
-		rows = append(rows, row{label: items[i].label})
+		rows = append(rows, row{label: items[i].label, bold: items[i].isCurrent})
 	}
 	return applySelection(rows, focused, listState{selected: state.selected - start})
 }
@@ -869,6 +951,7 @@ func renderSessionRows(items []sessionItem, focused bool, state listState, viewH
 type row struct {
 	label    string
 	dim      bool
+	bold     bool
 	selected bool
 	focused  bool
 }
@@ -914,6 +997,10 @@ func filterProjects(items []projectItem, needle string) []projectItem {
 	n := strings.ToLower(needle)
 	out := make([]projectItem, 0, len(items))
 	for _, it := range items {
+		if it.alwaysVisible {
+			out = append(out, it)
+			continue
+		}
 		if strings.Contains(strings.ToLower(it.label), n) {
 			out = append(out, it)
 		}
@@ -960,6 +1047,10 @@ func filterSessions(items []sessionItem, needle string) []sessionItem {
 	n := strings.ToLower(needle)
 	out := make([]sessionItem, 0, len(items))
 	for _, it := range items {
+		if it.alwaysVisible {
+			out = append(out, it)
+			continue
+		}
 		if strings.Contains(strings.ToLower(it.label), n) {
 			out = append(out, it)
 		}
@@ -1128,6 +1219,9 @@ func drawList(screen tcell.Screen, r rect, rows []row) {
 		}
 		row := rows[i]
 		style := tcell.StyleDefault
+		if row.bold {
+			style = style.Bold(true)
+		}
 		if row.selected {
 			style = style.Reverse(true)
 			if row.focused {

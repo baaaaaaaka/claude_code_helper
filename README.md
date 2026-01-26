@@ -123,6 +123,9 @@ using the current proxy mode (direct or SSH proxy). Toggle proxy mode with
 enter SSH host/port/user. If no history exists yet, Enter starts a new
 session in the current directory.
 
+The Projects column always includes your current working directory and marks
+it as `[current]`. The Sessions column always includes a `(New Agent)` entry.
+
 If you have multiple proxy profiles:
 
 ```bash
@@ -141,7 +144,7 @@ Controls:
 - Switch pane: Tab / Left / Right (also `h`/`l`)
 - Search: `/` then type, Enter apply, Esc cancel (`n`/`N` next/prev in preview)
 - Open: Enter (opens in Claude Code and sets cwd)
-- New session: `Ctrl+N` (in selected project or current dir)
+- New session: `(New Agent)` entry or `Ctrl+N` (in selected project or current dir)
 - Proxy mode: `Ctrl+P` toggle (status shows `Proxy: on/off`)
 - Refresh: `r` (or `Ctrl+R`)
 - Quit: `q`, `Esc`, `Ctrl+C`

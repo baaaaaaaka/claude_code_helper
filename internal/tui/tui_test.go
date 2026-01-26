@@ -82,6 +82,7 @@ func TestHandleKeyEnterSelectsSession(t *testing.T) {
 	state := newTestState([]claudehistory.Project{project})
 	state.focus = "sessions"
 	state.lastListFocus = "sessions"
+	state.sessionState.selected = 1
 
 	selection, err := handleKey(context.Background(), screen, state, Options{}, tcell.NewEventKey(tcell.KeyEnter, 0, 0))
 	if err != nil {
@@ -107,6 +108,7 @@ func TestHandleKeyCtrlJSelectsSession(t *testing.T) {
 	state := newTestState([]claudehistory.Project{project})
 	state.focus = "sessions"
 	state.lastListFocus = "sessions"
+	state.sessionState.selected = 1
 
 	selection, err := handleKey(context.Background(), screen, state, Options{}, tcell.NewEventKey(tcell.KeyCtrlJ, 0, 0))
 	if err != nil {
@@ -138,6 +140,62 @@ func TestNewSessionCwdEmptyWhenNoPaths(t *testing.T) {
 	project := claudehistory.Project{}
 	if got := newSessionCwd(project, ""); got != "" {
 		t.Fatalf("expected empty path, got %q", got)
+	}
+}
+
+func TestBuildProjectItemsPinsCurrent(t *testing.T) {
+	cwd := t.TempDir()
+	projects := []claudehistory.Project{{Path: "/tmp/other"}}
+	items := buildProjectItems(projects, cwd)
+	if len(items) == 0 || !items[0].isCurrent {
+		t.Fatalf("expected current project first, got %#v", items)
+	}
+	if items[0].project.Path != cwd {
+		t.Fatalf("expected current path %s, got %s", cwd, items[0].project.Path)
+	}
+	if !strings.Contains(items[0].label, "[current]") {
+		t.Fatalf("expected current label, got %q", items[0].label)
+	}
+}
+
+func TestBuildProjectItemsMarksExistingCurrent(t *testing.T) {
+	cwd := t.TempDir()
+	projects := []claudehistory.Project{{Path: cwd}, {Path: "/tmp/other"}}
+	items := buildProjectItems(projects, cwd)
+	if len(items) == 0 || !items[0].isCurrent {
+		t.Fatalf("expected current project first, got %#v", items)
+	}
+}
+
+func TestFilterProjectsKeepsCurrentVisible(t *testing.T) {
+	cwd := t.TempDir()
+	items := buildProjectItems([]claudehistory.Project{{Path: "/tmp/other"}}, cwd)
+	filtered := filterProjects(items, "nomatch")
+	found := false
+	for _, it := range filtered {
+		if it.isCurrent {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected current project to remain visible")
+	}
+}
+
+func TestBuildSessionItemsIncludesNewAgent(t *testing.T) {
+	project := claudehistory.Project{Sessions: []claudehistory.Session{{SessionID: "sess-1"}}}
+	items := buildSessionItems(project)
+	if len(items) == 0 || !items[0].isNew {
+		t.Fatalf("expected new agent item first, got %#v", items)
+	}
+}
+
+func TestFilterSessionsKeepsNewAgent(t *testing.T) {
+	project := claudehistory.Project{Sessions: []claudehistory.Session{{SessionID: "sess-1"}}}
+	items := buildSessionItems(project)
+	filtered := filterSessions(items, "nomatch")
+	if len(filtered) == 0 || !filtered[0].isNew {
+		t.Fatalf("expected new agent item to remain visible")
 	}
 }
 
@@ -237,6 +295,7 @@ func TestPreviewArrowScrollsWhenFocused(t *testing.T) {
 	state := newTestState([]claudehistory.Project{project})
 	state.focus = "preview"
 	state.lastListFocus = "sessions"
+	state.sessionState.selected = 1
 	state.previewCache["sess-3"] = strings.Repeat("line ", 80)
 
 	_, err := handleKey(context.Background(), screen, state, Options{}, tcell.NewEventKey(tcell.KeyDown, 0, 0))
@@ -274,6 +333,7 @@ func TestPreviewSearchMatches(t *testing.T) {
 	state := newTestState([]claudehistory.Project{project})
 	state.focus = "preview"
 	state.lastListFocus = "sessions"
+	state.sessionState.selected = 1
 	state.previewCache["sess-4"] = "alpha\nbeta\nalpha"
 
 	_, err := handleKey(context.Background(), screen, state, Options{}, tcell.NewEventKey(tcell.KeyRune, '/', 0))
