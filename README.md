@@ -145,7 +145,8 @@ Controls:
 - Search: `/` then type, Enter apply, Esc cancel (`n`/`N` next/prev in preview)
 - Open: Enter (opens in Claude Code and sets cwd)
 - New session: `(New Agent)` entry or `Ctrl+N` (in selected project or current dir)
-- Proxy mode: `Ctrl+P` toggle (status shows `Proxy: on/off`)
+- Proxy mode: `Ctrl+P` toggle (status shows `Proxy mode (Ctrl+P): on/off`)
+- YOLO mode: `Ctrl+Y` toggle (`--permission-mode bypassPermissions`, status shows warning)
 - Refresh: `r` (or `Ctrl+R`)
 - Quit: `q`, `Esc`, `Ctrl+C`
 - In-app update: `Ctrl+U` (when an update is available)

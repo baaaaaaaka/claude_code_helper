@@ -83,6 +83,7 @@ func TestRunClaudeNewSessionPreservesTTY(t *testing.T) {
 			scriptPath,
 			"",
 			false,
+			false,
 			io.Discard,
 		)
 		if err != nil {
@@ -122,6 +123,7 @@ func TestRunClaudeSessionPreservesTTY(t *testing.T) {
 			project,
 			scriptPath,
 			"",
+			false,
 			false,
 			io.Discard,
 		)

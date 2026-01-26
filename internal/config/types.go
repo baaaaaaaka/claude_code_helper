@@ -7,6 +7,7 @@ const CurrentVersion = 1
 type Config struct {
 	Version      int        `json:"version"`
 	ProxyEnabled *bool      `json:"proxyEnabled,omitempty"`
+	YoloEnabled  *bool      `json:"yoloEnabled,omitempty"`
 	Profiles     []Profile  `json:"profiles"`
 	Instances    []Instance `json:"instances"`
 }

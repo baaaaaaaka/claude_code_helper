@@ -19,7 +19,7 @@ func TestBuildClaudeResumeCommandUsesSessionPath(t *testing.T) {
 	session := claudehistory.Session{SessionID: "abc", ProjectPath: dir}
 	project := claudehistory.Project{Path: "/tmp/other"}
 
-	path, args, cwd, err := buildClaudeResumeCommand("/bin/claude", session, project)
+	path, args, cwd, err := buildClaudeResumeCommand("/bin/claude", session, project, false)
 	if err != nil {
 		t.Fatalf("buildClaudeResumeCommand error: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestBuildClaudeResumeCommandUsesProjectPath(t *testing.T) {
 	session := claudehistory.Session{SessionID: "abc"}
 	project := claudehistory.Project{Path: dir}
 
-	_, _, cwd, err := buildClaudeResumeCommand("/bin/claude", session, project)
+	_, _, cwd, err := buildClaudeResumeCommand("/bin/claude", session, project, false)
 	if err != nil {
 		t.Fatalf("buildClaudeResumeCommand error: %v", err)
 	}
@@ -48,12 +48,32 @@ func TestBuildClaudeResumeCommandUsesProjectPath(t *testing.T) {
 	}
 }
 
+func TestBuildClaudeResumeCommandAddsYoloArgs(t *testing.T) {
+	dir := t.TempDir()
+	session := claudehistory.Session{SessionID: "abc"}
+	project := claudehistory.Project{Path: dir}
+
+	_, args, _, err := buildClaudeResumeCommand("/bin/claude", session, project, true)
+	if err != nil {
+		t.Fatalf("buildClaudeResumeCommand error: %v", err)
+	}
+	want := []string{"--permission-mode", "bypassPermissions", "--resume", "abc"}
+	if len(args) != len(want) {
+		t.Fatalf("expected args %v, got %v", want, args)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("expected args %v, got %v", want, args)
+		}
+	}
+}
+
 func TestBuildClaudeResumeCommandRejectsMissingSession(t *testing.T) {
 	dir := t.TempDir()
 	session := claudehistory.Session{}
 	project := claudehistory.Project{Path: dir}
 
-	_, _, _, err := buildClaudeResumeCommand("/bin/claude", session, project)
+	_, _, _, err := buildClaudeResumeCommand("/bin/claude", session, project, false)
 	if err == nil {
 		t.Fatalf("expected error for missing session id")
 	}
@@ -63,7 +83,7 @@ func TestBuildClaudeResumeCommandRejectsMissingCwd(t *testing.T) {
 	session := claudehistory.Session{SessionID: "abc", ProjectPath: filepath.Join(t.TempDir(), "missing")}
 	project := claudehistory.Project{}
 
-	_, _, _, err := buildClaudeResumeCommand("/bin/claude", session, project)
+	_, _, _, err := buildClaudeResumeCommand("/bin/claude", session, project, false)
 	if err == nil {
 		t.Fatalf("expected error for missing cwd")
 	}
@@ -124,6 +144,7 @@ func TestRunClaudeNewSessionUsesCwdDirect(t *testing.T) {
 		scriptPath,
 		"",
 		false,
+		false,
 		io.Discard,
 	)
 	if err != nil {
@@ -136,6 +157,55 @@ func TestRunClaudeNewSessionUsesCwdDirect(t *testing.T) {
 	if strings.TrimSpace(string(got)) != dir {
 		if canonicalPath(t, strings.TrimSpace(string(got))) != canonicalPath(t, dir) {
 			t.Fatalf("expected cwd %s, got %q", dir, strings.TrimSpace(string(got)))
+		}
+	}
+}
+
+func TestRunClaudeNewSessionAddsYoloArgs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script test on windows")
+	}
+	dir := t.TempDir()
+	outFile := filepath.Join(t.TempDir(), "args.txt")
+	scriptPath := filepath.Join(t.TempDir(), "claude")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\n", outFile)
+	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	store, err := config.NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	err = runClaudeNewSession(
+		context.Background(),
+		&rootOptions{},
+		store,
+		nil,
+		nil,
+		dir,
+		scriptPath,
+		"",
+		false,
+		true,
+		io.Discard,
+	)
+	if err != nil {
+		t.Fatalf("runClaudeNewSession error: %v", err)
+	}
+	got, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(got)), "\n")
+	want := []string{"--permission-mode", "bypassPermissions"}
+	if len(lines) < len(want) {
+		t.Fatalf("expected args %v, got %v", want, lines)
+	}
+	for i := range want {
+		if lines[i] != want[i] {
+			t.Fatalf("expected args %v, got %v", want, lines)
 		}
 	}
 }
@@ -157,6 +227,7 @@ func TestRunClaudeNewSessionRejectsProxyWithoutProfile(t *testing.T) {
 		"/bin/claude",
 		"",
 		true,
+		false,
 		io.Discard,
 	)
 	if err == nil {

@@ -17,6 +17,7 @@ func buildClaudeResumeCommand(
 	claudePath string,
 	session claudehistory.Session,
 	project claudehistory.Project,
+	yolo bool,
 ) (string, []string, string, error) {
 	if session.SessionID == "" {
 		return "", nil, "", fmt.Errorf("missing session id")
@@ -41,6 +42,9 @@ func buildClaudeResumeCommand(
 	}
 
 	args := []string{"--resume", session.SessionID}
+	if yolo {
+		args = append([]string{"--permission-mode", "bypassPermissions"}, args...)
+	}
 	return path, args, cwd, nil
 }
 
@@ -72,6 +76,7 @@ func runClaudeSession(
 	claudePath string,
 	claudeDir string,
 	useProxy bool,
+	useYolo bool,
 	log io.Writer,
 ) error {
 	claudePathResolved, err := ensureClaudeInstalled(ctx, claudePath, log)
@@ -79,7 +84,7 @@ func runClaudeSession(
 		return err
 	}
 	claudePath = claudePathResolved
-	path, args, cwd, err := buildClaudeResumeCommand(claudePath, session, project)
+	path, args, cwd, err := buildClaudeResumeCommand(claudePath, session, project, useYolo)
 	if err != nil {
 		return err
 	}
@@ -123,6 +128,7 @@ func runClaudeNewSession(
 	claudePath string,
 	claudeDir string,
 	useProxy bool,
+	useYolo bool,
 	log io.Writer,
 ) error {
 	cwd, err := normalizeWorkingDir(cwd)
@@ -136,6 +142,9 @@ func runClaudeNewSession(
 	}
 	claudePath = claudePathResolved
 	cmdArgs := []string{claudePath}
+	if useYolo {
+		cmdArgs = append(cmdArgs, "--permission-mode", "bypassPermissions")
+	}
 
 	patchOutcome, err := maybePatchExecutable(cmdArgs, root.exePatch, root.configPath, log)
 	if err != nil {

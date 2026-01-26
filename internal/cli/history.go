@@ -133,6 +133,7 @@ func newHistoryOpenCmd(root *rootOptions, claudeDir *string, claudePath *string,
 				cfg = cfgWithProfile
 				profile = &p
 			}
+			useYolo := resolveYoloEnabled(cfg)
 
 			projects, err := claudehistory.DiscoverProjects(*claudeDir)
 			if err != nil && len(projects) == 0 {
@@ -154,6 +155,7 @@ func newHistoryOpenCmd(root *rootOptions, claudeDir *string, claudePath *string,
 				*claudePath,
 				*claudeDir,
 				useProxy,
+				useYolo,
 				cmd.ErrOrStderr(),
 			)
 		},
@@ -173,6 +175,7 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 		if err != nil {
 			return err
 		}
+		useYolo := resolveYoloEnabled(cfg)
 
 		var profile *config.Profile
 		if useProxy {
@@ -198,7 +201,11 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 			Version:         version,
 			ProxyEnabled:    useProxy,
 			ProxyConfigured: len(cfg.Profiles) > 0,
+			YoloEnabled:     useYolo,
 			DefaultCwd:      defaultCwd,
+			PersistYolo: func(enabled bool) error {
+				return persistYoloEnabled(store, enabled)
+			},
 			CheckUpdate: func(ctx context.Context) update.Status {
 				return update.CheckForUpdate(ctx, update.CheckOptions{
 					InstalledVersion: version,
@@ -242,6 +249,7 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 				claudePath,
 				claudeDir,
 				selection.UseProxy,
+				selection.UseYolo,
 				cmd.ErrOrStderr(),
 			)
 		}
@@ -256,6 +264,7 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 			claudePath,
 			claudeDir,
 			selection.UseProxy,
+			selection.UseYolo,
 			cmd.ErrOrStderr(),
 		)
 	}

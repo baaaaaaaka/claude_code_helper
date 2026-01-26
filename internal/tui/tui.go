@@ -33,6 +33,7 @@ type Selection struct {
 	Session  claudehistory.Session
 	Cwd      string
 	UseProxy bool
+	UseYolo  bool
 }
 
 type Options struct {
@@ -42,6 +43,8 @@ type Options struct {
 	PreviewMessages int
 	ProxyEnabled    bool
 	ProxyConfigured bool
+	YoloEnabled     bool
+	PersistYolo     func(bool) error
 	DefaultCwd      string
 }
 
@@ -117,6 +120,7 @@ type uiState struct {
 
 	proxyEnabled    bool
 	proxyConfigured bool
+	yoloEnabled     bool
 
 	previewCache     map[string]string
 	previewError     map[string]string
@@ -141,6 +145,7 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 		lastListFocus:   "projects",
 		proxyEnabled:    opts.ProxyEnabled,
 		proxyConfigured: opts.ProxyConfigured,
+		yoloEnabled:     opts.YoloEnabled,
 		previewCache:    map[string]string{},
 		previewError:    map[string]string{},
 		previewLoading:  map[string]bool{},
@@ -329,6 +334,15 @@ func handleKey(
 			return nil, ProxyToggleRequested{Enable: true, RequireConfig: true}
 		}
 		return nil, ProxyToggleRequested{Enable: enable}
+	case tcell.KeyCtrlY:
+		enable := !state.yoloEnabled
+		if opts.PersistYolo != nil {
+			if err := opts.PersistYolo(enable); err != nil {
+				return nil, err
+			}
+		}
+		state.yoloEnabled = enable
+		return nil, nil
 	case tcell.KeyCtrlR:
 		refreshState(ctx, state, opts)
 		return nil, nil
@@ -435,7 +449,7 @@ func handleKey(
 
 	if ev.Key() == tcell.KeyCtrlN {
 		if cwd := newSessionCwd(selectedProject, opts.DefaultCwd); cwd != "" {
-			return &Selection{Project: selectedProject, Cwd: cwd, UseProxy: state.proxyEnabled}, nil
+			return &Selection{Project: selectedProject, Cwd: cwd, UseProxy: state.proxyEnabled, UseYolo: state.yoloEnabled}, nil
 		}
 		return nil, nil
 	}
@@ -448,11 +462,11 @@ func handleKey(
 	}
 	if enterPressed {
 		if selectedSession != nil {
-			return &Selection{Project: selectedProject, Session: *selectedSession, UseProxy: state.proxyEnabled}, nil
+			return &Selection{Project: selectedProject, Session: *selectedSession, UseProxy: state.proxyEnabled, UseYolo: state.yoloEnabled}, nil
 		}
 		if selectedIsNew {
 			if cwd := newSessionCwd(selectedProject, opts.DefaultCwd); cwd != "" {
-				return &Selection{Project: selectedProject, Cwd: cwd, UseProxy: state.proxyEnabled}, nil
+				return &Selection{Project: selectedProject, Cwd: cwd, UseProxy: state.proxyEnabled, UseYolo: state.yoloEnabled}, nil
 			}
 		}
 	}
@@ -661,9 +675,18 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 
 	drawPreview(screen, layoutMode.preview, lines, state.previewState.scroll, lineAttrs)
 
-	proxyLabel := "Proxy: off"
+	proxyLabel := "Proxy mode (Ctrl+P): off"
 	if state.proxyEnabled {
-		proxyLabel = "Proxy: on"
+		proxyLabel = "Proxy mode (Ctrl+P): on"
+	}
+	yoloLabel := "YOLO mode (Ctrl+Y): off"
+	if state.yoloEnabled {
+		yoloLabel = "[!] YOLO mode (Ctrl+Y): on"
+	}
+	baseStatusStyle := tcell.StyleDefault.Reverse(true)
+	yoloStatusStyle := baseStatusStyle
+	if state.yoloEnabled {
+		yoloStatusStyle = baseStatusStyle.Foreground(tcell.ColorYellow)
 	}
 	newSessionPath := newSessionCwd(selectedProject, opts.DefaultCwd)
 	openLabel := "Enter: open"
@@ -674,24 +697,39 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 			openLabel = "Enter: new"
 		}
 	}
-	status := "Tab/Left/Right: switch  /: search  " + openLabel + "  r: refresh" + newHint + "  " + proxyLabel + "  Ctrl+P: toggle  q: quit"
+	statusSegments := []statusSegment{
+		{text: "Tab/Left/Right: switch  /: search  " + openLabel + "  r: refresh" + newHint + "  " + proxyLabel + "  ", style: baseStatusStyle},
+		{text: yoloLabel, style: yoloStatusStyle},
+		{text: "  q: quit", style: baseStatusStyle},
+	}
 	if state.inputMode != "" {
-		status = "Type to search. Enter: apply  Esc: cancel  " + proxyLabel + "  Ctrl+P: toggle"
+		statusSegments = []statusSegment{
+			{text: "Type to search. Enter: apply  Esc: cancel  " + proxyLabel + "  ", style: baseStatusStyle},
+			{text: yoloLabel, style: yoloStatusStyle},
+		}
 	} else if state.focus == "preview" {
-		status = "Up/Down PgUp/PgDn: scroll  /: search  " + openLabel + "  Tab/Left/Right: switch" + newHint + "  " + proxyLabel + "  Ctrl+P: toggle  q: quit"
+		statusSegments = []statusSegment{
+			{text: "Up/Down PgUp/PgDn: scroll  /: search  " + openLabel + "  Tab/Left/Right: switch" + newHint + "  " + proxyLabel + "  ", style: baseStatusStyle},
+			{text: yoloLabel, style: yoloStatusStyle},
+			{text: "  q: quit", style: baseStatusStyle},
+		}
 		if state.previewSearch != "" && len(state.previewMatches) > 0 {
-			status = status + "  n/N: next/prev"
+			statusSegments = append(statusSegments, statusSegment{text: "  n/N: next/prev", style: baseStatusStyle})
 		}
 	}
 	if state.loadError != nil {
 		if len(state.projects) == 0 && newSessionPath != "" {
-			status = "No history found. " + openLabel + "  " + proxyLabel + "  Ctrl+P: toggle  q: quit"
+			statusSegments = []statusSegment{
+				{text: "No history found. " + openLabel + "  " + proxyLabel + "  ", style: baseStatusStyle},
+				{text: yoloLabel, style: yoloStatusStyle},
+				{text: "  q: quit", style: baseStatusStyle},
+			}
 		} else {
-			status = fmt.Sprintf("Load error: %v", state.loadError)
+			statusSegments = []statusSegment{{text: fmt.Sprintf("Load error: %v", state.loadError), style: baseStatusStyle}}
 		}
 	}
 	if state.loadError == nil && state.updateStatus != nil && !state.updateStatus.Supported && state.updateStatus.Error != "" && state.inputMode == "" {
-		status = fmt.Sprintf("Update check failed: %s", state.updateStatus.Error)
+		statusSegments = []statusSegment{{text: fmt.Sprintf("Update check failed: %s", state.updateStatus.Error), style: baseStatusStyle}}
 	}
 
 	updateRight := versionLabel(opts.Version)
@@ -712,7 +750,7 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 		}
 	}
 
-	drawStatus(screen, status, updateRight, updateBold)
+	drawStatusSegments(screen, statusSegments, updateRight, updateBold)
 	screen.Show()
 	return nil
 }
@@ -1259,24 +1297,49 @@ func drawPreview(screen tcell.Screen, r rect, lines []string, scroll int, lineAt
 	}
 }
 
-func drawStatus(screen tcell.Screen, left string, right string, rightBold bool) {
+type statusSegment struct {
+	text  string
+	style tcell.Style
+}
+
+func drawStatusSegments(screen tcell.Screen, left []statusSegment, right string, rightBold bool) {
 	w, h := screen.Size()
 	if h <= 0 {
 		return
 	}
 	y := h - 1
-	bar := padRight(truncate(left, w), w)
-	writeText(screen, 0, y, bar, tcell.StyleDefault.Reverse(true))
+
+	baseStyle := tcell.StyleDefault.Reverse(true)
+	var leftText strings.Builder
+	for _, seg := range left {
+		leftText.WriteString(seg.text)
+	}
+	bar := padRight(truncate(leftText.String(), w), w)
+	writeText(screen, 0, y, bar, baseStyle)
+
+	x := 0
+	for _, seg := range left {
+		if x >= w {
+			break
+		}
+		text := truncate(seg.text, w-x)
+		if text == "" {
+			continue
+		}
+		style := seg.style
+		writeText(screen, x, y, text, style)
+		x += displayWidth(text)
+	}
 	if right == "" {
 		return
 	}
 	r := truncate(right, w)
-	x := max(0, w-len(r))
+	rightX := max(0, w-len(r))
 	style := tcell.StyleDefault.Reverse(true)
 	if rightBold {
 		style = style.Bold(true)
 	}
-	writeText(screen, x, y, r, style)
+	writeText(screen, rightX, y, r, style)
 }
 
 func writeText(screen tcell.Screen, x, y int, text string, style tcell.Style) {
