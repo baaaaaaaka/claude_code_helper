@@ -67,7 +67,7 @@ func runInstallPs1(t *testing.T, apiFail bool, pathAlreadySet bool) {
 		"-Version", "latest",
 		"-InstallDir", installDir,
 	)
-	cmd.Env = append([]string{}, os.Environ()...)
+	cmd.Env = append([]string{}, filterEnvWithoutKey(os.Environ(), "Path")...)
 	cmd.Env = append(cmd.Env,
 		"CLAUDE_PROXY_API_BASE="+server.URL,
 		"CLAUDE_PROXY_RELEASE_BASE="+server.URL,
@@ -132,6 +132,21 @@ func hasPathLineForDir(profileText, installDir string) bool {
 		}
 	}
 	return false
+}
+
+func filterEnvWithoutKey(env []string, key string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		k, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(k, key) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 func newInstallServer(
