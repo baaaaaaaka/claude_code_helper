@@ -56,6 +56,7 @@ func runInstallPs1(t *testing.T, apiFail bool, pathAlreadySet bool) {
 	if pathAlreadySet {
 		pathValue = installDir + ";" + pathValue
 	}
+	pathContainsInstall := containsPathEntry(pathValue, installDir)
 
 	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath,
 		"-Repo", repo,
@@ -93,7 +94,7 @@ func runInstallPs1(t *testing.T, apiFail bool, pathAlreadySet bool) {
 	if !strings.Contains(profileText, "Set-Alias -Name clp -Value claude-proxy") {
 		t.Fatalf("missing clp alias in profile")
 	}
-	if pathAlreadySet {
+	if pathContainsInstall {
 		if strings.Contains(profileText, "$env:Path") && strings.Contains(profileText, installDir) {
 			t.Fatalf("unexpected PATH update in profile")
 		}
@@ -102,6 +103,19 @@ func runInstallPs1(t *testing.T, apiFail bool, pathAlreadySet bool) {
 			t.Fatalf("missing PATH update in profile")
 		}
 	}
+}
+
+func containsPathEntry(pathValue, entry string) bool {
+	target := strings.TrimRight(entry, "\\")
+	for _, part := range strings.Split(pathValue, ";") {
+		if strings.TrimSpace(part) == "" {
+			continue
+		}
+		if strings.EqualFold(strings.TrimRight(part, "\\"), target) {
+			return true
+		}
+	}
+	return false
 }
 
 func newInstallServer(
