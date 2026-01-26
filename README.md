@@ -171,6 +171,9 @@ If `claude` is not in PATH:
 claude-proxy history --claude-path /path/to/claude tui
 ```
 
+If Claude Code is not installed, `claude-proxy` will automatically run the
+official installer and then continue.
+
 ## Upgrade
 
 Upgrade from GitHub Releases:

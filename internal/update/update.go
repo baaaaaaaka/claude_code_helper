@@ -24,6 +24,11 @@ const (
 	DefaultRepo = "baaaaaaaka/claude_code_helper"
 )
 
+var (
+	githubAPIBase     = "https://api.github.com"
+	githubReleaseBase = "https://github.com"
+)
+
 type Status struct {
 	Supported        bool
 	Repo             string
@@ -235,7 +240,7 @@ func normalizeVersion(v string) string {
 }
 
 func fetchLatestRelease(ctx context.Context, repo string, timeout time.Duration) (string, string, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo)
+	url := fmt.Sprintf("%s/repos/%s/releases/latest", githubAPIBase, repo)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", "", err
@@ -301,11 +306,11 @@ func assetName(version, goos, goarch string) (string, error) {
 }
 
 func buildReleaseURL(repo, tag, asset string) string {
-	return fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", repo, tag, asset)
+	return fmt.Sprintf("%s/%s/releases/download/%s/%s", githubReleaseBase, repo, tag, asset)
 }
 
 func buildChecksumsURL(repo, tag string) string {
-	return fmt.Sprintf("https://github.com/%s/releases/download/%s/checksums.txt", repo, tag)
+	return fmt.Sprintf("%s/%s/releases/download/%s/checksums.txt", githubReleaseBase, repo, tag)
 }
 
 func downloadReleaseAsset(ctx context.Context, repo, tag, asset, installPath string, timeout time.Duration) (string, error) {
