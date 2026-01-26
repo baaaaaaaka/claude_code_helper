@@ -91,6 +91,15 @@ func runInstallSh(t *testing.T, apiFail bool, pathAlreadySet bool) {
 		t.Fatalf("installed payload mismatch")
 	}
 
+	clpPath := filepath.Join(installDir, "clp")
+	clpData, err := os.ReadFile(clpPath)
+	if err != nil {
+		t.Fatalf("read clp: %v", err)
+	}
+	if string(clpData) != string(assetData) {
+		t.Fatalf("clp payload mismatch")
+	}
+
 	configPath := expectedBashConfigPath(homeDir)
 	contents, err := os.ReadFile(configPath)
 	if err != nil {

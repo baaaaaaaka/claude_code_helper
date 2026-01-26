@@ -120,6 +120,79 @@ func TestHandleKeyCtrlJSelectsSession(t *testing.T) {
 	}
 }
 
+func TestNewSessionCwdPrefersProjectPath(t *testing.T) {
+	project := claudehistory.Project{Path: "/tmp/project"}
+	if got := newSessionCwd(project, "/tmp/default"); got != "/tmp/project" {
+		t.Fatalf("expected project path, got %q", got)
+	}
+}
+
+func TestNewSessionCwdUsesDefaultWhenNoProjectPath(t *testing.T) {
+	project := claudehistory.Project{}
+	if got := newSessionCwd(project, "/tmp/default"); got != "/tmp/default" {
+		t.Fatalf("expected default path, got %q", got)
+	}
+}
+
+func TestNewSessionCwdEmptyWhenNoPaths(t *testing.T) {
+	project := claudehistory.Project{}
+	if got := newSessionCwd(project, ""); got != "" {
+		t.Fatalf("expected empty path, got %q", got)
+	}
+}
+
+func TestHandleKeyEnterStartsNewSessionWhenNoHistory(t *testing.T) {
+	screen := newTestScreen(t, 120, 40)
+	dir := t.TempDir()
+	state := newTestState(nil)
+
+	selection, err := handleKey(context.Background(), screen, state, Options{DefaultCwd: dir}, tcell.NewEventKey(tcell.KeyEnter, 0, 0))
+	if err != nil {
+		t.Fatalf("handleKey error: %v", err)
+	}
+	if selection == nil || selection.Cwd != dir || selection.Session.SessionID != "" {
+		t.Fatalf("expected new session in %s, got %#v", dir, selection)
+	}
+}
+
+func TestHandleKeyCtrlNStartsNewSessionInProject(t *testing.T) {
+	screen := newTestScreen(t, 120, 40)
+	dir := t.TempDir()
+	project := claudehistory.Project{
+		Key:  "one",
+		Path: dir,
+		Sessions: []claudehistory.Session{
+			{SessionID: "sess-5", Summary: "hello"},
+		},
+	}
+	state := newTestState([]claudehistory.Project{project})
+	state.proxyEnabled = true
+
+	selection, err := handleKey(context.Background(), screen, state, Options{}, tcell.NewEventKey(tcell.KeyCtrlN, 0, 0))
+	if err != nil {
+		t.Fatalf("handleKey error: %v", err)
+	}
+	if selection == nil || selection.Cwd != dir || selection.Session.SessionID != "" {
+		t.Fatalf("expected new session in %s, got %#v", dir, selection)
+	}
+	if !selection.UseProxy {
+		t.Fatalf("expected proxy enabled")
+	}
+}
+
+func TestHandleKeyCtrlNIgnoredWithoutCwd(t *testing.T) {
+	screen := newTestScreen(t, 80, 20)
+	state := newTestState(nil)
+
+	selection, err := handleKey(context.Background(), screen, state, Options{}, tcell.NewEventKey(tcell.KeyCtrlN, 0, 0))
+	if err != nil {
+		t.Fatalf("handleKey error: %v", err)
+	}
+	if selection != nil {
+		t.Fatalf("expected no selection, got %#v", selection)
+	}
+}
+
 func TestHandleKeyProxyToggleRequiresConfig(t *testing.T) {
 	screen := newTestScreen(t, 80, 20)
 	state := newTestState([]claudehistory.Project{{Key: "one", Path: "/tmp"}})

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -189,6 +190,7 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 		}
 		claudePath = resolvedClaudePath
 
+		defaultCwd, _ := os.Getwd()
 		selection, err := tui.SelectSession(ctx, tui.Options{
 			LoadProjects: func(ctx context.Context) ([]claudehistory.Project, error) {
 				return claudehistory.DiscoverProjects(claudeDir)
@@ -196,6 +198,7 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 			Version:         version,
 			ProxyEnabled:    useProxy,
 			ProxyConfigured: len(cfg.Profiles) > 0,
+			DefaultCwd:      defaultCwd,
 			CheckUpdate: func(ctx context.Context) update.Status {
 				return update.CheckForUpdate(ctx, update.CheckOptions{
 					InstalledVersion: version,
@@ -227,6 +230,20 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 		}
 		if selection == nil {
 			return nil
+		}
+		if selection.Cwd != "" {
+			return runClaudeNewSession(
+				ctx,
+				root,
+				store,
+				profile,
+				cfg.Instances,
+				selection.Cwd,
+				claudePath,
+				claudeDir,
+				selection.UseProxy,
+				cmd.ErrOrStderr(),
+			)
 		}
 		return runClaudeSession(
 			ctx,

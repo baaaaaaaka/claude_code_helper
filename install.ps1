@@ -142,6 +142,10 @@ try {
 $dst = Join-Path $installDirResolved "claude-proxy.exe"
 Move-Item -Force -Path $tmp -Destination $dst
 
+$clpCmd = Join-Path $installDirResolved "clp.cmd"
+$clpContent = "@echo off`r`n`"%~dp0claude-proxy.exe`" %*`r`n"
+Set-Content -Path $clpCmd -Value $clpContent -Encoding ASCII
+
 $pathInEnv = Test-PathInEnv -pathValue $installDirResolved
 if (-not $pathInEnv) {
   $env:Path = "$installDirResolved;$env:Path"

@@ -89,6 +89,14 @@ func runInstallPs1(t *testing.T, apiFail bool, pathAlreadySet bool) {
 	if !bytes.Equal(got, assetData) {
 		t.Fatalf("installed payload mismatch")
 	}
+	clpCmd := filepath.Join(installDir, "clp.cmd")
+	cmdData, err := os.ReadFile(clpCmd)
+	if err != nil {
+		t.Fatalf("read clp.cmd: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(string(cmdData)), "claude-proxy.exe") {
+		t.Fatalf("clp.cmd does not reference claude-proxy.exe")
+	}
 
 	profile, err := os.ReadFile(profilePath)
 	if err != nil {

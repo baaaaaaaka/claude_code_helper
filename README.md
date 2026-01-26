@@ -24,8 +24,9 @@ Windows (PowerShell):
 powershell -NoProfile -ExecutionPolicy Bypass -Command "iwr -useb https://raw.githubusercontent.com/baaaaaaaka/claude_code_helper/main/install.ps1 | iex"
 ```
 
-The installer tries to add the install directory to PATH and adds an alias
-`clp` → `claude-proxy`. Open a new shell if the command is not found.
+The installer drops a `clp` shim alongside `claude-proxy` and tries to add the
+install directory to PATH (plus a `clp` alias). Open a new shell if the
+command is not found.
 
 ### 2) **Run**
 
@@ -43,10 +44,20 @@ tool create a dedicated key if needed. You can toggle proxy mode later with
 ### 3) Next steps
 
 - Press Enter to open a Claude Code session.
+- If there is no history yet, Enter starts a new session in the current directory.
 - If you have multiple profiles, select one with `claude-proxy <profile>`.
 - Run any command through the proxy (requires a profile):
   `claude-proxy run <profile> -- <cmd> [args...]`.
 - Example: `claude-proxy run pdx -- curl https://example.com`.
+
+### Optional: preconfigure a proxy profile
+
+```bash
+claude-proxy init
+```
+
+Config is stored under your OS user config directory (Linux typically
+`~/.config/claude-proxy/config.json`).
 
 ## Requirements (runtime)
 
@@ -69,8 +80,9 @@ sh -c 'url="https://raw.githubusercontent.com/baaaaaaaka/claude_code_helper/main
 
 By default it installs to `~/.local/bin/claude-proxy`.
 
-The installer tries to add `~/.local/bin` to PATH and adds an alias
-`clp` → `claude-proxy`. Open a new shell if the command is not found.
+The installer drops a `clp` shim alongside `claude-proxy` and tries to add
+`~/.local/bin` to PATH (plus a `clp` alias). Open a new shell if the command is
+not found.
 If you need to update PATH manually:
 
 ```bash
@@ -108,7 +120,8 @@ claude-proxy history tui
 This opens the TUI. Press Enter to open the selected session in Claude Code
 using the current proxy mode (direct or SSH proxy). Toggle proxy mode with
 `Ctrl+P`; if proxy is enabled but not configured, you will be prompted to
-enter SSH host/port/user.
+enter SSH host/port/user. If no history exists yet, Enter starts a new
+session in the current directory.
 
 If you have multiple proxy profiles:
 
@@ -128,6 +141,7 @@ Controls:
 - Switch pane: Tab / Left / Right (also `h`/`l`)
 - Search: `/` then type, Enter apply, Esc cancel (`n`/`N` next/prev in preview)
 - Open: Enter (opens in Claude Code and sets cwd)
+- New session: `Ctrl+N` (in selected project or current dir)
 - Proxy mode: `Ctrl+P` toggle (status shows `Proxy: on/off`)
 - Refresh: `r` (or `Ctrl+R`)
 - Quit: `q`, `Esc`, `Ctrl+C`

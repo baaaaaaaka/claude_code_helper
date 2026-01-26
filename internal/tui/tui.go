@@ -30,6 +30,7 @@ var errQuit = errors.New("quit")
 type Selection struct {
 	Project  claudehistory.Project
 	Session  claudehistory.Session
+	Cwd      string
 	UseProxy bool
 }
 
@@ -40,6 +41,7 @@ type Options struct {
 	PreviewMessages int
 	ProxyEnabled    bool
 	ProxyConfigured bool
+	DefaultCwd      string
 }
 
 type uiEvent struct {
@@ -426,14 +428,26 @@ func handleKey(
 	state.sessionState.clamp(len(filteredSessions))
 	selectedSession := selectedSession(filteredSessions, state.sessionState.selected)
 
+	if ev.Key() == tcell.KeyCtrlN {
+		if cwd := newSessionCwd(selectedProject, opts.DefaultCwd); cwd != "" {
+			return &Selection{Project: selectedProject, Cwd: cwd, UseProxy: state.proxyEnabled}, nil
+		}
+		return nil, nil
+	}
+
 	enterPressed := ev.Key() == tcell.KeyEnter || ev.Key() == tcell.KeyCtrlJ || ev.Key() == tcell.KeyCtrlM
 	if ev.Key() == tcell.KeyRune {
 		if ev.Rune() == '\n' || ev.Rune() == '\r' {
 			enterPressed = true
 		}
 	}
-	if enterPressed && selectedSession != nil {
-		return &Selection{Project: selectedProject, Session: *selectedSession, UseProxy: state.proxyEnabled}, nil
+	if enterPressed {
+		if selectedSession != nil {
+			return &Selection{Project: selectedProject, Session: *selectedSession, UseProxy: state.proxyEnabled}, nil
+		}
+		if cwd := newSessionCwd(selectedProject, opts.DefaultCwd); cwd != "" {
+			return &Selection{Project: selectedProject, Cwd: cwd, UseProxy: state.proxyEnabled}, nil
+		}
 	}
 
 	if state.focus == "preview" && isPreviewNavKey(ev) {
@@ -644,17 +658,30 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 	if state.proxyEnabled {
 		proxyLabel = "Proxy: on"
 	}
-	status := "Tab/Left/Right: switch  /: search  Enter: open  r: refresh  " + proxyLabel + "  Ctrl+P: toggle  q: quit"
+	newSessionPath := newSessionCwd(selectedProject, opts.DefaultCwd)
+	openLabel := "Enter: open"
+	newHint := ""
+	if newSessionPath != "" {
+		newHint = "  Ctrl+N: new"
+		if selectedSession == nil {
+			openLabel = "Enter: new"
+		}
+	}
+	status := "Tab/Left/Right: switch  /: search  " + openLabel + "  r: refresh" + newHint + "  " + proxyLabel + "  Ctrl+P: toggle  q: quit"
 	if state.inputMode != "" {
 		status = "Type to search. Enter: apply  Esc: cancel  " + proxyLabel + "  Ctrl+P: toggle"
 	} else if state.focus == "preview" {
-		status = "Up/Down PgUp/PgDn: scroll  /: search  Enter: open  Tab/Left/Right: switch  " + proxyLabel + "  Ctrl+P: toggle  q: quit"
+		status = "Up/Down PgUp/PgDn: scroll  /: search  " + openLabel + "  Tab/Left/Right: switch" + newHint + "  " + proxyLabel + "  Ctrl+P: toggle  q: quit"
 		if state.previewSearch != "" && len(state.previewMatches) > 0 {
 			status = status + "  n/N: next/prev"
 		}
 	}
 	if state.loadError != nil {
-		status = fmt.Sprintf("Load error: %v", state.loadError)
+		if len(state.projects) == 0 && newSessionPath != "" {
+			status = "No history found. " + openLabel + "  " + proxyLabel + "  Ctrl+P: toggle  q: quit"
+		} else {
+			status = fmt.Sprintf("Load error: %v", state.loadError)
+		}
 	}
 	if state.loadError == nil && state.updateStatus != nil && !state.updateStatus.Supported && state.updateStatus.Error != "" && state.inputMode == "" {
 		status = fmt.Sprintf("Update check failed: %s", state.updateStatus.Error)
@@ -755,6 +782,16 @@ func selectedSession(items []sessionItem, idx int) *claudehistory.Session {
 		return nil
 	}
 	return &items[idx].session
+}
+
+func newSessionCwd(project claudehistory.Project, defaultCwd string) string {
+	if strings.TrimSpace(project.Path) != "" {
+		return strings.TrimSpace(project.Path)
+	}
+	if strings.TrimSpace(defaultCwd) != "" {
+		return strings.TrimSpace(defaultCwd)
+	}
+	return ""
 }
 
 func buildPreviewLines(

@@ -347,6 +347,15 @@ chmod 0755 "$bin_tmp" 2>/dev/null || true
 dst="$install_dir/claude-proxy"
 mv -f "$bin_tmp" "$dst"
 
+clp_dst="$install_dir/clp"
+if have_cmd ln; then
+  ln -sf "$dst" "$clp_dst" 2>/dev/null || true
+fi
+if [ ! -f "$clp_dst" ]; then
+  cp -f "$dst" "$clp_dst" 2>/dev/null || true
+fi
+chmod 0755 "$clp_dst" 2>/dev/null || true
+
 echo "Installed: $dst"
 update_shell_config
 echo "Run: $dst proxy doctor"
