@@ -130,6 +130,7 @@ type uiState struct {
 	previewMatches   []int
 	previewMatchIdx  int
 	previewSearchKey string
+	statusHeight     int
 }
 
 func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
@@ -149,6 +150,7 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 		previewCache:    map[string]string{},
 		previewError:    map[string]string{},
 		previewLoading:  map[string]bool{},
+		statusHeight:    1,
 	}
 
 	screen, err := tcell.NewScreen()
@@ -389,7 +391,7 @@ func handleKey(
 			return nil, nil
 		case 'n', 'N':
 			if state.focus == "preview" && len(state.previewMatches) > 0 {
-				layoutMode := computeLayout(screen)
+				layoutMode := computeLayout(screen, max(1, state.statusHeight))
 				if ev.Rune() == 'n' {
 					state.previewMatchIdx = (state.previewMatchIdx + 1) % len(state.previewMatches)
 				} else {
@@ -431,7 +433,7 @@ func handleKey(
 		return nil, nil
 	}
 
-	layoutMode := computeLayout(screen)
+	layoutMode := computeLayout(screen, max(1, state.statusHeight))
 	listFocus := state.focus
 	if layoutMode.mode == "1col" && state.focus == "preview" {
 		listFocus = state.lastListFocus
@@ -523,9 +525,15 @@ func refreshState(ctx context.Context, state *uiState, opts Options) {
 	state.previewState = previewState{}
 }
 
-func computeLayout(screen tcell.Screen) layout {
+func computeLayout(screen tcell.Screen, statusHeight int) layout {
 	maxX, maxY := screen.Size()
-	usableH := max(1, maxY-1)
+	if statusHeight <= 0 {
+		statusHeight = 1
+	}
+	if maxY > 0 {
+		statusHeight = clamp(statusHeight, 1, maxY)
+	}
+	usableH := max(1, maxY-statusHeight)
 
 	if maxX >= 120 && usableH >= 10 {
 		leftW := min(40, max(24, maxX/4))
@@ -567,26 +575,17 @@ func computeLayout(screen tcell.Screen) layout {
 func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- previewEvent) error {
 	screen.Clear()
 
-	layoutMode := computeLayout(screen)
-
 	projects := buildProjectItems(state.projects, opts.DefaultCwd)
 	filteredProjects := filterProjects(projects, state.projectFilter)
 	state.projectState.clamp(len(filteredProjects))
-	state.projectState.ensureVisible(layoutMode.projects.h-2, len(filteredProjects))
 
 	selectedProject := selectedProject(filteredProjects, state.projectState.selected)
 
 	sessions := buildSessionItems(selectedProject)
 	filteredSessions := filterSessions(sessions, state.sessionFilter)
 	state.sessionState.clamp(len(filteredSessions))
-	state.sessionState.ensureVisible(layoutMode.sessions.h-2, len(filteredSessions))
 
 	selectedSession, selectedIsNew := selectedSessionItem(filteredSessions, state.sessionState.selected)
-
-	listFocus := state.focus
-	if layoutMode.mode == "1col" && state.focus == "preview" {
-		listFocus = state.lastListFocus
-	}
 
 	projectFilter := state.projectFilter
 	sessionFilter := state.sessionFilter
@@ -597,83 +596,9 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 		sessionFilter = state.inputBuffer
 	}
 
-	if layoutMode.mode == "1col" {
-		title := "Projects"
-		listFilter := projectFilter
-		if listFocus == "sessions" {
-			title = "Sessions"
-			listFilter = sessionFilter
-		}
-		drawBox(screen, layoutMode.projects, title, listFocus != "preview", listFilter)
-		drawList(
-			screen,
-			layoutMode.projects,
-			renderProjectRows(filteredProjects, listFocus == "projects", state.projectState, layoutMode.projects.h-2),
-		)
-		if listFocus == "sessions" {
-			drawList(
-				screen,
-				layoutMode.projects,
-				renderSessionRows(filteredSessions, listFocus == "sessions", state.sessionState, layoutMode.projects.h-2),
-			)
-		}
-	} else {
-		drawBox(screen, layoutMode.projects, "Projects", state.focus == "projects", projectFilter)
-		drawList(
-			screen,
-			layoutMode.projects,
-			renderProjectRows(filteredProjects, state.focus == "projects", state.projectState, layoutMode.projects.h-2),
-		)
-
-		drawBox(screen, layoutMode.sessions, "Sessions", state.focus == "sessions", sessionFilter)
-		drawList(
-			screen,
-			layoutMode.sessions,
-			renderSessionRows(filteredSessions, state.focus == "sessions", state.sessionState, layoutMode.sessions.h-2),
-		)
-	}
-
 	if selectedSession != nil {
 		ensurePreview(screen, state, opts, *selectedSession, previewCh)
 	}
-
-	previewText := previewTextForSession(state, selectedSession)
-
-	previewFilter := ""
-	if state.inputMode == "preview" {
-		previewFilter = state.previewSearchBuf
-	} else if state.previewSearch != "" {
-		previewFilter = state.previewSearch
-	}
-	drawBox(screen, layoutMode.preview, "Preview", state.focus == "preview", previewFilter)
-	lines := buildPreviewLines(selectedProject, selectedSession, selectedIsNew, state, previewText, opts)
-	lines = buildWrappedLines(lines, max(0, layoutMode.preview.w-2))
-	viewH := max(0, layoutMode.preview.h-2)
-	state.previewState.scroll = clamp(state.previewState.scroll, 0, max(0, len(lines)-viewH))
-
-	previewKey := fmt.Sprintf("%s|%d|%s|%s", sessionID(selectedSession), layoutMode.preview.w, previewText, state.previewSearch)
-	if previewKey != state.previewSearchKey {
-		state.previewSearchKey = previewKey
-		if state.previewSearch != "" {
-			state.previewMatches = previewFindMatches(lines, state.previewSearch)
-			state.previewMatchIdx = clamp(state.previewMatchIdx, 0, max(0, len(state.previewMatches)-1))
-			if len(state.previewMatches) > 0 {
-				state.previewMatchIdx = 0
-				state.previewState.scroll = previewScrollToMatch(state.previewMatches[0], viewH)
-			}
-		} else {
-			state.previewMatches = nil
-			state.previewMatchIdx = 0
-		}
-	}
-
-	lineAttrs := map[int]tcell.Style{}
-	if len(state.previewMatches) > 0 {
-		matchLine := state.previewMatches[state.previewMatchIdx]
-		lineAttrs[matchLine] = tcell.StyleDefault.Reverse(true)
-	}
-
-	drawPreview(screen, layoutMode.preview, lines, state.previewState.scroll, lineAttrs)
 
 	proxyLabel := "Proxy mode (Ctrl+P): off"
 	if state.proxyEnabled {
@@ -750,7 +675,97 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 		}
 	}
 
-	drawStatusSegments(screen, statusSegments, updateRight, updateBold)
+	maxX, maxY := screen.Size()
+	statusLines := buildStatusLines(maxX, statusSegments, updateRight, updateBold)
+	if maxY > 0 && len(statusLines) > maxY {
+		statusLines = statusLines[len(statusLines)-maxY:]
+	}
+	state.statusHeight = max(1, len(statusLines))
+
+	layoutMode := computeLayout(screen, state.statusHeight)
+	state.projectState.ensureVisible(layoutMode.projects.h-2, len(filteredProjects))
+	state.sessionState.ensureVisible(layoutMode.sessions.h-2, len(filteredSessions))
+
+	listFocus := state.focus
+	if layoutMode.mode == "1col" && state.focus == "preview" {
+		listFocus = state.lastListFocus
+	}
+
+	if layoutMode.mode == "1col" {
+		title := "Projects"
+		listFilter := projectFilter
+		if listFocus == "sessions" {
+			title = "Sessions"
+			listFilter = sessionFilter
+		}
+		drawBox(screen, layoutMode.projects, title, listFocus != "preview", listFilter)
+		drawList(
+			screen,
+			layoutMode.projects,
+			renderProjectRows(filteredProjects, listFocus == "projects", state.projectState, layoutMode.projects.h-2),
+		)
+		if listFocus == "sessions" {
+			drawList(
+				screen,
+				layoutMode.projects,
+				renderSessionRows(filteredSessions, listFocus == "sessions", state.sessionState, layoutMode.projects.h-2),
+			)
+		}
+	} else {
+		drawBox(screen, layoutMode.projects, "Projects", state.focus == "projects", projectFilter)
+		drawList(
+			screen,
+			layoutMode.projects,
+			renderProjectRows(filteredProjects, state.focus == "projects", state.projectState, layoutMode.projects.h-2),
+		)
+
+		drawBox(screen, layoutMode.sessions, "Sessions", state.focus == "sessions", sessionFilter)
+		drawList(
+			screen,
+			layoutMode.sessions,
+			renderSessionRows(filteredSessions, state.focus == "sessions", state.sessionState, layoutMode.sessions.h-2),
+		)
+	}
+
+	previewText := previewTextForSession(state, selectedSession)
+
+	previewFilter := ""
+	if state.inputMode == "preview" {
+		previewFilter = state.previewSearchBuf
+	} else if state.previewSearch != "" {
+		previewFilter = state.previewSearch
+	}
+	drawBox(screen, layoutMode.preview, "Preview", state.focus == "preview", previewFilter)
+	lines := buildPreviewLines(selectedProject, selectedSession, selectedIsNew, state, previewText, opts)
+	lines = buildWrappedLines(lines, max(0, layoutMode.preview.w-2))
+	viewH := max(0, layoutMode.preview.h-2)
+	state.previewState.scroll = clamp(state.previewState.scroll, 0, max(0, len(lines)-viewH))
+
+	previewKey := fmt.Sprintf("%s|%d|%s|%s", sessionID(selectedSession), layoutMode.preview.w, previewText, state.previewSearch)
+	if previewKey != state.previewSearchKey {
+		state.previewSearchKey = previewKey
+		if state.previewSearch != "" {
+			state.previewMatches = previewFindMatches(lines, state.previewSearch)
+			state.previewMatchIdx = clamp(state.previewMatchIdx, 0, max(0, len(state.previewMatches)-1))
+			if len(state.previewMatches) > 0 {
+				state.previewMatchIdx = 0
+				state.previewState.scroll = previewScrollToMatch(state.previewMatches[0], viewH)
+			}
+		} else {
+			state.previewMatches = nil
+			state.previewMatchIdx = 0
+		}
+	}
+
+	lineAttrs := map[int]tcell.Style{}
+	if len(state.previewMatches) > 0 {
+		matchLine := state.previewMatches[state.previewMatchIdx]
+		lineAttrs[matchLine] = tcell.StyleDefault.Reverse(true)
+	}
+
+	drawPreview(screen, layoutMode.preview, lines, state.previewState.scroll, lineAttrs)
+
+	drawStatusLines(screen, statusLines)
 	screen.Show()
 	return nil
 }
@@ -1302,44 +1317,202 @@ type statusSegment struct {
 	style tcell.Style
 }
 
-func drawStatusSegments(screen tcell.Screen, left []statusSegment, right string, rightBold bool) {
+type statusToken struct {
+	text  string
+	style tcell.Style
+}
+
+type statusLine struct {
+	groups    []statusToken
+	right     string
+	rightBold bool
+}
+
+func buildStatusLines(width int, left []statusSegment, right string, rightBold bool) []statusLine {
+	tokens := buildStatusTokens(left)
+	lines := packStatusLines(width, tokens)
+	if width <= 0 {
+		lines = []statusLine{{}}
+	}
+	if right != "" && width > 0 {
+		rightWidth := displayWidth(right)
+		maxLeft := width - rightWidth
+		if maxLeft < 0 {
+			maxLeft = 0
+		}
+		if len(lines) > 0 && lineWidthGroups(lines[len(lines)-1].groups) > maxLeft {
+			lines = packStatusLines(maxLeft, tokens)
+		}
+	}
+	if len(lines) == 0 {
+		lines = []statusLine{{}}
+	}
+	lines[len(lines)-1].right = right
+	lines[len(lines)-1].rightBold = rightBold
+	return lines
+}
+
+func buildStatusTokens(segments []statusSegment) []statusToken {
+	tokens := []statusToken{}
+	for _, seg := range segments {
+		for _, group := range splitStatusGroups(seg.text) {
+			if group == "" {
+				continue
+			}
+			tokens = append(tokens, statusToken{text: group, style: seg.style})
+		}
+	}
+	return tokens
+}
+
+func splitStatusGroups(text string) []string {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	groups := []string{}
+	start := 0
+	for i := 0; i < len(text); i++ {
+		if text[i] != ' ' {
+			continue
+		}
+		j := i
+		for j < len(text) && text[j] == ' ' {
+			j++
+		}
+		if j-i >= 2 {
+			group := strings.TrimSpace(text[start:i])
+			if group != "" {
+				groups = append(groups, group)
+			}
+			start = j
+		}
+		i = j - 1
+	}
+	if start < len(text) {
+		group := strings.TrimSpace(text[start:])
+		if group != "" {
+			groups = append(groups, group)
+		}
+	}
+	return groups
+}
+
+func packStatusLines(width int, tokens []statusToken) []statusLine {
+	if width <= 0 {
+		return []statusLine{{}}
+	}
+	lines := []statusLine{}
+	var current statusLine
+	curWidth := 0
+
+	for _, tok := range tokens {
+		if tok.text == "" {
+			continue
+		}
+		tokenWidth := displayWidth(tok.text)
+		if tokenWidth == 0 {
+			continue
+		}
+		if tokenWidth > width {
+			if len(current.groups) > 0 {
+				lines = append(lines, current)
+				current = statusLine{}
+				curWidth = 0
+			}
+			lines = append(lines, statusLine{groups: []statusToken{tok}})
+			continue
+		}
+
+		addWidth := tokenWidth
+		if len(current.groups) > 0 {
+			addWidth += 2
+		}
+		if curWidth+addWidth > width && len(current.groups) > 0 {
+			lines = append(lines, current)
+			current = statusLine{}
+			curWidth = 0
+			addWidth = tokenWidth
+		}
+		current.groups = append(current.groups, tok)
+		curWidth += addWidth
+	}
+	if len(current.groups) > 0 || len(lines) == 0 {
+		lines = append(lines, current)
+	}
+	return lines
+}
+
+func lineWidthGroups(groups []statusToken) int {
+	if len(groups) == 0 {
+		return 0
+	}
+	width := 0
+	for i, tok := range groups {
+		if i > 0 {
+			width += 2
+		}
+		width += displayWidth(tok.text)
+	}
+	return width
+}
+
+func drawStatusLines(screen tcell.Screen, lines []statusLine) {
 	w, h := screen.Size()
 	if h <= 0 {
 		return
 	}
-	y := h - 1
+	if len(lines) == 0 {
+		lines = []statusLine{{}}
+	}
+	if len(lines) > h {
+		lines = lines[len(lines)-h:]
+	}
 
 	baseStyle := tcell.StyleDefault.Reverse(true)
-	var leftText strings.Builder
-	for _, seg := range left {
-		leftText.WriteString(seg.text)
-	}
-	bar := padRight(truncate(leftText.String(), w), w)
-	writeText(screen, 0, y, bar, baseStyle)
+	startY := h - len(lines)
+	for i, line := range lines {
+		y := startY + i
+		writeText(screen, 0, y, padRight("", w), baseStyle)
 
-	x := 0
-	for _, seg := range left {
-		if x >= w {
-			break
+		spaceLimit := w
+		if i == len(lines)-1 && line.right != "" {
+			rightText := truncate(line.right, w)
+			spaceLimit = max(0, w-displayWidth(rightText))
 		}
-		text := truncate(seg.text, w-x)
-		if text == "" {
-			continue
+
+		x := 0
+		for gi, tok := range line.groups {
+			if x >= spaceLimit {
+				break
+			}
+			if gi > 0 {
+				if x+2 > spaceLimit {
+					break
+				}
+				writeText(screen, x, y, "  ", tok.style)
+				x += 2
+			}
+			text := tok.text
+			if displayWidth(text) > spaceLimit-x {
+				text = truncate(text, spaceLimit-x)
+			}
+			if text == "" {
+				continue
+			}
+			writeText(screen, x, y, text, tok.style)
+			x += displayWidth(text)
 		}
-		style := seg.style
-		writeText(screen, x, y, text, style)
-		x += displayWidth(text)
+
+		if line.right != "" {
+			rightText := truncate(line.right, w)
+			rightX := max(0, w-displayWidth(rightText))
+			style := baseStyle
+			if line.rightBold {
+				style = style.Bold(true)
+			}
+			writeText(screen, rightX, y, rightText, style)
+		}
 	}
-	if right == "" {
-		return
-	}
-	r := truncate(right, w)
-	rightX := max(0, w-len(r))
-	style := tcell.StyleDefault.Reverse(true)
-	if rightBold {
-		style = style.Bold(true)
-	}
-	writeText(screen, rightX, y, r, style)
 }
 
 func writeText(screen tcell.Screen, x, y int, text string, style tcell.Style) {

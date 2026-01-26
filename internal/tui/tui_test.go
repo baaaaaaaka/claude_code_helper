@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -197,6 +198,53 @@ func TestFilterSessionsKeepsNewAgent(t *testing.T) {
 	if len(filtered) == 0 || !filtered[0].isNew {
 		t.Fatalf("expected new agent item to remain visible")
 	}
+}
+
+func TestBuildStatusLinesKeepsGroups(t *testing.T) {
+	segments := []statusSegment{{
+		text:  "A: one  B: two  C: three",
+		style: tcell.StyleDefault,
+	}}
+	lines := buildStatusLines(12, segments, "", false)
+	got := flattenStatusGroups(lines)
+	want := []string{"A: one", "B: two", "C: three"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected groups: %#v", got)
+	}
+}
+
+func TestBuildStatusLinesReservesRightLabel(t *testing.T) {
+	segments := []statusSegment{{
+		text:  "A: one  B: two  C: three  D: four",
+		style: tcell.StyleDefault,
+	}}
+	width := 20
+	right := "v0.0.18"
+	lines := buildStatusLines(width, segments, right, false)
+	if len(lines) == 0 {
+		t.Fatalf("expected status lines")
+	}
+	last := lines[len(lines)-1]
+	if last.right != right {
+		t.Fatalf("expected right label %q, got %q", right, last.right)
+	}
+	maxLeft := width - displayWidth(right)
+	if maxLeft < 0 {
+		maxLeft = 0
+	}
+	if lineWidthGroups(last.groups) > maxLeft {
+		t.Fatalf("expected last line width <= %d, got %d", maxLeft, lineWidthGroups(last.groups))
+	}
+}
+
+func flattenStatusGroups(lines []statusLine) []string {
+	var out []string
+	for _, line := range lines {
+		for _, group := range line.groups {
+			out = append(out, group.text)
+		}
+	}
+	return out
 }
 
 func TestHandleKeyEnterStartsNewSessionWhenNoHistory(t *testing.T) {

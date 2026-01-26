@@ -1,10 +1,21 @@
 package claudehistory
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func jsonString(t *testing.T, value string) string {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("json marshal: %v", err)
+	}
+	return string(encoded)
+}
 
 func TestDiscoverProjectsReadsJsonlSessions(t *testing.T) {
 	root := t.TempDir()
@@ -154,13 +165,20 @@ func TestDiscoverProjectsPrefersExistingProjectPath(t *testing.T) {
 	}
 
 	indexPath := filepath.Join(projectDir, "sessions-index.json")
-	index := `{"version":1,"entries":[{"sessionId":"sess-4","projectPath":"/missing","fullPath":""}],"originalPath":"/missing"}`
+	index := fmt.Sprintf(
+		`{"version":1,"entries":[{"sessionId":"sess-4","projectPath":%s,"fullPath":""}],"originalPath":%s}`,
+		jsonString(t, "/missing"),
+		jsonString(t, "/missing"),
+	)
 	if err := os.WriteFile(indexPath, []byte(index), 0o644); err != nil {
 		t.Fatalf("write index: %v", err)
 	}
 
 	sessionPath := filepath.Join(projectDir, "sess-4.jsonl")
-	content := `{"type":"user","message":{"role":"user","content":"Hello"},"timestamp":"2026-01-01T00:00:00Z","cwd":"` + validPath + `"}`
+	content := fmt.Sprintf(
+		`{"type":"user","message":{"role":"user","content":"Hello"},"timestamp":"2026-01-01T00:00:00Z","cwd":%s}`,
+		jsonString(t, validPath),
+	)
 	if err := os.WriteFile(sessionPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("write session: %v", err)
 	}
@@ -239,7 +257,11 @@ func TestDiscoverProjectsFallbackWhenIndexStale(t *testing.T) {
 	}
 
 	indexPath := filepath.Join(projectDir, "sessions-index.json")
-	index := `{"version":1,"entries":[{"sessionId":"sess-missing","fullPath":"/does/not/exist"}],"originalPath":"` + validPath + `"}`
+	index := fmt.Sprintf(
+		`{"version":1,"entries":[{"sessionId":"sess-missing","fullPath":%s}],"originalPath":%s}`,
+		jsonString(t, "/does/not/exist"),
+		jsonString(t, validPath),
+	)
 	if err := os.WriteFile(indexPath, []byte(index), 0o644); err != nil {
 		t.Fatalf("write index: %v", err)
 	}
@@ -249,7 +271,10 @@ func TestDiscoverProjectsFallbackWhenIndexStale(t *testing.T) {
 		t.Fatalf("mkdir nested: %v", err)
 	}
 	nestedPath := filepath.Join(nestedDir, "sess-6.jsonl")
-	content := `{"type":"user","message":{"role":"user","content":"Nested"},"timestamp":"2026-01-01T00:00:00Z","cwd":"` + validPath + `"}`
+	content := fmt.Sprintf(
+		`{"type":"user","message":{"role":"user","content":"Nested"},"timestamp":"2026-01-01T00:00:00Z","cwd":%s}`,
+		jsonString(t, validPath),
+	)
 	if err := os.WriteFile(nestedPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("write session: %v", err)
 	}
