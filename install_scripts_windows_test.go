@@ -60,8 +60,6 @@ func runInstallPs1(t *testing.T, apiFail bool, pathAlreadySet bool) {
 	if pathAlreadySet {
 		pathValue = installDir + ";" + pathValue
 	}
-	pathContainsInstall := containsPathEntry(pathValue, installDir)
-
 	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath,
 		"-Repo", repo,
 		"-Version", "latest",
@@ -76,6 +74,7 @@ func runInstallPs1(t *testing.T, apiFail bool, pathAlreadySet bool) {
 		"Path="+pathValue,
 		"TEMP="+tempDir,
 	)
+	pathContainsInstall := pathInEnvViaPowerShell(t, cmd.Env, installDir)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("install.ps1 failed: %v\n%s", err, string(output))
@@ -109,19 +108,6 @@ func runInstallPs1(t *testing.T, apiFail bool, pathAlreadySet bool) {
 	}
 }
 
-func containsPathEntry(pathValue, entry string) bool {
-	target := strings.TrimRight(entry, "\\")
-	for _, part := range strings.Split(pathValue, ";") {
-		if strings.TrimSpace(part) == "" {
-			continue
-		}
-		if strings.EqualFold(strings.TrimRight(part, "\\"), target) {
-			return true
-		}
-	}
-	return false
-}
-
 func hasPathLineForDir(profileText, installDir string) bool {
 	for _, line := range strings.Split(profileText, "\n") {
 		if !strings.Contains(line, "$env:Path") {
@@ -132,6 +118,26 @@ func hasPathLineForDir(profileText, installDir string) bool {
 		}
 	}
 	return false
+}
+
+func pathInEnvViaPowerShell(t *testing.T, env []string, installDir string) bool {
+	t.Helper()
+	script := `$target = [IO.Path]::GetFullPath($env:TEST_INSTALL_DIR);` +
+		`$parts = $env:Path -split ';';` +
+		`$found = $false;` +
+		`foreach ($part in $parts) {` +
+		` if ([string]::IsNullOrWhiteSpace($part)) { continue }` +
+		` if ($part.TrimEnd('\') -ieq $target) { $found = $true; break }` +
+		`}` +
+		`if ($found) { 'true' } else { 'false' }`
+	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
+	cmd.Env = append([]string{}, env...)
+	cmd.Env = append(cmd.Env, "TEST_INSTALL_DIR="+installDir)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("compute pathInEnv: %v", err)
+	}
+	return strings.EqualFold(strings.TrimSpace(string(out)), "true")
 }
 
 func filterEnvWithoutKey(env []string, key string) []string {
