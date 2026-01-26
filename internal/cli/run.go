@@ -210,6 +210,8 @@ type runTargetOptions struct {
 	Cwd      string
 	ExtraEnv []string
 	UseProxy bool
+	// PreserveTTY keeps stdout/stderr attached to the terminal for interactive CLIs.
+	PreserveTTY bool
 }
 
 func defaultRunTargetOptions() runTargetOptions {
@@ -373,8 +375,21 @@ func runTargetOnceWithOptions(
 	}
 	cmd.Env = envVars
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = io.MultiWriter(os.Stdout, stdoutBuf)
-	cmd.Stderr = io.MultiWriter(os.Stderr, stderrBuf)
+	if opts.PreserveTTY {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	} else {
+		if stdoutBuf != nil {
+			cmd.Stdout = io.MultiWriter(os.Stdout, stdoutBuf)
+		} else {
+			cmd.Stdout = os.Stdout
+		}
+		if stderrBuf != nil {
+			cmd.Stderr = io.MultiWriter(os.Stderr, stderrBuf)
+		} else {
+			cmd.Stderr = os.Stderr
+		}
+	}
 
 	if err := cmd.Start(); err != nil {
 		return err

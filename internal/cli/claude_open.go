@@ -99,9 +99,10 @@ func runClaudeSession(
 	}
 
 	opts := runTargetOptions{
-		Cwd:      cwd,
-		ExtraEnv: extraEnv,
-		UseProxy: useProxy,
+		Cwd:         cwd,
+		ExtraEnv:    extraEnv,
+		UseProxy:    useProxy,
+		PreserveTTY: true,
 	}
 	if useProxy {
 		if profile == nil {
@@ -150,9 +151,10 @@ func runClaudeNewSession(
 	}
 
 	opts := runTargetOptions{
-		Cwd:      cwd,
-		ExtraEnv: extraEnv,
-		UseProxy: useProxy,
+		Cwd:         cwd,
+		ExtraEnv:    extraEnv,
+		UseProxy:    useProxy,
+		PreserveTTY: true,
 	}
 	if useProxy {
 		if profile == nil {
