@@ -95,11 +95,11 @@ func runInstallPs1(t *testing.T, apiFail bool, pathAlreadySet bool) {
 		t.Fatalf("missing clp alias in profile")
 	}
 	if pathContainsInstall {
-		if strings.Contains(profileText, "$env:Path") && strings.Contains(profileText, installDir) {
+		if hasPathLineForDir(profileText, installDir) {
 			t.Fatalf("unexpected PATH update in profile")
 		}
 	} else {
-		if !strings.Contains(profileText, "$env:Path") || !strings.Contains(profileText, installDir) {
+		if !hasPathLineForDir(profileText, installDir) {
 			t.Fatalf("missing PATH update in profile")
 		}
 	}
@@ -112,6 +112,18 @@ func containsPathEntry(pathValue, entry string) bool {
 			continue
 		}
 		if strings.EqualFold(strings.TrimRight(part, "\\"), target) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPathLineForDir(profileText, installDir string) bool {
+	for _, line := range strings.Split(profileText, "\n") {
+		if !strings.Contains(line, "$env:Path") {
+			continue
+		}
+		if strings.Contains(strings.ToLower(line), strings.ToLower(installDir)) {
 			return true
 		}
 	}
