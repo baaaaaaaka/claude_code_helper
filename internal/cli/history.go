@@ -187,7 +187,11 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 			profile = &p
 		}
 
-		resolvedClaudePath, err := ensureClaudeInstalled(ctx, claudePath, cmd.ErrOrStderr())
+		resolvedClaudePath, err := ensureClaudeInstalled(ctx, claudePath, cmd.ErrOrStderr(), installProxyOptions{
+			UseProxy:  useProxy,
+			Profile:   profile,
+			Instances: cfg.Instances,
+		})
 		if err != nil {
 			return err
 		}

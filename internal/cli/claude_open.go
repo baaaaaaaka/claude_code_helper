@@ -79,7 +79,11 @@ func runClaudeSession(
 	useYolo bool,
 	log io.Writer,
 ) error {
-	claudePathResolved, err := ensureClaudeInstalled(ctx, claudePath, log)
+	claudePathResolved, err := ensureClaudeInstalled(ctx, claudePath, log, installProxyOptions{
+		UseProxy:  useProxy,
+		Profile:   profile,
+		Instances: instances,
+	})
 	if err != nil {
 		return err
 	}
@@ -145,7 +149,11 @@ func runClaudeNewSession(
 		return err
 	}
 
-	claudePathResolved, err := ensureClaudeInstalled(ctx, claudePath, log)
+	claudePathResolved, err := ensureClaudeInstalled(ctx, claudePath, log, installProxyOptions{
+		UseProxy:  useProxy,
+		Profile:   profile,
+		Instances: instances,
+	})
 	if err != nil {
 		return err
 	}
