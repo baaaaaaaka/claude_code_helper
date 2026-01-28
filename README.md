@@ -107,6 +107,12 @@ Install a specific version:
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$u='https://raw.githubusercontent.com/baaaaaaaka/claude_code_helper/main/install.ps1'; $p=Join-Path $env:TEMP 'claude-proxy-install.ps1'; iwr -useb $u -OutFile $p; & $p -Version v0.0.25; Remove-Item -Force $p"
 ```
 
+## Claude Code compatibility
+
+See [`docs/claude_code_compatibility.md`](docs/claude_code_compatibility.md) for
+the automatically maintained table of Claude Code versions and per-platform
+patch test results (linux/mac/windows + linux distros).
+
 ## Claude Code history
 
 Browse Claude Code history in an interactive terminal UI:
