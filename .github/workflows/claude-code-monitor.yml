@@ -393,6 +393,12 @@ jobs:
             --proxy-tag "$PROXY_TAG" \
             --results-dir results
 
+      - name: Cleanup results
+        if: always()
+        shell: bash
+        run: |
+          rm -rf results
+
       - name: Commit changes
         shell: bash
         env:
@@ -402,12 +408,12 @@ jobs:
           GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
         run: |
           set -euo pipefail
-          if [ -z "$(git status --porcelain)" ]; then
-            echo "No changes to commit."
-            exit 0
-          fi
           git add docs/claude_code_compatibility.md \
             .github/workflows/ci.yml \
             internal/cli/claude_patch_integration_test.go
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
           git commit -m "chore: sync Claude Code versions"
           git push
