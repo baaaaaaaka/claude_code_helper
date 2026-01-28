@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spf13/cobra"
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
+	"github.com/spf13/cobra"
 )
 
 func TestSelectProfile(t *testing.T) {

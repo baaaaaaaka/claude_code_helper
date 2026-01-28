@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/creack/pty"
 	"github.com/baaaaaaaka/claude_code_helper/internal/claudehistory"
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
+	"github.com/creack/pty"
 )
 
 func withPseudoTTY(t *testing.T, fn func()) {
