@@ -17,7 +17,7 @@ import (
 )
 
 type exePatchOptions struct {
-	enabledFlag   bool
+	enabledFlag    bool
 	regex1         string
 	regex2         []string
 	regex3         []string

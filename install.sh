@@ -15,9 +15,9 @@ Defaults:
 
 Examples:
   ./install.sh
-  ./install.sh --version v0.0.21
+  ./install.sh --version v0.0.22
   ./install.sh --dir "$HOME/.local/bin"
-  ./install.sh --repo baaaaaaaka/claude_code_helper --version v0.0.21
+  ./install.sh --repo baaaaaaaka/claude_code_helper --version v0.0.22
 EOF
 }
 

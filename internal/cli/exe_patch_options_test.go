@@ -27,10 +27,10 @@ func TestExePatchOptionsEnabledAndValidate(t *testing.T) {
 
 	opts = exePatchOptions{
 		enabledFlag: true,
-		regex1:       "a",
-		regex2:       []string{"b"},
-		regex3:       []string{"c"},
-		replace:      []string{"d"},
+		regex1:      "a",
+		regex2:      []string{"b"},
+		regex3:      []string{"c"},
+		replace:     []string{"d"},
 	}
 	if !opts.customRulesEnabled() {
 		t.Fatalf("expected custom rules to be enabled")
@@ -41,9 +41,9 @@ func TestExePatchOptionsEnabledAndValidate(t *testing.T) {
 
 	opts = exePatchOptions{
 		enabledFlag: true,
-		regex2:       []string{"b"},
-		regex3:       []string{"c"},
-		replace:      []string{"d"},
+		regex2:      []string{"b"},
+		regex3:      []string{"c"},
+		replace:     []string{"d"},
 	}
 	if err := opts.validate(); err == nil {
 		t.Fatalf("expected missing regex1 error")
@@ -51,10 +51,10 @@ func TestExePatchOptionsEnabledAndValidate(t *testing.T) {
 
 	opts = exePatchOptions{
 		enabledFlag: true,
-		regex1:       "a",
-		regex2:       []string{"b"},
-		regex3:       []string{"c", "d"},
-		replace:      []string{"e"},
+		regex1:      "a",
+		regex2:      []string{"b"},
+		regex3:      []string{"c", "d"},
+		replace:     []string{"e"},
 	}
 	if err := opts.validate(); err == nil {
 		t.Fatalf("expected mismatched list length error")
@@ -110,10 +110,10 @@ func TestExePatchOptionsCompileInvalidRegex(t *testing.T) {
 	requireExePatchEnabled(t)
 	opts := exePatchOptions{
 		enabledFlag: true,
-		regex1:       "(",
-		regex2:       []string{"a"},
-		regex3:       []string{"b"},
-		replace:      []string{"c"},
+		regex1:      "(",
+		regex2:      []string{"a"},
+		regex3:      []string{"b"},
+		replace:     []string{"c"},
 	}
 	if _, err := opts.compile(); err == nil {
 		t.Fatalf("expected compile error for invalid regex1")
@@ -121,10 +121,10 @@ func TestExePatchOptionsCompileInvalidRegex(t *testing.T) {
 
 	opts = exePatchOptions{
 		enabledFlag: true,
-		regex1:       "a",
-		regex2:       []string{"("},
-		regex3:       []string{"b"},
-		replace:      []string{"c"},
+		regex1:      "a",
+		regex2:      []string{"("},
+		regex3:      []string{"b"},
+		replace:     []string{"c"},
 	}
 	if _, err := opts.compile(); err == nil {
 		t.Fatalf("expected compile error for invalid regex2")
@@ -132,10 +132,10 @@ func TestExePatchOptionsCompileInvalidRegex(t *testing.T) {
 
 	opts = exePatchOptions{
 		enabledFlag: true,
-		regex1:       "a",
-		regex2:       []string{"b"},
-		regex3:       []string{"("},
-		replace:      []string{"c"},
+		regex1:      "a",
+		regex2:      []string{"b"},
+		regex3:      []string{"("},
+		replace:     []string{"c"},
 	}
 	if _, err := opts.compile(); err == nil {
 		t.Fatalf("expected compile error for invalid regex3")
@@ -157,10 +157,10 @@ func TestMaybePatchExecutable(t *testing.T) {
 	t.Setenv("PATH", dir)
 	opts := exePatchOptions{
 		enabledFlag: true,
-		regex1:       "foo",
-		regex2:       []string{"foo"},
-		regex3:       []string{"foo"},
-		replace:      []string{"bar"},
+		regex1:      "foo",
+		regex2:      []string{"foo"},
+		regex3:      []string{"foo"},
+		replace:     []string{"bar"},
 	}
 
 	log := &bytes.Buffer{}
