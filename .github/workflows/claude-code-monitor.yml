@@ -37,7 +37,7 @@ jobs:
           from pathlib import Path
 
           content = Path("internal/cli/claude_patch_integration_test.go").read_text()
-          match = re.search(r'defaultClaudeGCSBucket\\s*=\\s*"([^"]+)"', content)
+          match = re.search(r'defaultClaudeGCSBucket\s*=\s*"([^"]+)"', content)
           print(match.group(1) if match else "")
           PY
           )"
