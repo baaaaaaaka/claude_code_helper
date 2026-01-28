@@ -102,6 +102,45 @@ jobs:
         run: |
           go test -coverprofile=coverage.out ./...
 
+      - name: Resolve Claude release bucket
+        shell: bash
+        run: |
+          set -euo pipefail
+          info="$(scripts/claude_release_info.sh)"
+          bucket="$(printf "%s\n" "$info" | awk -F= '/^gcs_bucket=/{print $2}')"
+          if [ -z "$bucket" ]; then
+            echo "Failed to resolve Claude release bucket" >&2
+            exit 1
+          fi
+          echo "CLAUDE_PATCH_BUCKET=$bucket" >> "$GITHUB_ENV"
+
+      - name: Claude patch smoke (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CLAUDE_PATCH_TEST: "1"
+          CLAUDE_PATCH_VERSION: "2.1.22"
+        run: |
+          go test ./internal/cli -run TestClaudePatchIntegration -count=1
+
+      - name: Claude patch smoke (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CLAUDE_PATCH_TEST: "1"
+          CLAUDE_PATCH_VERSION: "2.1.22"
+        run: |
+          go test ./internal/cli -run TestClaudePatchIntegration -count=1
+
+      - name: Claude patch smoke (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CLAUDE_PATCH_TEST: "1"
+          CLAUDE_PATCH_VERSION: "2.1.22"
+        run: |
+          go test ./internal/cli -run TestClaudePatchIntegration -count=1
+
       - name: go test -race (Linux only)
         if: runner.os == 'Linux'
         run: go test -race ./...
