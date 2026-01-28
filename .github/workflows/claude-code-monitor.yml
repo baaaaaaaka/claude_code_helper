@@ -25,6 +25,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Detect versions to test
         id: detect
@@ -85,6 +86,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -149,6 +151,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Update compatibility table and patch versions
         shell: bash
