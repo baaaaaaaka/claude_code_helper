@@ -236,13 +236,13 @@ jobs:
         include:
           - platform: "centos7"
             image: centos:7
-            install_cmd: "yum -y install ca-certificates"
+            install_cmd: ":"
           - platform: "rockylinux8"
             image: rockylinux:8
-            install_cmd: "dnf -y install ca-certificates"
+            install_cmd: ":"
           - platform: "ubuntu20.04"
             image: ubuntu:20.04
-            install_cmd: "apt-get update && apt-get install -y ca-certificates"
+            install_cmd: ":"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -314,11 +314,19 @@ jobs:
           results = {}
           failed = False
 
+          host_cert = "/etc/ssl/certs/ca-certificates.crt"
+          mount_cert = os.path.exists(host_cert)
+
           for version in versions:
-              cmd = [
-                  "docker",
-                  "run",
-                  "--rm",
+              cmd = ["docker", "run", "--rm"]
+              if mount_cert:
+                  cmd += [
+                      "-v",
+                      f"{host_cert}:/ca-certificates.crt:ro",
+                      "-e",
+                      "SSL_CERT_FILE=/ca-certificates.crt",
+                  ]
+              cmd += [
                   "-v",
                   f"{test_bin}:/claude_patch_test:ro",
                   "-e",
