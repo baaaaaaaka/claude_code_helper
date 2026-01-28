@@ -87,11 +87,13 @@ jobs:
           import re
           from pathlib import Path
 
+          platforms = ["linux", "mac", "windows", "centos7", "rockylinux8", "ubuntu20.04"]
           versions = json.loads(os.environ["VERSIONS_JSON"])
           proxy_tag = os.environ["PROXY_TAG"]
 
           table_path = Path("docs/claude_code_compatibility.md")
-          existing = set()
+          rows = {}
+          columns = []
           if table_path.exists():
               for line in table_path.read_text().splitlines():
                   if not line.startswith("|"):
@@ -99,11 +101,29 @@ jobs:
                   parts = [part.strip() for part in line.strip().strip("|").split("|")]
                   if len(parts) < 2:
                       continue
-                  version = parts[0].lstrip("v")
+                  if not columns:
+                      columns = parts
+                      continue
+                  if all(re.match(r"^-+$", part) for part in parts):
+                      continue
+                  row = {columns[i]: parts[i] for i in range(min(len(columns), len(parts)))}
+                  version = row.get("Claude Code version", "").lstrip("v")
                   if re.match(r"^[0-9]+(\.[0-9]+)+$", version):
-                      existing.add(version)
+                      rows[version] = row
 
-          missing = [version for version in versions if version not in existing]
+          missing = []
+          for version in versions:
+              row = rows.get(version)
+              if not row:
+                  missing.append(version)
+                  continue
+              status_ok = True
+              for platform in platforms:
+                  if row.get(platform, "").lower() != "pass":
+                      status_ok = False
+                      break
+              if not status_ok:
+                  missing.append(version)
           latest = versions[-1] if versions else ""
 
           out_path = os.environ["GITHUB_OUTPUT"]
@@ -162,37 +182,193 @@ jobs:
         env:
           CLAUDE_PATCH_TEST: "1"
           MISSING_VERSIONS_JSON: ${{ needs.detect.outputs.missing_versions }}
+          PLATFORM_NAME: ${{ fromJSON('{"ubuntu-latest":"linux","macos-latest":"mac","windows-latest":"windows"}')[matrix.os] }}
         run: |
           set -euo pipefail
-          versions="$(python3 - "$MISSING_VERSIONS_JSON" <<'PY'
+          python3 - <<'PY'
           import json
+          import os
+          import subprocess
           import sys
+          from pathlib import Path
 
-          items = json.loads(sys.argv[1])
-          print("\n".join(items))
+          versions = json.loads(os.environ["MISSING_VERSIONS_JSON"])
+          platform = os.environ["PLATFORM_NAME"]
+          worktree = os.environ["WORKTREE_DIR"]
+          results = {}
+          failed = False
+
+          for version in versions:
+              env = os.environ.copy()
+              env["CLAUDE_PATCH_VERSION"] = version
+              proc = subprocess.run(
+                  ["go", "test", "./internal/cli", "-run", "TestClaudePatchIntegration", "-count=1"],
+                  cwd=worktree,
+                  env=env,
+              )
+              results[version] = "pass" if proc.returncode == 0 else "fail"
+              if proc.returncode != 0:
+                  failed = True
+
+          Path("results").mkdir(parents=True, exist_ok=True)
+          with open(Path("results") / f"{platform}.json", "w", encoding="utf-8") as handle:
+              json.dump({"platform": platform, "results": results}, handle)
+
+          sys.exit(1 if failed else 0)
           PY
-          )"
-          if [ -z "$versions" ]; then
-            echo "No Claude Code versions to test."
-            exit 0
-          fi
-          while IFS= read -r version; do
-            echo "==> Testing Claude Code ${version}"
-            (cd "$WORKTREE_DIR" && CLAUDE_PATCH_VERSION="$version" \
-              go test ./internal/cli -run TestClaudePatchIntegration -count=1)
-          done <<< "$versions"
 
-  update:
-    name: Update versions and compatibility table
+      - name: Upload patch test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-code-results-${{ env.PLATFORM_NAME }}
+          path: results/${{ env.PLATFORM_NAME }}.json
+
+  test-linux-distros:
+    name: Test Claude Code releases (distro: ${{ matrix.platform }})
     runs-on: ubuntu-latest
-    needs: [detect, test]
+    needs: detect
     if: needs.detect.outputs.missing_versions != '[]' && needs.detect.outputs.missing_versions != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: centos7
+            image: centos:7
+            install_cmd: "yum -y install ca-certificates"
+          - platform: rockylinux8
+            image: rockylinux:8
+            install_cmd: "dnf -y install ca-certificates"
+          - platform: ubuntu20.04
+            image: ubuntu:20.04
+            install_cmd: "apt-get update && apt-get install -y ca-certificates"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           fetch-tags: true
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.12"
+          cache: true
+
+      - name: Resolve Claude release bucket
+        shell: bash
+        run: |
+          set -euo pipefail
+          info="$(scripts/claude_release_info.sh)"
+          bucket="$(printf "%s\n" "$info" | awk -F= '/^gcs_bucket=/{print $2}')"
+          if [ -z "$bucket" ]; then
+            echo "Failed to resolve Claude release bucket" >&2
+            exit 1
+          fi
+          echo "CLAUDE_PATCH_BUCKET=$bucket" >> "$GITHUB_ENV"
+
+      - name: Prepare claude-proxy tag worktree
+        shell: bash
+        env:
+          PROXY_TAG: ${{ needs.detect.outputs.proxy_tag }}
+        run: |
+          set -euo pipefail
+          worktree_dir="$(mktemp -d)"
+          git worktree add "$worktree_dir" "$PROXY_TAG"
+          echo "WORKTREE_DIR=$worktree_dir" >> "$GITHUB_ENV"
+
+      - name: Build patch test binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_bin="$GITHUB_WORKSPACE/claude_patch_test"
+          (cd "$WORKTREE_DIR" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go test ./internal/cli -c -o "$test_bin")
+          chmod +x "$test_bin"
+          echo "TEST_BIN_PATH=$test_bin" >> "$GITHUB_ENV"
+
+      - name: Run patch integration tests (containers)
+        shell: bash
+        env:
+          CLAUDE_PATCH_TEST: "1"
+          MISSING_VERSIONS_JSON: ${{ needs.detect.outputs.missing_versions }}
+          PLATFORM_NAME: ${{ matrix.platform }}
+          IMAGE: ${{ matrix.image }}
+          INSTALL_CMD: ${{ matrix.install_cmd }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          versions = json.loads(os.environ["MISSING_VERSIONS_JSON"])
+          platform = os.environ["PLATFORM_NAME"]
+          image = os.environ["IMAGE"]
+          install_cmd = os.environ["INSTALL_CMD"]
+          test_bin = os.environ["TEST_BIN_PATH"]
+          bucket = os.environ["CLAUDE_PATCH_BUCKET"]
+          results = {}
+          failed = False
+
+          for version in versions:
+              cmd = [
+                  "docker",
+                  "run",
+                  "--rm",
+                  "-v",
+                  f"{test_bin}:/claude_patch_test:ro",
+                  "-e",
+                  "CLAUDE_PATCH_TEST=1",
+                  "-e",
+                  f"CLAUDE_PATCH_VERSION={version}",
+                  "-e",
+                  f"CLAUDE_PATCH_BUCKET={bucket}",
+                  image,
+                  "/bin/sh",
+                  "-c",
+                  f"{install_cmd} && /claude_patch_test -test.run TestClaudePatchIntegration -test.count=1",
+              ]
+              proc = subprocess.run(cmd)
+              results[version] = "pass" if proc.returncode == 0 else "fail"
+              if proc.returncode != 0:
+                  failed = True
+
+          Path("results").mkdir(parents=True, exist_ok=True)
+          with open(Path("results") / f"{platform}.json", "w", encoding="utf-8") as handle:
+              json.dump({"platform": platform, "results": results}, handle)
+
+          sys.exit(1 if failed else 0)
+          PY
+
+      - name: Upload patch test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-code-results-${{ matrix.platform }}
+          path: results/${{ matrix.platform }}.json
+
+  update:
+    name: Update versions and compatibility table
+    runs-on: ubuntu-latest
+    needs: [detect, test, test-linux-distros]
+    if: ${{ always() && needs.detect.result == 'success' && needs.detect.outputs.missing_versions != '[]' && needs.detect.outputs.missing_versions != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Download patch test results
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: claude-code-results-*
+          path: results
+          merge-multiple: true
 
       - name: Update compatibility table and patch versions
         shell: bash
@@ -205,7 +381,8 @@ jobs:
           python3 scripts/claude_code_sync.py \
             --missing-json "$MISSING_VERSIONS_JSON" \
             --latest-version "$LATEST_VERSION" \
-            --proxy-tag "$PROXY_TAG"
+            --proxy-tag "$PROXY_TAG" \
+            --results-dir results
 
       - name: Commit changes
         shell: bash

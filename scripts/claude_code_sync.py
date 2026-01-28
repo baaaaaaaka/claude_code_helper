@@ -4,38 +4,81 @@ import json
 import re
 from pathlib import Path
 
+PLATFORM_COLUMNS = [
+    "linux",
+    "mac",
+    "windows",
+    "centos7",
+    "rockylinux8",
+    "ubuntu20.04",
+]
+TABLE_HEADER = ["Claude Code version", "claude-proxy tag", *PLATFORM_COLUMNS]
+
 
 def version_key(version: str) -> list[int]:
     return [int(part) for part in version.split(".")]
 
 
-def load_records(table_path: Path) -> dict[str, str]:
+def is_version(value: str) -> bool:
+    return re.match(r"^[0-9]+(\.[0-9]+)+$", value) is not None
+
+
+def normalize_status(value: str) -> str:
+    if str(value).strip().lower() == "pass":
+        return "pass"
+    return "fail"
+
+
+def load_records(table_path: Path) -> dict[str, dict[str, str]]:
     if not table_path.exists():
         return {}
-    records: dict[str, str] = {}
+    records: dict[str, dict[str, str]] = {}
+    columns: list[str] = []
     for line in table_path.read_text().splitlines():
         if not line.startswith("|"):
             continue
         parts = [part.strip() for part in line.strip().strip("|").split("|")]
         if len(parts) < 2:
             continue
-        version = parts[0].lstrip("v")
-        if re.match(r"^[0-9]+(\.[0-9]+)+$", version):
-            records[version] = parts[1]
+        if not columns:
+            columns = parts
+            continue
+        if all(re.match(r"^-+$", part) for part in parts):
+            continue
+        row = {columns[i]: parts[i] for i in range(min(len(columns), len(parts)))}
+        version = row.get("Claude Code version", "").lstrip("v")
+        if not is_version(version):
+            continue
+        record: dict[str, str] = {}
+        tag = row.get("claude-proxy tag", "").strip()
+        if tag:
+            record["tag"] = tag
+        for platform in PLATFORM_COLUMNS:
+            if platform in row and row[platform].strip():
+                record[platform] = normalize_status(row[platform])
+        records[version] = record
     return records
 
 
-def render_table(records: dict[str, str]) -> str:
+def render_table(records: dict[str, dict[str, str]]) -> str:
     header = [
         "# Claude Code compatibility",
         "",
         "Rows are added automatically after tests pass for a Claude Code release.",
         "",
-        "| Claude Code version | claude-proxy tag |",
-        "| --- | --- |",
+        "| " + " | ".join(TABLE_HEADER) + " |",
+        "| " + " | ".join("---" for _ in TABLE_HEADER) + " |",
     ]
     rows = [
-        f"| {version} | {records[version]} |"
+        "| "
+        + " | ".join(
+            [
+                version,
+                records[version].get("tag", ""),
+                *(records[version].get(platform, "") for platform in PLATFORM_COLUMNS),
+            ]
+        )
+        + " |"
         for version in sorted(records, key=version_key)
     ]
     return "\n".join(header + rows) + "\n"
@@ -48,6 +91,27 @@ def update_file(path: Path, content: str) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
     return True
+
+
+def load_results(results_dir: Path) -> dict[str, dict[str, str]]:
+    results: dict[str, dict[str, str]] = {}
+    if not results_dir.exists():
+        return results
+    for path in results_dir.glob("*.json"):
+        try:
+            data = json.loads(path.read_text())
+        except json.JSONDecodeError:
+            continue
+        platform = str(data.get("platform") or path.stem)
+        if platform not in PLATFORM_COLUMNS:
+            continue
+        platform_results: dict[str, str] = {}
+        for version, status in (data.get("results") or {}).items():
+            version = str(version).lstrip("v")
+            if is_version(version):
+                platform_results[version] = normalize_status(status)
+        results[platform] = platform_results
+    return results
 
 
 def update_ci_version(path: Path, latest_version: str) -> bool:
@@ -100,6 +164,11 @@ def main() -> int:
         default="internal/cli/claude_patch_integration_test.go",
         help="Integration test file path",
     )
+    parser.add_argument(
+        "--results-dir",
+        default="results",
+        help="Directory with patch test result JSON files",
+    )
     args = parser.parse_args()
 
     try:
@@ -112,10 +181,19 @@ def main() -> int:
 
     table_path = Path(args.table_path)
     records = load_records(table_path)
+    results = load_results(Path(args.results_dir))
     for version in missing:
         version = str(version).lstrip("v")
-        if re.match(r"^[0-9]+(\.[0-9]+)+$", version):
-            records[version] = args.proxy_tag
+        if not is_version(version):
+            continue
+        record = records.setdefault(version, {})
+        record["tag"] = args.proxy_tag
+        for platform in PLATFORM_COLUMNS:
+            status = results.get(platform, {}).get(version)
+            if status:
+                record[platform] = status
+            else:
+                record[platform] = record.get(platform, "fail")
 
     table_updated = update_file(table_path, render_table(records))
 
