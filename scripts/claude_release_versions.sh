@@ -22,6 +22,7 @@ EOF
 json=0
 min_version="${CLAUDE_MIN_VERSION:-2.1.19}"
 bucket_url="${CLAUDE_RELEASE_BUCKET_URL:-}"
+python_bin="${CLAUDE_PYTHON_BIN:-}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -33,10 +34,21 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+if [ -z "$python_bin" ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    python_bin="python3"
+  elif command -v python >/dev/null 2>&1; then
+    python_bin="python"
+  else
+    echo "Need python3 or python to list versions" >&2
+    exit 1
+  fi
+fi
+
 if [ -z "$bucket_url" ]; then
   info="$(scripts/claude_release_info.sh --json)"
   bucket_url="$(
-    printf "%s" "$info" | python - <<'PY'
+    printf "%s" "$info" | "$python_bin" - <<'PY'
 import json
 import sys
 
@@ -54,7 +66,7 @@ if [ -z "$bucket_url" ]; then
   exit 1
 fi
 
-python - "$bucket_url" "$min_version" "$json" <<'PY'
+"$python_bin" - "$bucket_url" "$min_version" "$json" <<'PY'
 import json
 import re
 import sys

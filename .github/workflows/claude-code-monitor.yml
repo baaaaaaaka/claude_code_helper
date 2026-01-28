@@ -32,15 +32,39 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          versions_json="$(bash scripts/claude_release_versions.sh --json --min-version 2.1.19)"
-          proxy_tag="$(git tag -l 'v*' --sort=version:refname | awk 'END{print}')"
-          if [ -z "$proxy_tag" ]; then
-            echo "No claude-proxy tag found." >&2
+          if ! versions_json="$(bash scripts/claude_release_versions.sh --json --min-version 2.1.19)"; then
+            echo "Failed to resolve Claude Code versions." >&2
             exit 1
           fi
+          git fetch --tags --force >/dev/null 2>&1 || true
+          proxy_tag="$(git tag -l 'v*' --sort=version:refname | tail -n 1)"
+          if [ -z "$proxy_tag" ]; then
+            proxy_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          fi
+          if [ -z "$proxy_tag" ]; then
+            if api_tag="$(curl -fsSL \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest" \
+              | python3 - <<'PY'
+          import json
+          import sys
+
+          data = json.load(sys.stdin)
+          print(data.get("tag_name", ""))
+          PY
+            )"; then
+              proxy_tag="$api_tag"
+            fi
+          fi
+          if [ -z "$proxy_tag" ]; then
+            echo "No claude-proxy tag found after fetching tags." >&2
+            exit 1
+          fi
+          echo "Using claude-proxy tag: $proxy_tag"
           export VERSIONS_JSON="$versions_json"
           export PROXY_TAG="$proxy_tag"
-          python - <<'PY'
+          python3 - <<'PY'
           import json
           import os
           import re
@@ -123,7 +147,7 @@ jobs:
           MISSING_VERSIONS_JSON: ${{ needs.detect.outputs.missing_versions }}
         run: |
           set -euo pipefail
-          versions="$(python - "$MISSING_VERSIONS_JSON" <<'PY'
+          versions="$(python3 - "$MISSING_VERSIONS_JSON" <<'PY'
           import json
           import sys
 
@@ -161,7 +185,7 @@ jobs:
           PROXY_TAG: ${{ needs.detect.outputs.proxy_tag }}
         run: |
           set -euo pipefail
-          python scripts/claude_code_sync.py \
+          python3 scripts/claude_code_sync.py \
             --missing-json "$MISSING_VERSIONS_JSON" \
             --latest-version "$LATEST_VERSION" \
             --proxy-tag "$PROXY_TAG"
