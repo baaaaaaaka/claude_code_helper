@@ -11,6 +11,7 @@ import (
 )
 
 func TestRunTargetWithFallbackRestoresAndReruns(t *testing.T) {
+	requireExePatchEnabled(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("skip shell script test on windows")
 	}

@@ -7,6 +7,7 @@ import (
 )
 
 func TestPatchHistoryPath(t *testing.T) {
+	requireExePatchEnabled(t)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	path, err := PatchHistoryPath(configPath)
@@ -20,6 +21,7 @@ func TestPatchHistoryPath(t *testing.T) {
 }
 
 func TestPatchHistoryStoreLoadSave(t *testing.T) {
+	requireExePatchEnabled(t)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	store, err := NewPatchHistoryStore(configPath)
@@ -70,6 +72,7 @@ func TestPatchHistoryStoreLoadSave(t *testing.T) {
 }
 
 func TestPatchHistoryLoadInvalidJSON(t *testing.T) {
+	requireExePatchEnabled(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "patch_history.json")
 	if err := os.WriteFile(path, []byte("{invalid json"), 0o600); err != nil {
@@ -86,6 +89,7 @@ func TestPatchHistoryLoadInvalidJSON(t *testing.T) {
 }
 
 func TestPatchHistoryVersionMismatch(t *testing.T) {
+	requireExePatchEnabled(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "patch_history.json")
 	if err := os.WriteFile(path, []byte("{\"version\": 99, \"entries\": []}"), 0o600); err != nil {

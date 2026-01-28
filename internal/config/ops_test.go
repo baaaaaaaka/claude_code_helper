@@ -58,6 +58,7 @@ func TestConfigInstanceOps(t *testing.T) {
 }
 
 func TestConfigPatchFailureOps(t *testing.T) {
+	requireExePatchEnabled(t)
 	cfg := Config{Version: CurrentVersion}
 	entry := PatchFailure{
 		ProxyVersion:  "v1.2.3",

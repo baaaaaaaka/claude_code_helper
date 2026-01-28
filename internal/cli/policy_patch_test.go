@@ -7,6 +7,7 @@ import (
 )
 
 func TestPolicySettingsBlockPatch_ReplacesStatementBeforeContinue(t *testing.T) {
+	requireExePatchEnabled(t)
 	startRe := regexp.MustCompile(policySettingsStage1)
 	input := []byte("if(a==='policySettings'){x=1;callSomeFunction();continue}")
 
@@ -29,6 +30,7 @@ func TestPolicySettingsBlockPatch_ReplacesStatementBeforeContinue(t *testing.T) 
 }
 
 func TestPolicySettingsBlockPatch_ReplacesStatementBeforeReturnNull(t *testing.T) {
+	requireExePatchEnabled(t)
 	startRe := regexp.MustCompile(policySettingsStage1)
 	input := []byte("if(a==='policySettings'){let I=computeSomething();if(I===null)return null;return I}")
 
@@ -51,6 +53,7 @@ func TestPolicySettingsBlockPatch_ReplacesStatementBeforeReturnNull(t *testing.T
 }
 
 func TestPolicySettingsBlockPatch_SkipsWhenNoEligibleStatement(t *testing.T) {
+	requireExePatchEnabled(t)
 	startRe := regexp.MustCompile(policySettingsStage1)
 	input := []byte("if(a==='policySettings'){x=1;continue}")
 
@@ -67,6 +70,7 @@ func TestPolicySettingsBlockPatch_SkipsWhenNoEligibleStatement(t *testing.T) {
 }
 
 func TestPolicySettingsBlockPatch_IgnoreStringsAndComments(t *testing.T) {
+	requireExePatchEnabled(t)
 	startRe := regexp.MustCompile(policySettingsStage1)
 	input := []byte("if(a==='policySettings'){const s=\"return null\";/* continue; */}")
 

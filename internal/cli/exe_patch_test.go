@@ -8,6 +8,7 @@ import (
 )
 
 func TestApplyExePatch_MultipleMatches(t *testing.T) {
+	requireExePatchEnabled(t)
 	spec := exePatchSpec{
 		match:   regexp.MustCompile(`abc\d{3}xyz`),
 		guard:   regexp.MustCompile(`123`),
@@ -30,6 +31,7 @@ func TestApplyExePatch_MultipleMatches(t *testing.T) {
 }
 
 func TestApplyExePatch_GuardBlocksPatch(t *testing.T) {
+	requireExePatchEnabled(t)
 	spec := exePatchSpec{
 		match:   regexp.MustCompile(`abc\d{3}xyz`),
 		guard:   regexp.MustCompile(`nope`),
@@ -51,6 +53,7 @@ func TestApplyExePatch_GuardBlocksPatch(t *testing.T) {
 }
 
 func TestApplyExePatch_EmptyStage1Match(t *testing.T) {
+	requireExePatchEnabled(t)
 	spec := exePatchSpec{
 		match:   regexp.MustCompile(`^`),
 		guard:   regexp.MustCompile(`.`),
@@ -64,6 +67,7 @@ func TestApplyExePatch_EmptyStage1Match(t *testing.T) {
 }
 
 func TestApplyExePatch_PatchRegexMissingMatch(t *testing.T) {
+	requireExePatchEnabled(t)
 	spec := exePatchSpec{
 		match:   regexp.MustCompile(`abc\d{3}xyz`),
 		guard:   regexp.MustCompile(`123`),
@@ -77,6 +81,7 @@ func TestApplyExePatch_PatchRegexMissingMatch(t *testing.T) {
 }
 
 func TestPolicySettingsPatchesPreview(t *testing.T) {
+	requireExePatchEnabled(t)
 	specs, err := policySettingsSpecs()
 	if err != nil {
 		t.Fatalf("policySettingsSpecs error: %v", err)

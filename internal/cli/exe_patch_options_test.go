@@ -13,21 +13,24 @@ import (
 )
 
 func TestExePatchOptionsEnabledAndValidate(t *testing.T) {
+	requireExePatchEnabled(t)
 	opts := exePatchOptions{}
 	if opts.enabled() {
 		t.Fatalf("expected options to be disabled by default")
 	}
 
 	opts.policySettings = true
+	opts.enabledFlag = true
 	if !opts.enabled() {
 		t.Fatalf("expected policySettings to enable options")
 	}
 
 	opts = exePatchOptions{
-		regex1:  "a",
-		regex2:  []string{"b"},
-		regex3:  []string{"c"},
-		replace: []string{"d"},
+		enabledFlag: true,
+		regex1:       "a",
+		regex2:       []string{"b"},
+		regex3:       []string{"c"},
+		replace:      []string{"d"},
 	}
 	if !opts.customRulesEnabled() {
 		t.Fatalf("expected custom rules to be enabled")
@@ -37,19 +40,21 @@ func TestExePatchOptionsEnabledAndValidate(t *testing.T) {
 	}
 
 	opts = exePatchOptions{
-		regex2:  []string{"b"},
-		regex3:  []string{"c"},
-		replace: []string{"d"},
+		enabledFlag: true,
+		regex2:       []string{"b"},
+		regex3:       []string{"c"},
+		replace:      []string{"d"},
 	}
 	if err := opts.validate(); err == nil {
 		t.Fatalf("expected missing regex1 error")
 	}
 
 	opts = exePatchOptions{
-		regex1:  "a",
-		regex2:  []string{"b"},
-		regex3:  []string{"c", "d"},
-		replace: []string{"e"},
+		enabledFlag: true,
+		regex1:       "a",
+		regex2:       []string{"b"},
+		regex3:       []string{"c", "d"},
+		replace:      []string{"e"},
 	}
 	if err := opts.validate(); err == nil {
 		t.Fatalf("expected mismatched list length error")
@@ -57,6 +62,7 @@ func TestExePatchOptionsEnabledAndValidate(t *testing.T) {
 }
 
 func TestNormalizeReplacement(t *testing.T) {
+	requireExePatchEnabled(t)
 	cases := map[string]string{
 		"$1foo":    "${1}foo",
 		"$10bar":   "${10}bar",
@@ -75,6 +81,7 @@ func TestNormalizeReplacement(t *testing.T) {
 }
 
 func TestResolveExecutablePath(t *testing.T) {
+	requireExePatchEnabled(t)
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target")
 	link := filepath.Join(dir, "link")
@@ -100,31 +107,35 @@ func TestResolveExecutablePath(t *testing.T) {
 }
 
 func TestExePatchOptionsCompileInvalidRegex(t *testing.T) {
+	requireExePatchEnabled(t)
 	opts := exePatchOptions{
-		regex1:  "(",
-		regex2:  []string{"a"},
-		regex3:  []string{"b"},
-		replace: []string{"c"},
+		enabledFlag: true,
+		regex1:       "(",
+		regex2:       []string{"a"},
+		regex3:       []string{"b"},
+		replace:      []string{"c"},
 	}
 	if _, err := opts.compile(); err == nil {
 		t.Fatalf("expected compile error for invalid regex1")
 	}
 
 	opts = exePatchOptions{
-		regex1:  "a",
-		regex2:  []string{"("},
-		regex3:  []string{"b"},
-		replace: []string{"c"},
+		enabledFlag: true,
+		regex1:       "a",
+		regex2:       []string{"("},
+		regex3:       []string{"b"},
+		replace:      []string{"c"},
 	}
 	if _, err := opts.compile(); err == nil {
 		t.Fatalf("expected compile error for invalid regex2")
 	}
 
 	opts = exePatchOptions{
-		regex1:  "a",
-		regex2:  []string{"b"},
-		regex3:  []string{"("},
-		replace: []string{"c"},
+		enabledFlag: true,
+		regex1:       "a",
+		regex2:       []string{"b"},
+		regex3:       []string{"("},
+		replace:      []string{"c"},
 	}
 	if _, err := opts.compile(); err == nil {
 		t.Fatalf("expected compile error for invalid regex3")
@@ -132,6 +143,7 @@ func TestExePatchOptionsCompileInvalidRegex(t *testing.T) {
 }
 
 func TestMaybePatchExecutable(t *testing.T) {
+	requireExePatchEnabled(t)
 	dir := t.TempDir()
 	name := "dummy"
 	if runtime.GOOS == "windows" {
@@ -144,10 +156,11 @@ func TestMaybePatchExecutable(t *testing.T) {
 
 	t.Setenv("PATH", dir)
 	opts := exePatchOptions{
-		regex1:  "foo",
-		regex2:  []string{"foo"},
-		regex3:  []string{"foo"},
-		replace: []string{"bar"},
+		enabledFlag: true,
+		regex1:       "foo",
+		regex2:       []string{"foo"},
+		regex3:       []string{"foo"},
+		replace:      []string{"bar"},
 	}
 
 	log := &bytes.Buffer{}
@@ -174,6 +187,7 @@ func TestMaybePatchExecutable(t *testing.T) {
 }
 
 func TestPatchExecutableWithHistory(t *testing.T) {
+	requireExePatchEnabled(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bin")
 	if err := os.WriteFile(path, []byte("foo foo"), 0o700); err != nil {
@@ -234,6 +248,7 @@ func TestPatchExecutableWithHistory(t *testing.T) {
 }
 
 func TestBackupExecutableExisting(t *testing.T) {
+	requireExePatchEnabled(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bin")
 	if err := os.WriteFile(path, []byte("data"), 0o700); err != nil {
@@ -258,6 +273,7 @@ func TestBackupExecutableExisting(t *testing.T) {
 }
 
 func TestCleanupBackup(t *testing.T) {
+	requireExePatchEnabled(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bin.bak")
 	if err := os.WriteFile(path, []byte("data"), 0o700); err != nil {
@@ -271,6 +287,7 @@ func TestCleanupBackup(t *testing.T) {
 }
 
 func TestLogHelpers(t *testing.T) {
+	requireExePatchEnabled(t)
 	buf := &bytes.Buffer{}
 	logDryRun(buf, "path", true)
 	logAlreadyPatched(buf, "path")
@@ -301,6 +318,7 @@ func TestLogHelpers(t *testing.T) {
 }
 
 func TestPatchSpecsHashDiffers(t *testing.T) {
+	requireExePatchEnabled(t)
 	specA := exePatchSpec{
 		match:   regexp.MustCompile("foo"),
 		guard:   regexp.MustCompile("bar"),
@@ -323,6 +341,7 @@ func TestPatchSpecsHashDiffers(t *testing.T) {
 }
 
 func TestFormatPreviewSegment(t *testing.T) {
+	requireExePatchEnabled(t)
 	short := bytes.Repeat([]byte("a"), previewByteLimit)
 	if got := formatPreviewSegment(short); !strings.Contains(got, "aaaa") {
 		t.Fatalf("expected preview to include content, got %q", got)

@@ -63,7 +63,7 @@ func runLike(cmd *cobra.Command, root *rootOptions, autoInit bool) error {
 	if err != nil {
 		return err
 	}
-	if root.exePatch.dryRun {
+	if root.exePatch.dryRun && root.exePatch.enabled() {
 		return nil
 	}
 

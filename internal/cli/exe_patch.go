@@ -17,6 +17,7 @@ import (
 )
 
 type exePatchOptions struct {
+	enabledFlag   bool
 	regex1         string
 	regex2         []string
 	regex3         []string
@@ -40,6 +41,9 @@ type patchOutcome struct {
 }
 
 func (o exePatchOptions) enabled() bool {
+	if !o.enabledFlag {
+		return false
+	}
 	return o.policySettings || o.customRulesEnabled()
 }
 

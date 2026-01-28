@@ -32,6 +32,7 @@ func TestSupportsYoloFlag(t *testing.T) {
 }
 
 func TestRecordPatchFailureAndSkip(t *testing.T) {
+	requireExePatchEnabled(t)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	origVersion := version

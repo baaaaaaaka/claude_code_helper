@@ -10,6 +10,7 @@ import (
 )
 
 func TestBackupAndRestoreExecutable(t *testing.T) {
+	requireExePatchEnabled(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bin")
 	original := []byte("original-bytes")
@@ -49,6 +50,7 @@ func TestBackupAndRestoreExecutable(t *testing.T) {
 }
 
 func TestCleanupPatchHistory(t *testing.T) {
+	requireExePatchEnabled(t)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	store, err := config.NewPatchHistoryStore(configPath)
@@ -86,6 +88,7 @@ func TestCleanupPatchHistory(t *testing.T) {
 }
 
 func TestIsPatchedBinaryFailure(t *testing.T) {
+	requireExePatchEnabled(t)
 	err := errors.New("exit status 1")
 	if !isPatchedBinaryFailure(err, "error: Module not found '/ @bun @bytecode @b'\nBun v1.3.6") {
 		t.Fatalf("expected bun module error to be detected")
