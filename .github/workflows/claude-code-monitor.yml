@@ -87,7 +87,7 @@ jobs:
           import re
           from pathlib import Path
 
-          platforms = ["linux", "mac", "windows", "centos7", "rockylinux8", "ubuntu20.04"]
+          platforms = ["linux", "mac", "windows", "rockylinux8", "ubuntu20.04"]
           versions = json.loads(os.environ["VERSIONS_JSON"])
           proxy_tag = os.environ["PROXY_TAG"]
 
@@ -234,9 +234,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: "centos7"
-            image: centos:7
-            install_cmd: ":"
           - platform: "rockylinux8"
             image: rockylinux:8
             install_cmd: ":"

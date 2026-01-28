@@ -8,7 +8,6 @@ PLATFORM_COLUMNS = [
     "linux",
     "mac",
     "windows",
-    "centos7",
     "rockylinux8",
     "ubuntu20.04",
 ]

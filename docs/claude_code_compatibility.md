@@ -2,9 +2,9 @@
 
 Rows are added automatically after tests pass for a Claude Code release.
 
-| Claude Code version | claude-proxy tag | linux | mac | windows | centos7 | rockylinux8 | ubuntu20.04 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| 2.1.19 | v0.0.25 | pass | pass | pass | fail | pass | pass |
-| 2.1.20 | v0.0.25 | pass | pass | pass | fail | pass | pass |
-| 2.1.21 | v0.0.25 | pass | pass | pass | fail | pass | pass |
-| 2.1.22 | v0.0.25 | pass | pass | pass | fail | pass | pass |
+| Claude Code version | claude-proxy tag | linux | mac | windows | rockylinux8 | ubuntu20.04 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2.1.19 | v0.0.25 | pass | pass | pass | pass | pass |
+| 2.1.20 | v0.0.25 | pass | pass | pass | pass | pass |
+| 2.1.21 | v0.0.25 | pass | pass | pass | pass | pass |
+| 2.1.22 | v0.0.25 | pass | pass | pass | pass | pass |
