@@ -138,6 +138,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     needs: detect
     if: needs.detect.outputs.missing_versions != '[]' && needs.detect.outputs.missing_versions != ''
+    env:
+      PLATFORM_NAME: ${{ fromJSON('{"ubuntu-latest":"linux","macos-latest":"mac","windows-latest":"windows"}')[matrix.os] }}
     strategy:
       fail-fast: false
       matrix:
@@ -182,7 +184,6 @@ jobs:
         env:
           CLAUDE_PATCH_TEST: "1"
           MISSING_VERSIONS_JSON: ${{ needs.detect.outputs.missing_versions }}
-          PLATFORM_NAME: ${{ fromJSON('{"ubuntu-latest":"linux","macos-latest":"mac","windows-latest":"windows"}')[matrix.os] }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
