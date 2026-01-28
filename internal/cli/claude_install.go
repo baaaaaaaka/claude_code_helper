@@ -10,11 +10,11 @@ import (
 	"runtime"
 	"strings"
 
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/config"
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/env"
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/ids"
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/manager"
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/stack"
+	"github.com/baaaaaaaka/claude_code_helper/internal/config"
+	"github.com/baaaaaaaka/claude_code_helper/internal/env"
+	"github.com/baaaaaaaka/claude_code_helper/internal/ids"
+	"github.com/baaaaaaaka/claude_code_helper/internal/manager"
+	"github.com/baaaaaaaka/claude_code_helper/internal/stack"
 )
 
 type installCmd struct {

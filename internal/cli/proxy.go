@@ -17,11 +17,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/config"
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/ids"
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/manager"
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/proc"
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/stack"
+	"github.com/baaaaaaaka/claude_code_helper/internal/config"
+	"github.com/baaaaaaaka/claude_code_helper/internal/ids"
+	"github.com/baaaaaaaka/claude_code_helper/internal/manager"
+	"github.com/baaaaaaaka/claude_code_helper/internal/proc"
+	"github.com/baaaaaaaka/claude_code_helper/internal/stack"
 )
 
 func newProxyCmd(root *rootOptions) *cobra.Command {

@@ -1,4 +1,4 @@
-module gitlab-master.nvidia.com/jawei/claude_code_helper
+module github.com/baaaaaaaka/claude_code_helper
 
 go 1.24.0
 

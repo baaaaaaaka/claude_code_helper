@@ -1,6 +1,6 @@
 package cli
 
-import "gitlab-master.nvidia.com/jawei/claude_code_helper/internal/config"
+import "github.com/baaaaaaaka/claude_code_helper/internal/config"
 
 func resolveYoloEnabled(cfg config.Config) bool {
 	return cfg.YoloEnabled != nil && *cfg.YoloEnabled

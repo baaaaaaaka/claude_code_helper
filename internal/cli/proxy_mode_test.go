@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/config"
+	"github.com/baaaaaaaka/claude_code_helper/internal/config"
 )
 
 func TestEnsureProxyPreferenceRespectsExistingValue(t *testing.T) {

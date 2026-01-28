@@ -8,9 +8,9 @@ import (
 	"os"
 	"time"
 
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/config"
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/localproxy"
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/ssh"
+	"github.com/baaaaaaaka/claude_code_helper/internal/config"
+	"github.com/baaaaaaaka/claude_code_helper/internal/localproxy"
+	"github.com/baaaaaaaka/claude_code_helper/internal/ssh"
 )
 
 type Options struct {

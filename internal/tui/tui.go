@@ -11,8 +11,8 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/mattn/go-runewidth"
 
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/claudehistory"
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/update"
+	"github.com/baaaaaaaka/claude_code_helper/internal/claudehistory"
+	"github.com/baaaaaaaka/claude_code_helper/internal/update"
 )
 
 type UpdateRequested struct{}

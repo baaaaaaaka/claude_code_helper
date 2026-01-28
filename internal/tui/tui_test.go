@@ -10,8 +10,8 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/claudehistory"
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/update"
+	"github.com/baaaaaaaka/claude_code_helper/internal/claudehistory"
+	"github.com/baaaaaaaka/claude_code_helper/internal/update"
 )
 
 func newTestScreen(t *testing.T, w, h int) tcell.Screen {

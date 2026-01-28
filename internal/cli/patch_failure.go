@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/config"
+	"github.com/baaaaaaaka/claude_code_helper/internal/config"
 )
 
 func currentProxyVersion() string {
@@ -25,11 +25,12 @@ func currentProxyVersion() string {
 }
 
 func isClaudeExecutable(cmdArg string, resolvedPath string) bool {
-	base := strings.ToLower(filepath.Base(resolvedPath))
-	if base == "" {
-		base = strings.ToLower(filepath.Base(cmdArg))
+	resolvedBase := strings.ToLower(filepath.Base(resolvedPath))
+	if resolvedBase == "claude" || resolvedBase == "claude.exe" {
+		return true
 	}
-	return base == "claude" || base == "claude.exe"
+	cmdBase := strings.ToLower(filepath.Base(cmdArg))
+	return cmdBase == "claude" || cmdBase == "claude.exe"
 }
 
 func resolveClaudeVersion(path string) string {
@@ -166,6 +167,9 @@ func isPatchedBinaryStartupFailure(err error, output string) bool {
 		return false
 	}
 	if isPatchedBinaryFailure(err, output) {
+		return true
+	}
+	if exitDueToFatalSignal(err) {
 		return true
 	}
 	var exitErr *exec.ExitError

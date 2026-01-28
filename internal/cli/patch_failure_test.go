@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"testing"
 
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/config"
+	"github.com/baaaaaaaka/claude_code_helper/internal/config"
 )
 
 func TestSupportsYoloFlag(t *testing.T) {
@@ -75,6 +75,18 @@ func TestRecordPatchFailureAndSkip(t *testing.T) {
 	}
 	if skip, err := shouldSkipPatchFailure(configPath, "v9.9.8", "2.1.19", ""); err != nil || skip {
 		t.Fatalf("expected no skip for different proxy version, got skip=%v err=%v", skip, err)
+	}
+}
+
+func TestIsClaudeExecutableUsesCmdArgWhenResolvedDiffers(t *testing.T) {
+	if !isClaudeExecutable("claude", "/Users/mocha/.local/share/claude/versions/2.1.22") {
+		t.Fatalf("expected cmd arg to identify claude binary")
+	}
+	if !isClaudeExecutable("claude.exe", "C:\\Users\\mocha\\AppData\\Local\\claude\\2.1.22") {
+		t.Fatalf("expected cmd arg to identify claude.exe binary")
+	}
+	if isClaudeExecutable("not-claude", "/tmp/2.1.22") {
+		t.Fatalf("expected non-claude to be rejected")
 	}
 }
 

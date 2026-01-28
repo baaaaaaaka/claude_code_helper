@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/config"
+	"github.com/baaaaaaaka/claude_code_helper/internal/config"
 )
 
 func TestBackupAndRestoreExecutable(t *testing.T) {

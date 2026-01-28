@@ -22,6 +22,8 @@ type stmtRange struct {
 	end   int
 }
 
+const maxNonPrintablePercent = 10
+
 func applyPolicySettingsBlockPatch(data []byte, startRe *regexp.Regexp, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
 	stats := exePatchStats{Label: "policySettings-block"}
 	if startRe == nil {
@@ -87,6 +89,9 @@ func buildPolicySettingsPlans(data []byte, matches [][]int) ([]policyReplacement
 		openBrace := match[1] - 1
 		blockStart, blockEnd, ok := findBlock(data, openBrace)
 		if !ok {
+			continue
+		}
+		if !looksLikePolicyTextBlock(data[blockStart:blockEnd]) {
 			continue
 		}
 		if _, ok := seen[blockStart]; ok {
@@ -387,4 +392,32 @@ func readJSIdent(data []byte, start, end int) (string, int) {
 		i++
 	}
 	return string(data[start:i]), i
+}
+
+func looksLikePolicyTextBlock(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	maxNonPrintable := len(data) * maxNonPrintablePercent / 100
+	nonPrintable := 0
+	for _, b := range data {
+		if b == 0 {
+			return false
+		}
+		if isPolicyPrintable(b) {
+			continue
+		}
+		nonPrintable++
+		if nonPrintable > maxNonPrintable {
+			return false
+		}
+	}
+	return true
+}
+
+func isPolicyPrintable(b byte) bool {
+	if b == '\n' || b == '\r' || b == '\t' {
+		return true
+	}
+	return b >= 0x20 && b <= 0x7E
 }

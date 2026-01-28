@@ -7,7 +7,7 @@ import (
 	"io"
 	"os"
 
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/config"
+	"github.com/baaaaaaaka/claude_code_helper/internal/config"
 )
 
 func ensureProxyPreference(ctx context.Context, store *config.Store, profileRef string, out io.Writer) (bool, config.Config, error) {

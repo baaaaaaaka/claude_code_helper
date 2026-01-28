@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/cli"
+	"github.com/baaaaaaaka/claude_code_helper/internal/cli"
 )
 
 func main() {

@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/config"
+	"github.com/baaaaaaaka/claude_code_helper/internal/config"
 )
 
 type exePatchOptions struct {
@@ -251,6 +251,19 @@ func maybePatchExecutable(cmdArgs []string, opts exePatchOptions, configPath str
 		outcome.IsClaude = isClaude
 		outcome.ConfigPath = configPath
 		if outcome.Applied && outcome.IsClaude {
+			if signErr := adhocCodesign(resolvedPath, log); signErr != nil {
+				_, _ = fmt.Fprintln(log, "exe-patch: codesign failed; restoring backup")
+				if restoreErr := restoreExecutableFromBackup(outcome); restoreErr != nil {
+					return nil, fmt.Errorf("restore patched executable: %w", restoreErr)
+				}
+				if historyErr := cleanupPatchHistory(outcome); historyErr != nil {
+					return nil, fmt.Errorf("cleanup patch history: %w", historyErr)
+				}
+				if recordErr := recordPatchFailure(configPath, outcome, formatFailureReason(signErr, "")); recordErr != nil {
+					_, _ = fmt.Fprintf(log, "exe-patch: failed to record patch failure: %v\n", recordErr)
+				}
+				return nil, nil
+			}
 			out, probeErr := runClaudeProbe(resolvedPath, "--version")
 			if probeErr != nil {
 				_, _ = fmt.Fprintln(log, "exe-patch: detected startup failure; restoring backup")

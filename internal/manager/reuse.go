@@ -3,8 +3,8 @@ package manager
 import (
 	"time"
 
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/config"
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/proc"
+	"github.com/baaaaaaaka/claude_code_helper/internal/config"
+	"github.com/baaaaaaaka/claude_code_helper/internal/proc"
 )
 
 func FindReusableInstance(instances []config.Instance, profileID string, hc HealthClient) *config.Instance {

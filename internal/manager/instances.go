@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/config"
+	"github.com/baaaaaaaka/claude_code_helper/internal/config"
 )
 
 func RecordInstance(store *config.Store, inst config.Instance) error {

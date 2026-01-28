@@ -11,7 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"gitlab-master.nvidia.com/jawei/claude_code_helper/internal/update"
+	"github.com/baaaaaaaka/claude_code_helper/internal/update"
 )
 
 func handleUpdateAndRestart(ctx context.Context, cmd *cobra.Command) error {

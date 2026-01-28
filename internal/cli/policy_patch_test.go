@@ -85,3 +85,41 @@ func TestPolicySettingsBlockPatch_IgnoreStringsAndComments(t *testing.T) {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
 }
+
+func TestPolicySettingsBlockPatch_SkipsBinaryLikeBlockWithNUL(t *testing.T) {
+	requireExePatchEnabled(t)
+	startRe := regexp.MustCompile(policySettingsStage1)
+	input := []byte("if(a==='policySettings'){x=1;")
+	input = append(input, 0x00)
+	input = append(input, []byte("callSomeFunction();continue}")...)
+
+	out, stats, err := applyPolicySettingsBlockPatch(input, startRe, nil, false)
+	if err != nil {
+		t.Fatalf("applyPolicySettingsBlockPatch error: %v", err)
+	}
+	if !bytes.Equal(out, input) {
+		t.Fatalf("expected output to be unchanged")
+	}
+	if stats.Changed != 0 || stats.Replacements != 0 || stats.Eligible != 0 || stats.Segments != 1 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+}
+
+func TestPolicySettingsBlockPatch_SkipsBinaryLikeBlockWithNonPrintable(t *testing.T) {
+	requireExePatchEnabled(t)
+	startRe := regexp.MustCompile(policySettingsStage1)
+	input := []byte("if(a==='policySettings'){x=1;")
+	input = append(input, bytes.Repeat([]byte{0x01}, 12)...)
+	input = append(input, []byte("callSomeFunction();continue}")...)
+
+	out, stats, err := applyPolicySettingsBlockPatch(input, startRe, nil, false)
+	if err != nil {
+		t.Fatalf("applyPolicySettingsBlockPatch error: %v", err)
+	}
+	if !bytes.Equal(out, input) {
+		t.Fatalf("expected output to be unchanged")
+	}
+	if stats.Changed != 0 || stats.Replacements != 0 || stats.Eligible != 0 || stats.Segments != 1 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+}
