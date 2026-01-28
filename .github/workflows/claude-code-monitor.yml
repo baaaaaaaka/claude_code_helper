@@ -40,36 +40,36 @@ jobs:
           export VERSIONS_JSON="$versions_json"
           export PROXY_TAG="$proxy_tag"
           python - <<'PY'
-import json
-import os
-import re
-from pathlib import Path
+          import json
+          import os
+          import re
+          from pathlib import Path
 
-versions = json.loads(os.environ["VERSIONS_JSON"])
-proxy_tag = os.environ["PROXY_TAG"]
+          versions = json.loads(os.environ["VERSIONS_JSON"])
+          proxy_tag = os.environ["PROXY_TAG"]
 
-table_path = Path("docs/claude_code_compatibility.md")
-existing = set()
-if table_path.exists():
-    for line in table_path.read_text().splitlines():
-        if not line.startswith("|"):
-            continue
-        parts = [part.strip() for part in line.strip().strip("|").split("|")]
-        if len(parts) < 2:
-            continue
-        version = parts[0].lstrip("v")
-        if re.match(r"^[0-9]+(\.[0-9]+)+$", version):
-            existing.add(version)
+          table_path = Path("docs/claude_code_compatibility.md")
+          existing = set()
+          if table_path.exists():
+              for line in table_path.read_text().splitlines():
+                  if not line.startswith("|"):
+                      continue
+                  parts = [part.strip() for part in line.strip().strip("|").split("|")]
+                  if len(parts) < 2:
+                      continue
+                  version = parts[0].lstrip("v")
+                  if re.match(r"^[0-9]+(\.[0-9]+)+$", version):
+                      existing.add(version)
 
-missing = [version for version in versions if version not in existing]
-latest = versions[-1] if versions else ""
+          missing = [version for version in versions if version not in existing]
+          latest = versions[-1] if versions else ""
 
-out_path = os.environ["GITHUB_OUTPUT"]
-with open(out_path, "a", encoding="utf-8") as output:
-    output.write(f"latest_version={latest}\n")
-    output.write(f"missing_versions={json.dumps(missing)}\n")
-    output.write(f"proxy_tag={proxy_tag}\n")
-PY
+          out_path = os.environ["GITHUB_OUTPUT"]
+          with open(out_path, "a", encoding="utf-8") as output:
+              output.write(f"latest_version={latest}\n")
+              output.write(f"missing_versions={json.dumps(missing)}\n")
+              output.write(f"proxy_tag={proxy_tag}\n")
+          PY
 
   test:
     name: Test Claude Code releases (${{ matrix.os }})
@@ -122,12 +122,12 @@ PY
         run: |
           set -euo pipefail
           versions="$(python - "$MISSING_VERSIONS_JSON" <<'PY'
-import json
-import sys
+          import json
+          import sys
 
-items = json.loads(sys.argv[1])
-print("\n".join(items))
-PY
+          items = json.loads(sys.argv[1])
+          print("\n".join(items))
+          PY
           )"
           if [ -z "$versions" ]; then
             echo "No Claude Code versions to test."
