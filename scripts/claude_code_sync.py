@@ -54,7 +54,7 @@ def update_ci_version(path: Path, latest_version: str) -> bool:
     text = path.read_text()
     updated, count = re.subn(
         r'(CLAUDE_PATCH_VERSION:\s*")([^"]+)(")',
-        rf'\1{latest_version}\3',
+        lambda match: f"{match.group(1)}{latest_version}{match.group(3)}",
         text,
     )
     if count == 0:
@@ -69,7 +69,7 @@ def update_test_version(path: Path, latest_version: str) -> bool:
     text = path.read_text()
     updated, count = re.subn(
         r'(const\s+defaultClaudePatchVersion\s*=\s*")([^"]+)(")',
-        rf'\1{latest_version}\3',
+        lambda match: f"{match.group(1)}{latest_version}{match.group(3)}",
         text,
     )
     if count == 0:
