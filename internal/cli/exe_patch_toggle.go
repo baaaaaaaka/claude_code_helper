@@ -11,7 +11,7 @@ const exePatchEnabledEnv = "CLAUDE_PROXY_EXE_PATCH"
 func exePatchEnabledDefault() bool {
 	raw := strings.TrimSpace(os.Getenv(exePatchEnabledEnv))
 	if raw == "" {
-		return false
+		return true
 	}
 	enabled, err := strconv.ParseBool(raw)
 	if err != nil {

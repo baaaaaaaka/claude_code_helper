@@ -13,7 +13,7 @@ jobs:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     env:
-      CLAUDE_PROXY_EXE_PATCH: "0"
+      CLAUDE_PROXY_EXE_PATCH: "1"
     strategy:
       fail-fast: false
       matrix:
