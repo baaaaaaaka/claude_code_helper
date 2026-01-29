@@ -78,7 +78,7 @@ func TestRunTargetWithFallbackRestoresAndReruns(t *testing.T) {
 		t.Fatalf("expected history to be cleared, got %d entries", len(history.Entries))
 	}
 
-	if _, err := os.Stat(backup); err == nil {
-		t.Fatalf("expected backup to be removed")
+	if _, err := os.Stat(backup); err != nil {
+		t.Fatalf("expected backup to remain: %v", err)
 	}
 }

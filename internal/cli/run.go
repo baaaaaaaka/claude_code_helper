@@ -321,9 +321,6 @@ func runTargetWithFallbackWithOptions(
 		stderrBuf := &limitedBuffer{max: maxOutputCaptureBytes}
 		err := runTargetOnceWithOptions(ctx, cmdArgs, proxyURL, healthCheck, fatalCh, stdoutBuf, stderrBuf, opts)
 		if err == nil {
-			if patchOutcome != nil && patchOutcome.Applied {
-				cleanupBackup(patchOutcome)
-			}
 			return nil
 		}
 		out := stdoutBuf.String() + stderrBuf.String()

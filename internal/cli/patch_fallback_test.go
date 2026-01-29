@@ -44,8 +44,8 @@ func TestBackupAndRestoreExecutable(t *testing.T) {
 		t.Fatalf("expected restored data %q, got %q", original, data)
 	}
 
-	if _, err := os.Stat(backupPath); err == nil {
-		t.Fatalf("expected backup to be removed")
+	if _, err := os.Stat(backupPath); err != nil {
+		t.Fatalf("expected backup to remain: %v", err)
 	}
 }
 

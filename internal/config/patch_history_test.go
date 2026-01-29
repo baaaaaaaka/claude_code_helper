@@ -33,6 +33,7 @@ func TestPatchHistoryStoreLoadSave(t *testing.T) {
 		Path:          filepath.Join(dir, "bin"),
 		SpecsSHA256:   "spec",
 		PatchedSHA256: "patched",
+		ProxyVersion:  "v1",
 	}
 	if err := store.Update(func(h *PatchHistory) error {
 		h.Upsert(entry)
@@ -40,6 +41,7 @@ func TestPatchHistoryStoreLoadSave(t *testing.T) {
 			Path:          entry.Path,
 			SpecsSHA256:   entry.SpecsSHA256,
 			PatchedSHA256: "patched-2",
+			ProxyVersion:  "v2",
 		})
 		return nil
 	}); err != nil {
@@ -53,17 +55,17 @@ func TestPatchHistoryStoreLoadSave(t *testing.T) {
 	if len(history.Entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(history.Entries))
 	}
-	if history.IsPatched(entry.Path, entry.SpecsSHA256, entry.PatchedSHA256) {
+	if history.IsPatched(entry.Path, entry.SpecsSHA256, entry.PatchedSHA256, "v1") {
 		t.Fatalf("expected IsPatched to be false after overwrite")
 	}
-	if !history.IsPatched(entry.Path, entry.SpecsSHA256, "patched-2") {
+	if !history.IsPatched(entry.Path, entry.SpecsSHA256, "patched-2", "v2") {
 		t.Fatalf("expected IsPatched to be true after overwrite")
 	}
 
 	if removed := history.Remove(entry.Path, entry.SpecsSHA256); !removed {
 		t.Fatalf("expected Remove to succeed")
 	}
-	if history.IsPatched(entry.Path, entry.SpecsSHA256, entry.PatchedSHA256) {
+	if history.IsPatched(entry.Path, entry.SpecsSHA256, entry.PatchedSHA256, "v1") {
 		t.Fatalf("expected IsPatched to be false after Remove")
 	}
 	if removed := history.Remove("missing", "missing"); removed {

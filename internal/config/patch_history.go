@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +19,7 @@ type PatchHistoryEntry struct {
 	Path          string    `json:"path"`
 	SpecsSHA256   string    `json:"specsSha256"`
 	PatchedSHA256 string    `json:"patchedSha256"`
+	ProxyVersion  string    `json:"proxyVersion,omitempty"`
 	PatchedAt     time.Time `json:"patchedAt"`
 }
 
@@ -26,13 +28,26 @@ type PatchHistory struct {
 	Entries []PatchHistoryEntry `json:"entries"`
 }
 
-func (h PatchHistory) IsPatched(path, specsSHA256, patchedSHA256 string) bool {
+func (h PatchHistory) IsPatched(path, specsSHA256, patchedSHA256, proxyVersion string) bool {
 	for _, entry := range h.Entries {
-		if entry.Path == path && entry.SpecsSHA256 == specsSHA256 && entry.PatchedSHA256 == patchedSHA256 {
-			return true
+		if entry.Path != path || entry.SpecsSHA256 != specsSHA256 || entry.PatchedSHA256 != patchedSHA256 {
+			continue
 		}
+		if strings.TrimSpace(entry.ProxyVersion) != strings.TrimSpace(proxyVersion) {
+			continue
+		}
+		return true
 	}
 	return false
+}
+
+func (h PatchHistory) Find(path, specsSHA256 string) (PatchHistoryEntry, bool) {
+	for _, entry := range h.Entries {
+		if entry.Path == path && entry.SpecsSHA256 == specsSHA256 {
+			return entry, true
+		}
+	}
+	return PatchHistoryEntry{}, false
 }
 
 func (h *PatchHistory) Remove(path, specsSHA256 string) bool {

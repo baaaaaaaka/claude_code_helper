@@ -207,6 +207,7 @@ func maybePatchExecutable(cmdArgs []string, opts exePatchOptions, configPath str
 	}
 
 	isClaude := isClaudeExecutable(cmdArgs[0], resolvedPath)
+	proxyVersion := currentProxyVersion()
 	targetVersion := ""
 	targetSHA := ""
 	if isClaude {
@@ -216,11 +217,11 @@ func maybePatchExecutable(cmdArgs []string, opts exePatchOptions, configPath str
 				targetSHA = sha
 			}
 		}
-		if skip, skipErr := shouldSkipPatchFailure(configPath, currentProxyVersion(), targetVersion, targetSHA); skipErr == nil && skip {
+		if skip, skipErr := shouldSkipPatchFailure(configPath, proxyVersion, targetVersion, targetSHA); skipErr == nil && skip {
 			if targetVersion != "" {
-				_, _ = fmt.Fprintf(log, "exe-patch: skip (previous failure) for claude %s with proxy %s\n", targetVersion, currentProxyVersion())
+				_, _ = fmt.Fprintf(log, "exe-patch: skip (previous failure) for claude %s with proxy %s\n", targetVersion, proxyVersion)
 			} else {
-				_, _ = fmt.Fprintf(log, "exe-patch: skip (previous failure) for claude binary with proxy %s\n", currentProxyVersion())
+				_, _ = fmt.Fprintf(log, "exe-patch: skip (previous failure) for claude binary with proxy %s\n", proxyVersion)
 			}
 			return &patchOutcome{
 				TargetPath:    resolvedPath,
@@ -236,10 +237,11 @@ func maybePatchExecutable(cmdArgs []string, opts exePatchOptions, configPath str
 
 	historyStore, err := config.NewPatchHistoryStore(configPath)
 	if err != nil {
-		return nil, err
+		_, _ = fmt.Fprintf(log, "exe-patch: failed to init patch history: %v\n", err)
+		historyStore = nil
 	}
 
-	outcome, err := patchExecutable(resolvedPath, specs, log, opts.preview, opts.dryRun, historyStore)
+	outcome, err := patchExecutable(resolvedPath, specs, log, opts.preview, opts.dryRun, historyStore, proxyVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -283,7 +285,7 @@ func maybePatchExecutable(cmdArgs []string, opts exePatchOptions, configPath str
 	return outcome, nil
 }
 
-func patchExecutable(path string, specs []exePatchSpec, log io.Writer, preview bool, dryRun bool, historyStore *config.PatchHistoryStore) (*patchOutcome, error) {
+func patchExecutable(path string, specs []exePatchSpec, log io.Writer, preview bool, dryRun bool, historyStore *config.PatchHistoryStore, proxyVersion string) (*patchOutcome, error) {
 	if log == nil {
 		log = io.Discard
 	}
@@ -307,35 +309,59 @@ func patchExecutable(path string, specs []exePatchSpec, log io.Writer, preview b
 		SpecsHash:    specsHash,
 		HistoryStore: historyStore,
 	}
+	currentHash := hashBytes(data)
+	outcome.TargetSHA256 = currentHash
+	var history config.PatchHistory
+	historyLoaded := false
 	if historyStore != nil {
-		history, err := historyStore.Load()
+		loaded, err := historyStore.Load()
 		if err != nil {
-			return nil, fmt.Errorf("load patch history: %w", err)
+			_, _ = fmt.Fprintf(log, "exe-patch: failed to load patch history: %v\n", err)
+		} else {
+			history = loaded
+			historyLoaded = true
 		}
-
-		currentHash := hashBytes(data)
-		outcome.TargetSHA256 = currentHash
-		if history.IsPatched(path, specsHash, currentHash) {
+	}
+	if historyLoaded {
+		if history.IsPatched(path, specsHash, currentHash, proxyVersion) {
 			outcome.AlreadyPatched = true
 			logAlreadyPatched(log, path)
 			return outcome, nil
 		}
-	}
-	if outcome.TargetSHA256 == "" {
-		outcome.TargetSHA256 = hashBytes(data)
+		if entry, ok := history.Find(path, specsHash); ok && entry.PatchedSHA256 == currentHash {
+			prev := strings.TrimSpace(entry.ProxyVersion)
+			if prev != "" && prev != strings.TrimSpace(proxyVersion) {
+				_, _ = fmt.Fprintf(log, "exe-patch: proxy changed (%s -> %s); reapplying %s\n", prev, proxyVersion, path)
+			}
+		}
 	}
 
-	patched, stats, err := applyExePatches(data, specs, log, preview)
+	sourceData := data
+	backupPath := originalBackupPath(path)
+	if backupBytes, err := os.ReadFile(backupPath); err == nil {
+		sourceData = backupBytes
+		outcome.BackupPath = backupPath
+	} else if err != nil && !os.IsNotExist(err) {
+		_, _ = fmt.Fprintf(log, "exe-patch: failed to read backup %s: %v (using current binary)\n", backupPath, err)
+	}
+
+	patched, stats, err := applyExePatches(sourceData, specs, log, preview)
 	if err != nil {
 		return nil, fmt.Errorf("patch target executable %q: %w", path, err)
 	}
 
 	changed := false
+	touched := false
 	for _, stat := range stats {
 		if stat.Changed > 0 {
 			changed = true
-			break
 		}
+		if stat.Replacements > 0 || stat.Eligible > 0 {
+			touched = true
+		}
+	}
+	if changed && bytes.Equal(patched, data) {
+		changed = false
 	}
 
 	var patchedHash string
@@ -343,35 +369,53 @@ func patchExecutable(path string, specs []exePatchSpec, log io.Writer, preview b
 		patchedHash = hashBytes(patched)
 	}
 
-	if changed && !dryRun {
+	backupReady := outcome.BackupPath != ""
+	if touched && !dryRun && !backupReady {
 		backupPath, err := backupExecutable(path, info.Mode().Perm())
 		if err != nil {
-			return nil, err
+			if changed {
+				return nil, err
+			}
+			_, _ = fmt.Fprintf(log, "exe-patch: failed to create backup: %v\n", err)
+		} else {
+			outcome.BackupPath = backupPath
+			backupReady = true
 		}
-		outcome.BackupPath = backupPath
+	}
+
+	if changed && !dryRun {
+		if !backupReady {
+			return nil, fmt.Errorf("missing backup for patched executable %q", path)
+		}
 		outcome.Applied = true
 
 		if err := os.WriteFile(path, patched, info.Mode().Perm()); err != nil {
 			return nil, fmt.Errorf("write patched executable %q: %w", path, err)
 		}
-		if historyStore != nil {
-			entry := config.PatchHistoryEntry{
-				Path:          path,
-				SpecsSHA256:   specsHash,
-				PatchedSHA256: patchedHash,
-				PatchedAt:     time.Now(),
-			}
-			if err := historyStore.Update(func(h *config.PatchHistory) error {
-				h.Upsert(entry)
-				return nil
-			}); err != nil {
-				return nil, fmt.Errorf("update patch history: %w", err)
-			}
-		}
 	}
 
 	if dryRun {
 		logDryRun(log, path, changed)
+	}
+
+	if historyStore != nil && touched && !dryRun {
+		entryHash := currentHash
+		if changed {
+			entryHash = patchedHash
+		}
+		entry := config.PatchHistoryEntry{
+			Path:          path,
+			SpecsSHA256:   specsHash,
+			PatchedSHA256: entryHash,
+			ProxyVersion:  proxyVersion,
+			PatchedAt:     time.Now(),
+		}
+		if err := historyStore.Update(func(h *config.PatchHistory) error {
+			h.Upsert(entry)
+			return nil
+		}); err != nil {
+			_, _ = fmt.Fprintf(log, "exe-patch: failed to update patch history: %v\n", err)
+		}
 	}
 
 	for _, stat := range stats {
@@ -392,12 +436,21 @@ func resolveExecutablePath(path string) (string, error) {
 	return abs, nil
 }
 
-func backupExecutable(path string, perm os.FileMode) (string, error) {
+func originalBackupPath(path string) string {
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
-	backupPath := filepath.Join(dir, base+".claude-proxy.bak")
-	if _, err := os.Stat(backupPath); err == nil {
-		backupPath = filepath.Join(dir, fmt.Sprintf("%s.claude-proxy.%d.bak", base, time.Now().UnixNano()))
+	return filepath.Join(dir, base+".claude-proxy.bak")
+}
+
+func backupExecutable(path string, perm os.FileMode) (string, error) {
+	backupPath := originalBackupPath(path)
+	if info, err := os.Stat(backupPath); err == nil {
+		if !info.Mode().IsRegular() {
+			return "", fmt.Errorf("backup path %q is not a regular file", backupPath)
+		}
+		return backupPath, nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("stat backup file: %w", err)
 	}
 
 	src, err := os.Open(path)
@@ -439,9 +492,6 @@ func restoreExecutableFromBackup(outcome *patchOutcome) error {
 	if err := os.WriteFile(outcome.TargetPath, data, info.Mode().Perm()); err != nil {
 		return fmt.Errorf("restore executable from backup: %w", err)
 	}
-	if err := os.Remove(outcome.BackupPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove backup file: %w", err)
-	}
 	return nil
 }
 
@@ -453,13 +503,6 @@ func cleanupPatchHistory(outcome *patchOutcome) error {
 		h.Remove(outcome.TargetPath, outcome.SpecsHash)
 		return nil
 	})
-}
-
-func cleanupBackup(outcome *patchOutcome) {
-	if outcome == nil || outcome.BackupPath == "" {
-		return
-	}
-	_ = os.Remove(outcome.BackupPath)
 }
 
 func hashBytes(data []byte) string {

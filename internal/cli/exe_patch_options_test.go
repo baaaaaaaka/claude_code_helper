@@ -207,7 +207,7 @@ func TestPatchExecutableWithHistory(t *testing.T) {
 		label:   "custom-1",
 	}
 	log := &bytes.Buffer{}
-	outcome, err := patchExecutable(path, []exePatchSpec{spec}, log, false, false, store)
+	outcome, err := patchExecutable(path, []exePatchSpec{spec}, log, false, false, store, "v1.0.0")
 	if err != nil {
 		t.Fatalf("patchExecutable error: %v", err)
 	}
@@ -235,7 +235,7 @@ func TestPatchExecutableWithHistory(t *testing.T) {
 	}
 
 	log.Reset()
-	outcome2, err := patchExecutable(path, []exePatchSpec{spec}, log, false, false, store)
+	outcome2, err := patchExecutable(path, []exePatchSpec{spec}, log, false, false, store, "v1.0.0")
 	if err != nil {
 		t.Fatalf("patchExecutable second run error: %v", err)
 	}
@@ -244,6 +244,168 @@ func TestPatchExecutableWithHistory(t *testing.T) {
 	}
 	if !strings.Contains(log.String(), "already patched") {
 		t.Fatalf("expected already patched log, got %q", log.String())
+	}
+}
+
+func TestPatchExecutableProxyChangeUsesBackup(t *testing.T) {
+	requireExePatchEnabled(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bin")
+	if err := os.WriteFile(path, []byte("foo foo"), 0o700); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
+
+	store, err := config.NewPatchHistoryStore(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatalf("NewPatchHistoryStore error: %v", err)
+	}
+
+	spec := exePatchSpec{
+		match:   regexp.MustCompile("foo"),
+		guard:   nil,
+		patch:   regexp.MustCompile("foo"),
+		replace: []byte("bar"),
+		label:   "custom-1",
+	}
+	log := &bytes.Buffer{}
+	outcome, err := patchExecutable(path, []exePatchSpec{spec}, log, false, false, store, "v1.0.0")
+	if err != nil {
+		t.Fatalf("patchExecutable error: %v", err)
+	}
+	if !outcome.Applied {
+		t.Fatalf("expected patch to be applied")
+	}
+
+	if err := os.WriteFile(path, []byte("baz baz"), 0o700); err != nil {
+		t.Fatalf("corrupt executable: %v", err)
+	}
+
+	log.Reset()
+	outcome2, err := patchExecutable(path, []exePatchSpec{spec}, log, false, false, store, "v2.0.0")
+	if err != nil {
+		t.Fatalf("patchExecutable proxy update error: %v", err)
+	}
+	if !outcome2.Applied {
+		t.Fatalf("expected patched binary to be rewritten from backup")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read patched: %v", err)
+	}
+	if string(data) != "bar bar" {
+		t.Fatalf("expected patched data, got %q", string(data))
+	}
+	if _, err := os.Stat(originalBackupPath(path)); err != nil {
+		t.Fatalf("expected backup to remain: %v", err)
+	}
+	history, err := store.Load()
+	if err != nil {
+		t.Fatalf("load history: %v", err)
+	}
+	entry, ok := history.Find(path, patchSpecsHash([]exePatchSpec{spec}))
+	if !ok {
+		t.Fatalf("expected history entry")
+	}
+	if entry.ProxyVersion != "v2.0.0" {
+		t.Fatalf("expected proxy version to update, got %q", entry.ProxyVersion)
+	}
+}
+
+func TestPatchExecutableProxyChangeWithoutBackup(t *testing.T) {
+	requireExePatchEnabled(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bin")
+	if err := os.WriteFile(path, []byte("bar bar"), 0o700); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
+
+	store, err := config.NewPatchHistoryStore(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatalf("NewPatchHistoryStore error: %v", err)
+	}
+
+	spec := exePatchSpec{
+		match:   regexp.MustCompile("bar"),
+		guard:   nil,
+		patch:   regexp.MustCompile("bar"),
+		replace: []byte("bar"),
+		label:   "custom-1",
+	}
+	specsHash := patchSpecsHash([]exePatchSpec{spec})
+	currentHash := hashBytes([]byte("bar bar"))
+	if err := store.Update(func(h *config.PatchHistory) error {
+		h.Upsert(config.PatchHistoryEntry{
+			Path:          path,
+			SpecsSHA256:   specsHash,
+			PatchedSHA256: currentHash,
+			ProxyVersion:  "v1.0.0",
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("seed history error: %v", err)
+	}
+
+	log := &bytes.Buffer{}
+	outcome, err := patchExecutable(path, []exePatchSpec{spec}, log, false, false, store, "v2.0.0")
+	if err != nil {
+		t.Fatalf("patchExecutable error: %v", err)
+	}
+	if outcome.Applied {
+		t.Fatalf("expected no rewrite when already patched")
+	}
+	if _, err := os.Stat(originalBackupPath(path)); err != nil {
+		t.Fatalf("expected backup to be created: %v", err)
+	}
+	history, err := store.Load()
+	if err != nil {
+		t.Fatalf("load history: %v", err)
+	}
+	entry, ok := history.Find(path, specsHash)
+	if !ok {
+		t.Fatalf("expected history entry")
+	}
+	if entry.ProxyVersion != "v2.0.0" {
+		t.Fatalf("expected proxy version to update, got %q", entry.ProxyVersion)
+	}
+}
+
+func TestPatchExecutableHistoryLoadFailure(t *testing.T) {
+	requireExePatchEnabled(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bin")
+	if err := os.WriteFile(path, []byte("foo"), 0o700); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
+
+	store, err := config.NewPatchHistoryStore(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatalf("NewPatchHistoryStore error: %v", err)
+	}
+	historyPath, err := config.PatchHistoryPath(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatalf("PatchHistoryPath error: %v", err)
+	}
+	if err := os.WriteFile(historyPath, []byte("{invalid json"), 0o600); err != nil {
+		t.Fatalf("write invalid history: %v", err)
+	}
+
+	spec := exePatchSpec{
+		match:   regexp.MustCompile("foo"),
+		guard:   nil,
+		patch:   regexp.MustCompile("foo"),
+		replace: []byte("bar"),
+		label:   "custom-1",
+	}
+	log := &bytes.Buffer{}
+	if _, err := patchExecutable(path, []exePatchSpec{spec}, log, false, false, store, "v1.0.0"); err != nil {
+		t.Fatalf("patchExecutable error: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read patched: %v", err)
+	}
+	if string(data) != "bar" {
+		t.Fatalf("expected patched data, got %q", string(data))
 	}
 }
 
@@ -264,25 +426,11 @@ func TestBackupExecutableExisting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("backupExecutable error: %v", err)
 	}
-	if newBackup == existing {
-		t.Fatalf("expected new backup path, got existing")
+	if newBackup != existing {
+		t.Fatalf("expected existing backup path, got %q", newBackup)
 	}
-	if _, err := os.Stat(newBackup); err != nil {
+	if _, err := os.Stat(existing); err != nil {
 		t.Fatalf("expected new backup to exist: %v", err)
-	}
-}
-
-func TestCleanupBackup(t *testing.T) {
-	requireExePatchEnabled(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "bin.bak")
-	if err := os.WriteFile(path, []byte("data"), 0o700); err != nil {
-		t.Fatalf("write backup: %v", err)
-	}
-	outcome := &patchOutcome{BackupPath: path}
-	cleanupBackup(outcome)
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("expected backup to be removed")
 	}
 }
 
