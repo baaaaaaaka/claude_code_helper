@@ -113,18 +113,15 @@ def load_results(results_dir: Path) -> dict[str, dict[str, str]]:
     return results
 
 
-def update_ci_version(path: Path, latest_version: str) -> bool:
-    text = path.read_text()
-    updated, count = re.subn(
-        r'(CLAUDE_PATCH_VERSION:\s*")([^"]+)(")',
-        lambda match: f"{match.group(1)}{latest_version}{match.group(3)}",
-        text,
-    )
-    if count == 0:
-        raise RuntimeError(f"CLAUDE_PATCH_VERSION not found in {path}")
-    if updated == text:
+def update_patch_version_file(path: Path, latest_version: str) -> bool:
+    version = latest_version.strip()
+    if not version:
         return False
-    path.write_text(updated)
+    existing = path.read_text().strip() if path.exists() else ""
+    if existing == version:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(version + "\n")
     return True
 
 
@@ -156,12 +153,14 @@ def main() -> int:
         help="Compatibility table path",
     )
     parser.add_argument(
-        "--ci-path", default=".github/workflows/ci.yml", help="CI workflow path"
-    )
-    parser.add_argument(
         "--test-file",
         default="internal/cli/claude_patch_integration_test.go",
         help="Integration test file path",
+    )
+    parser.add_argument(
+        "--patch-version-path",
+        default="scripts/claude_patch_version.txt",
+        help="Patch version file path for CI smoke tests",
     )
     parser.add_argument(
         "--results-dir",
@@ -196,13 +195,15 @@ def main() -> int:
 
     table_updated = update_file(table_path, render_table(records))
 
-    ci_updated = False
+    patch_updated = False
     test_updated = False
     if args.latest_version:
-        ci_updated = update_ci_version(Path(args.ci_path), args.latest_version)
+        patch_updated = update_patch_version_file(
+            Path(args.patch_version_path), args.latest_version
+        )
         test_updated = update_test_version(Path(args.test_file), args.latest_version)
 
-    if table_updated or ci_updated or test_updated:
+    if table_updated or patch_updated or test_updated:
         print("updated")
     else:
         print("no changes")

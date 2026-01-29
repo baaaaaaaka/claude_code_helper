@@ -406,7 +406,7 @@ jobs:
         run: |
           set -euo pipefail
           git add docs/claude_code_compatibility.md \
-            .github/workflows/ci.yml \
+            scripts/claude_patch_version.txt \
             internal/cli/claude_patch_integration_test.go
           if git diff --cached --quiet; then
             echo "No changes to commit."

@@ -114,12 +114,22 @@ jobs:
           fi
           echo "CLAUDE_PATCH_BUCKET=$bucket" >> "$GITHUB_ENV"
 
+      - name: Load Claude patch version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(cat scripts/claude_patch_version.txt | tr -d '\r\n')"
+          if [ -z "$version" ]; then
+            echo "Missing Claude patch version in scripts/claude_patch_version.txt" >&2
+            exit 1
+          fi
+          echo "CLAUDE_PATCH_VERSION=$version" >> "$GITHUB_ENV"
+
       - name: Claude patch smoke (macOS)
         if: runner.os == 'macOS'
         shell: bash
         env:
           CLAUDE_PATCH_TEST: "1"
-          CLAUDE_PATCH_VERSION: "2.1.22"
         run: |
           go test ./internal/cli -run TestClaudePatchIntegration -count=1
 
@@ -128,7 +138,6 @@ jobs:
         shell: bash
         env:
           CLAUDE_PATCH_TEST: "1"
-          CLAUDE_PATCH_VERSION: "2.1.22"
         run: |
           go test ./internal/cli -run TestClaudePatchIntegration -count=1
 
@@ -137,7 +146,6 @@ jobs:
         shell: pwsh
         env:
           CLAUDE_PATCH_TEST: "1"
-          CLAUDE_PATCH_VERSION: "2.1.22"
         run: |
           go test ./internal/cli -run TestClaudePatchIntegration -count=1
 
