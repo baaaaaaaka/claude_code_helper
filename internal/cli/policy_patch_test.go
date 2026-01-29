@@ -42,3 +42,80 @@ func TestPolicySettingsDisablePatch_NoMatch(t *testing.T) {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
 }
+
+func TestBypassPermissionsGatePatch_ReplacesKeys(t *testing.T) {
+	requireExePatchEnabled(t)
+	input := []byte("rf(\"tengu_disable_bypass_permissions_mode\");" +
+		"settings.permissions.disableBypassPermissionsMode=\"disable\";")
+
+	out, stats, err := applyBypassPermissionsGatePatch(input, nil, false)
+	if err != nil {
+		t.Fatalf("applyBypassPermissionsGatePatch error: %v", err)
+	}
+	if len(out) != len(input) {
+		t.Fatalf("expected output length %d, got %d", len(input), len(out))
+	}
+	if bytes.Contains(out, []byte(bypassPermissionsGateName)) {
+		t.Fatalf("expected Statsig gate name to be replaced")
+	}
+	if bytes.Contains(out, []byte(bypassPermissionsSettingKey)) {
+		t.Fatalf("expected settings key to be replaced")
+	}
+	if stats.Replacements != 2 || stats.Changed == 0 || stats.Segments != 2 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+}
+
+func TestBypassPermissionsGatePatch_NoMatch(t *testing.T) {
+	requireExePatchEnabled(t)
+	input := []byte("rf(\"unrelated_gate\")")
+
+	out, stats, err := applyBypassPermissionsGatePatch(input, nil, false)
+	if err != nil {
+		t.Fatalf("applyBypassPermissionsGatePatch error: %v", err)
+	}
+	if !bytes.Equal(out, input) {
+		t.Fatalf("expected output to be unchanged")
+	}
+	if stats.Segments != 0 || stats.Eligible != 0 || stats.Changed != 0 || stats.Replacements != 0 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+}
+
+func TestRemoteSettingsDisablePatch_ReplacesPaths(t *testing.T) {
+	requireExePatchEnabled(t)
+	input := []byte("remote-settings.json -- /api/claude_code/settings")
+
+	out, stats, err := applyRemoteSettingsDisablePatch(input, nil, false)
+	if err != nil {
+		t.Fatalf("applyRemoteSettingsDisablePatch error: %v", err)
+	}
+	if len(out) != len(input) {
+		t.Fatalf("expected output length %d, got %d", len(input), len(out))
+	}
+	if bytes.Contains(out, []byte(remoteSettingsFileName)) {
+		t.Fatalf("expected remote settings file name to be replaced")
+	}
+	if bytes.Contains(out, []byte(remoteSettingsAPIPath)) {
+		t.Fatalf("expected remote settings API path to be replaced")
+	}
+	if stats.Replacements != 2 || stats.Changed == 0 || stats.Segments != 2 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+}
+
+func TestRemoteSettingsDisablePatch_NoMatch(t *testing.T) {
+	requireExePatchEnabled(t)
+	input := []byte("no remote settings here")
+
+	out, stats, err := applyRemoteSettingsDisablePatch(input, nil, false)
+	if err != nil {
+		t.Fatalf("applyRemoteSettingsDisablePatch error: %v", err)
+	}
+	if !bytes.Equal(out, input) {
+		t.Fatalf("expected output to be unchanged")
+	}
+	if stats.Segments != 0 || stats.Eligible != 0 || stats.Changed != 0 || stats.Replacements != 0 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+}

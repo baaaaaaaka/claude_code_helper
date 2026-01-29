@@ -109,12 +109,20 @@ const (
 )
 
 func policySettingsSpecs() ([]exePatchSpec, error) {
-	spec, err := policySettingsDisablePatchSpec()
+	disableSpec, err := policySettingsDisablePatchSpec()
+	if err != nil {
+		return nil, err
+	}
+	gateSpec, err := bypassPermissionsGatePatchSpec()
+	if err != nil {
+		return nil, err
+	}
+	remoteSpec, err := remoteSettingsDisablePatchSpec()
 	if err != nil {
 		return nil, err
 	}
 
-	return []exePatchSpec{spec}, nil
+	return []exePatchSpec{disableSpec, gateSpec, remoteSpec}, nil
 }
 
 func policySettingsDisablePatchSpec() (exePatchSpec, error) {
@@ -128,6 +136,28 @@ func policySettingsDisablePatchSpec() (exePatchSpec, error) {
 		applyID: "policySettings-disable-v1",
 		apply: func(data []byte, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
 			return applyPolicySettingsDisablePatch(data, startRe, log, preview)
+		},
+		fixedLength: true,
+	}, nil
+}
+
+func bypassPermissionsGatePatchSpec() (exePatchSpec, error) {
+	return exePatchSpec{
+		label:   "bypass-permissions-gate",
+		applyID: "bypass-permissions-gate-v1",
+		apply: func(data []byte, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
+			return applyBypassPermissionsGatePatch(data, log, preview)
+		},
+		fixedLength: true,
+	}, nil
+}
+
+func remoteSettingsDisablePatchSpec() (exePatchSpec, error) {
+	return exePatchSpec{
+		label:   "remote-settings-disable",
+		applyID: "remote-settings-disable-v1",
+		apply: func(data []byte, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
+			return applyRemoteSettingsDisablePatch(data, log, preview)
 		},
 		fixedLength: true,
 	}, nil

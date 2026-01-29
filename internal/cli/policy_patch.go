@@ -8,6 +8,16 @@ import (
 )
 
 const maxNonPrintablePercent = 10
+const (
+	bypassPermissionsGateName        = "tengu_disable_bypass_permissions_mode"
+	bypassPermissionsGateNamePatched = "tengu_disable_bypass_permissionX_mode"
+	bypassPermissionsSettingKey      = "disableBypassPermissionsMode"
+	bypassPermissionsSettingPatched  = "disableBypassPermissionsModE"
+	remoteSettingsFileName           = "remote-settings.json"
+	remoteSettingsFilePatched        = "remote-settings.jsoN"
+	remoteSettingsAPIPath            = "/api/claude_code/settings"
+	remoteSettingsAPIPathPatched     = "/api/claude_code/settingS"
+)
 
 func applyPolicySettingsDisablePatch(data []byte, startRe *regexp.Regexp, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
 	stats := exePatchStats{Label: "policySettings-disable"}
@@ -68,6 +78,82 @@ func applyPolicySettingsDisablePatch(data []byte, startRe *regexp.Regexp, log io
 	}
 
 	if stats.Eligible == 0 {
+		return data, stats, nil
+	}
+	return patched, stats, nil
+}
+
+func applyBypassPermissionsGatePatch(data []byte, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
+	stats := exePatchStats{Label: "bypass-permissions-gate"}
+	replacements := []struct {
+		before []byte
+		after  []byte
+		label  string
+	}{
+		{[]byte(bypassPermissionsGateName), []byte(bypassPermissionsGateNamePatched), "statsig-gate"},
+		{[]byte(bypassPermissionsSettingKey), []byte(bypassPermissionsSettingPatched), "settings-key"},
+	}
+
+	changed := false
+	patched := make([]byte, len(data))
+	copy(patched, data)
+
+	for _, repl := range replacements {
+		count := bytes.Count(patched, repl.before)
+		if count == 0 {
+			continue
+		}
+		if preview {
+			logPatchPreview(log, stats.Label+"-"+repl.label, repl.before, repl.after)
+		}
+		stats.Segments += count
+		stats.Eligible += count
+		stats.Patched += count
+		stats.Replacements += count
+		patched = bytes.ReplaceAll(patched, repl.before, repl.after)
+		changed = true
+		stats.Changed += count
+	}
+
+	if !changed {
+		return data, stats, nil
+	}
+	return patched, stats, nil
+}
+
+func applyRemoteSettingsDisablePatch(data []byte, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
+	stats := exePatchStats{Label: "remote-settings-disable"}
+	replacements := []struct {
+		before []byte
+		after  []byte
+		label  string
+	}{
+		{[]byte(remoteSettingsFileName), []byte(remoteSettingsFilePatched), "file-name"},
+		{[]byte(remoteSettingsAPIPath), []byte(remoteSettingsAPIPathPatched), "api-path"},
+	}
+
+	changed := false
+	patched := make([]byte, len(data))
+	copy(patched, data)
+
+	for _, repl := range replacements {
+		count := bytes.Count(patched, repl.before)
+		if count == 0 {
+			continue
+		}
+		if preview {
+			logPatchPreview(log, stats.Label+"-"+repl.label, repl.before, repl.after)
+		}
+		stats.Segments += count
+		stats.Eligible += count
+		stats.Patched += count
+		stats.Replacements += count
+		patched = bytes.ReplaceAll(patched, repl.before, repl.after)
+		changed = true
+		stats.Changed += count
+	}
+
+	if !changed {
 		return data, stats, nil
 	}
 	return patched, stats, nil

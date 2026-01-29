@@ -61,12 +61,26 @@ func TestPatchHistoryStoreLoadSave(t *testing.T) {
 	if !history.IsPatched(entry.Path, entry.SpecsSHA256, "patched-2", "v2") {
 		t.Fatalf("expected IsPatched to be true after overwrite")
 	}
+	if history.IsPatched(entry.Path, entry.SpecsSHA256, "patched-2", "v1") {
+		t.Fatalf("expected IsPatched to be false for mismatched proxy version")
+	}
+	if history.IsPatched(entry.Path, entry.SpecsSHA256, "patched-2", "") {
+		t.Fatalf("expected IsPatched to be false for empty proxy version")
+	}
+	if found, ok := history.Find(entry.Path, entry.SpecsSHA256); !ok {
+		t.Fatalf("expected Find to return entry")
+	} else if found.ProxyVersion != "v2" {
+		t.Fatalf("expected Find to return latest proxy version, got %q", found.ProxyVersion)
+	}
 
 	if removed := history.Remove(entry.Path, entry.SpecsSHA256); !removed {
 		t.Fatalf("expected Remove to succeed")
 	}
 	if history.IsPatched(entry.Path, entry.SpecsSHA256, entry.PatchedSHA256, "v1") {
 		t.Fatalf("expected IsPatched to be false after Remove")
+	}
+	if _, ok := history.Find(entry.Path, entry.SpecsSHA256); ok {
+		t.Fatalf("expected Find to be false after Remove")
 	}
 	if removed := history.Remove("missing", "missing"); removed {
 		t.Fatalf("expected Remove to be false for missing entry")
