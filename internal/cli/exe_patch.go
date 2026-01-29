@@ -104,12 +104,12 @@ type exePatchStats struct {
 }
 
 const (
-	// Go's regexp does not support non-greedy .*?, so stop at the first }.
-	policySettingsStage1 = `if\(\s*[A-Za-z0-9_$-]+\s*===\s*['"]policySettings['"]\s*\)\{`
+	// Match the settings getter that starts with a policySettings guard.
+	policySettingsGetterStage1 = `function\s+[A-Za-z0-9_$]+\s*\(\s*[A-Za-z0-9_$]+\s*\)\s*\{\s*if\(\s*(?:[A-Za-z0-9_$]+\s*={2,3}\s*['"]policySettings['"]|['"]policySettings['"]\s*={2,3}\s*[A-Za-z0-9_$]+)\s*\)\{`
 )
 
 func policySettingsSpecs() ([]exePatchSpec, error) {
-	spec, err := policySettingsBlockPatchSpec()
+	spec, err := policySettingsDisablePatchSpec()
 	if err != nil {
 		return nil, err
 	}
@@ -117,17 +117,17 @@ func policySettingsSpecs() ([]exePatchSpec, error) {
 	return []exePatchSpec{spec}, nil
 }
 
-func policySettingsBlockPatchSpec() (exePatchSpec, error) {
-	startRe, err := regexp.Compile(policySettingsStage1)
+func policySettingsDisablePatchSpec() (exePatchSpec, error) {
+	startRe, err := regexp.Compile(policySettingsGetterStage1)
 	if err != nil {
-		return exePatchSpec{}, fmt.Errorf("compile policySettings stage-1 regex: %w", err)
+		return exePatchSpec{}, fmt.Errorf("compile policySettings getter regex: %w", err)
 	}
 	return exePatchSpec{
 		match:   startRe,
-		label:   "policySettings-block",
-		applyID: "policySettings-block-v1",
+		label:   "policySettings-disable",
+		applyID: "policySettings-disable-v1",
 		apply: func(data []byte, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
-			return applyPolicySettingsBlockPatch(data, startRe, log, preview)
+			return applyPolicySettingsDisablePatch(data, startRe, log, preview)
 		},
 		fixedLength: true,
 	}, nil

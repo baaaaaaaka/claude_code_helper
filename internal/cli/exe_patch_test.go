@@ -87,7 +87,7 @@ func TestPolicySettingsPatchesPreview(t *testing.T) {
 		t.Fatalf("policySettingsSpecs error: %v", err)
 	}
 
-	input := []byte("if(a==='policySettings'){let U=XI(\"policySettings\");if(U)$=YnH($,U,zmD);continue}--if(b==='policySettings'){let I=FYD();if(I===null)return null;return I===\"remote\"?\"Enterprise managed settings (remote)\":\"Enterprise managed settings (local)\"}")
+	input := []byte("function FI(H){if(H===\"policySettings\"){let L=sqA();if(L&&Object.keys(L).length>0)return L}let $=L4(H);if(!$)return null;let{settings:A}=DmA($);return A}")
 	var log bytes.Buffer
 	out, stats, err := applyExePatches(input, specs, &log, true)
 	if err != nil {
@@ -100,17 +100,17 @@ func TestPolicySettingsPatchesPreview(t *testing.T) {
 	if len(out) != len(input) {
 		t.Fatalf("expected output length %d, got %d", len(input), len(out))
 	}
-	if bytes.Contains(out, []byte("if(U)$=YnH($,U,zmD);")) {
-		t.Fatalf("expected continue replacement to remove if(U) statement")
+	if bytes.Contains(out, []byte("sqA()")) {
+		t.Fatalf("expected policySettings getter to be replaced")
 	}
-	if bytes.Contains(out, []byte("let I=FYD();")) {
-		t.Fatalf("expected return-null replacement to remove let I assignment")
-	}
-	if !bytes.Contains(out, []byte("return null;if(I===null)")) {
-		t.Fatalf("expected return-null replacement to be present")
+	if !bytes.Contains(out, []byte("if(H===\"policySettings\"){return null;")) {
+		t.Fatalf("expected policySettings replacement to start with return null")
 	}
 	if len(stats) != 1 {
 		t.Fatalf("expected stats for one spec, got %d", len(stats))
+	}
+	if stats[0].Changed == 0 || stats[0].Replacements != 1 || stats[0].Eligible != 1 || stats[0].Segments != 1 {
+		t.Fatalf("unexpected stats: %+v", stats[0])
 	}
 	if !strings.Contains(log.String(), "before=") || !strings.Contains(log.String(), "after=") {
 		t.Fatalf("expected preview log output, got: %s", log.String())

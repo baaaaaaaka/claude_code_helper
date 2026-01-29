@@ -104,3 +104,260 @@ jobs:
             -e FETCHER="$fetcher" \
             "$img" bash /ci/container_install_smoke.sh
 
+  patch-latest-info:
+    name: Resolve latest Claude Code version
+    runs-on: ubuntu-latest
+    outputs:
+      latest_version: ${{ steps.resolve.outputs.latest_version }}
+      bucket: ${{ steps.resolve.outputs.bucket }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve latest Claude Code version
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          info="$(scripts/claude_release_info.sh --json)"
+          export INFO_JSON="$info"
+          latest="$(python3 - <<'PY'
+          import json
+          import os
+          data = json.loads(os.environ["INFO_JSON"])
+          print(data.get("latest_version", ""))
+          PY
+          )"
+          bucket="$(python3 - <<'PY'
+          import json
+          import os
+          data = json.loads(os.environ["INFO_JSON"])
+          print(data.get("gcs_bucket", ""))
+          PY
+          )"
+          if [ -z "$latest" ] || [ -z "$bucket" ]; then
+            echo "Failed to resolve Claude Code latest version or bucket" >&2
+            exit 1
+          fi
+          echo "latest_version=$latest" >> "$GITHUB_OUTPUT"
+          echo "bucket=$bucket" >> "$GITHUB_OUTPUT"
+
+  patch-latest-test:
+    name: Patch tests (latest Claude Code on ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: patch-latest-info
+    env:
+      CLAUDE_PATCH_TEST: "1"
+      CLAUDE_PATCH_VERSION: ${{ needs.patch-latest-info.outputs.latest_version }}
+      CLAUDE_PATCH_BUCKET: ${{ needs.patch-latest-info.outputs.bucket }}
+      PLATFORM_NAME: ${{ fromJSON('{"ubuntu-latest":"linux","macos-latest":"mac","windows-latest":"windows"}')[matrix.os] }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.12"
+          cache: true
+
+      - name: Run patch integration test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          version = os.environ["CLAUDE_PATCH_VERSION"]
+          results = {}
+          proc = subprocess.run(
+              ["go", "test", "./internal/cli", "-run", "TestClaudePatchIntegration", "-count=1"],
+              env=os.environ.copy(),
+          )
+          results[version] = "pass" if proc.returncode == 0 else "fail"
+          Path("results").mkdir(parents=True, exist_ok=True)
+          platform = os.environ["PLATFORM_NAME"]
+          with open(Path("results") / f"{platform}.json", "w", encoding="utf-8") as handle:
+              json.dump({"platform": platform, "results": results}, handle)
+          raise SystemExit(proc.returncode)
+          PY
+
+      - name: Upload patch test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-code-results-${{ env.PLATFORM_NAME }}
+          path: results/${{ env.PLATFORM_NAME }}.json
+
+  patch-latest-test-linux-distros:
+    name: "Patch tests (latest Claude Code: ${{ matrix.platform }})"
+    runs-on: ubuntu-latest
+    needs: patch-latest-info
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: "rockylinux8"
+            image: rockylinux:8
+            install_cmd: ":"
+          - platform: "ubuntu20.04"
+            image: ubuntu:20.04
+            install_cmd: ":"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.12"
+          cache: true
+
+      - name: Build patch test binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_bin="$GITHUB_WORKSPACE/claude_patch_test"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test ./internal/cli -c -o "$test_bin"
+          chmod +x "$test_bin"
+          echo "TEST_BIN_PATH=$test_bin" >> "$GITHUB_ENV"
+
+      - name: Run patch integration tests (containers)
+        shell: bash
+        env:
+          CLAUDE_PATCH_TEST: "1"
+          CLAUDE_PATCH_VERSION: ${{ needs.patch-latest-info.outputs.latest_version }}
+          CLAUDE_PATCH_BUCKET: ${{ needs.patch-latest-info.outputs.bucket }}
+          PLATFORM_NAME: ${{ matrix.platform }}
+          IMAGE: ${{ matrix.image }}
+          INSTALL_CMD: ${{ matrix.install_cmd }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          version = os.environ["CLAUDE_PATCH_VERSION"]
+          platform = os.environ["PLATFORM_NAME"]
+          image = os.environ["IMAGE"]
+          install_cmd = os.environ["INSTALL_CMD"]
+          test_bin = os.environ["TEST_BIN_PATH"]
+          bucket = os.environ["CLAUDE_PATCH_BUCKET"]
+          results = {}
+
+          host_cert = "/etc/ssl/certs/ca-certificates.crt"
+          mount_cert = os.path.exists(host_cert)
+
+          cmd = ["docker", "run", "--rm"]
+          if mount_cert:
+              cmd += [
+                  "-v",
+                  f"{host_cert}:/ca-certificates.crt:ro",
+                  "-e",
+                  "SSL_CERT_FILE=/ca-certificates.crt",
+              ]
+          cmd += [
+              "-v",
+              f"{test_bin}:/claude_patch_test:ro",
+              "-e",
+              "CLAUDE_PATCH_TEST=1",
+              "-e",
+              f"CLAUDE_PATCH_VERSION={version}",
+              "-e",
+              f"CLAUDE_PATCH_BUCKET={bucket}",
+              image,
+              "/bin/sh",
+              "-c",
+              f"{install_cmd} && /claude_patch_test -test.run TestClaudePatchIntegration -test.count=1",
+          ]
+          proc = subprocess.run(cmd)
+          results[version] = "pass" if proc.returncode == 0 else "fail"
+
+          Path("results").mkdir(parents=True, exist_ok=True)
+          with open(Path("results") / f"{platform}.json", "w", encoding="utf-8") as handle:
+              json.dump({"platform": platform, "results": results}, handle)
+
+          raise SystemExit(proc.returncode)
+          PY
+
+      - name: Upload patch test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-code-results-${{ matrix.platform }}
+          path: results/${{ matrix.platform }}.json
+
+  patch-latest-update:
+    name: Update compatibility table (latest Claude Code)
+    runs-on: ubuntu-latest
+    needs: [patch-latest-info, patch-latest-test, patch-latest-test-linux-distros]
+    if: ${{ always() && needs.patch-latest-info.result == 'success' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Download patch test results
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: claude-code-results-*
+          path: results
+          merge-multiple: true
+
+      - name: Update compatibility table and patch versions
+        shell: bash
+        env:
+          LATEST_VERSION: ${{ needs.patch-latest-info.outputs.latest_version }}
+          PROXY_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          missing_json="$(python3 - <<'PY'
+          import json
+          import os
+          print(json.dumps([os.environ["LATEST_VERSION"]]))
+          PY
+          )"
+          python3 scripts/claude_code_sync.py \
+            --missing-json "$missing_json" \
+            --latest-version "$LATEST_VERSION" \
+            --proxy-tag "$PROXY_TAG" \
+            --results-dir results
+
+      - name: Cleanup results
+        if: always()
+        shell: bash
+        run: |
+          rm -rf results
+
+      - name: Commit changes
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git add docs/claude_code_compatibility.md \
+            scripts/claude_patch_version.txt \
+            internal/cli/claude_patch_integration_test.go
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "chore: sync Claude Code versions"
+          git push
+
