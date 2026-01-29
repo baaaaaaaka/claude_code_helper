@@ -8,4 +8,4 @@ Rows are added automatically after tests pass for a Claude Code release.
 | 2.1.20 | v0.0.25 | pass | pass | pass | pass | pass |
 | 2.1.21 | v0.0.25 | pass | pass | pass | pass | pass |
 | 2.1.22 | v0.0.25 | pass | pass | pass | pass | pass |
-| 2.1.23 | v0.0.25 | pass | pass | pass | pass | pass |
+| 2.1.23 | v0.0.26 | pass | pass | pass | pass | pass |
