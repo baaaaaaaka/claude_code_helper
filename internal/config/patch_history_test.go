@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -172,12 +173,23 @@ func TestPatchHistoryStoreErrorPaths(t *testing.T) {
 
 func TestPatchHistoryPathDefault(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+	switch runtime.GOOS {
+	case "windows":
+		t.Setenv("APPDATA", dir)
+	case "darwin":
+		t.Setenv("HOME", dir)
+	default:
+		t.Setenv("XDG_CONFIG_HOME", dir)
+	}
+	base, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("UserConfigDir error: %v", err)
+	}
 	path, err := PatchHistoryPath("")
 	if err != nil {
 		t.Fatalf("PatchHistoryPath error: %v", err)
 	}
-	want := filepath.Join(dir, "claude-proxy", "patch_history.json")
+	want := filepath.Join(base, "claude-proxy", "patch_history.json")
 	if path != want {
 		t.Fatalf("expected %q, got %q", want, path)
 	}

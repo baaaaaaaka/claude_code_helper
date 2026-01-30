@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -16,6 +17,9 @@ import (
 )
 
 func TestRunHistoryTuiFailsWhenConfigDirReadOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip read-only directory test on windows")
+	}
 	base := t.TempDir()
 	configDir := filepath.Join(base, "config")
 	if err := os.MkdirAll(configDir, 0o500); err != nil {
@@ -25,6 +29,7 @@ func TestRunHistoryTuiFailsWhenConfigDirReadOnly(t *testing.T) {
 
 	root := &rootOptions{configPath: filepath.Join(configDir, "config.json")}
 	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
 
 	if err := runHistoryTui(cmd, root, "", "", ""); err == nil {
 		t.Fatalf("expected error when config dir is read-only")

@@ -3,6 +3,7 @@ package claudehistory
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -101,7 +102,11 @@ func TestIndexHelpers(t *testing.T) {
 
 func TestResolveClaudeDirUsesHome(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", home)
+	} else {
+		t.Setenv("HOME", home)
+	}
 	t.Setenv(EnvClaudeDir, "")
 	got, err := ResolveClaudeDir("")
 	if err != nil {

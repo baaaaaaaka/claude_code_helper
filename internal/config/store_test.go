@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -160,12 +161,23 @@ func TestStore_ErrorPaths(t *testing.T) {
 
 func TestNewStoreDefaultPath(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+	switch runtime.GOOS {
+	case "windows":
+		t.Setenv("APPDATA", dir)
+	case "darwin":
+		t.Setenv("HOME", dir)
+	default:
+		t.Setenv("XDG_CONFIG_HOME", dir)
+	}
+	base, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("UserConfigDir error: %v", err)
+	}
 	store, err := NewStore("")
 	if err != nil {
 		t.Fatalf("NewStore error: %v", err)
 	}
-	want := filepath.Join(dir, "claude-proxy", "config.json")
+	want := filepath.Join(base, "claude-proxy", "config.json")
 	if store.Path() != want {
 		t.Fatalf("expected path %q, got %q", want, store.Path())
 	}

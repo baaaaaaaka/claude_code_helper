@@ -1,6 +1,7 @@
 package claudehistory
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,8 +11,17 @@ func TestLoadProjectFromSessionFiles(t *testing.T) {
 	dir := t.TempDir()
 	projectPath := t.TempDir()
 	sessionPath := filepath.Join(dir, "sess-1.jsonl")
-	content := `{"type":"user","message":{"role":"user","content":"Hello"},"timestamp":"2026-01-01T00:00:00Z","cwd":"` + projectPath + `"}`
-	if err := os.WriteFile(sessionPath, []byte(content), 0o644); err != nil {
+	env := map[string]any{
+		"type":      "user",
+		"message":   map[string]any{"role": "user", "content": "Hello"},
+		"timestamp": "2026-01-01T00:00:00Z",
+		"cwd":       projectPath,
+	}
+	content, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal session: %v", err)
+	}
+	if err := os.WriteFile(sessionPath, append(content, '\n'), 0o644); err != nil {
 		t.Fatalf("write session: %v", err)
 	}
 
