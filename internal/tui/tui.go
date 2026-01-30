@@ -30,6 +30,8 @@ var errQuit = errors.New("quit")
 
 const updateErrorDisplayDuration = 4 * time.Second
 
+var newScreen = tcell.NewScreen
+
 type Selection struct {
 	Project  claudehistory.Project
 	Session  claudehistory.Session
@@ -169,7 +171,7 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 		statusHeight:     1,
 	}
 
-	screen, err := tcell.NewScreen()
+	screen, err := newScreen()
 	if err != nil {
 		return nil, err
 	}

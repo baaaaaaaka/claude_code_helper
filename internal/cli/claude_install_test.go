@@ -97,3 +97,127 @@ func TestRunClaudeInstallerUsesProxyEnv(t *testing.T) {
 		t.Fatalf("expected proxy env %q, got %q", proxyURL, strings.Join(lines, ","))
 	}
 }
+
+func TestInstallerCandidatesAndFailures(t *testing.T) {
+	t.Run("unknown os has no installers", func(t *testing.T) {
+		if cmds := installerCandidates("plan9"); len(cmds) != 0 {
+			t.Fatalf("expected no installers, got %d", len(cmds))
+		}
+	})
+
+	t.Run("runClaudeInstaller with no candidates", func(t *testing.T) {
+		t.Setenv("PATH", "")
+		err := runClaudeInstaller(context.Background(), io.Discard, installProxyOptions{})
+		if err == nil {
+			t.Fatalf("expected error when no installer candidates available")
+		}
+	})
+
+	t.Run("ensureClaudeInstalled propagates installer error", func(t *testing.T) {
+		t.Setenv("PATH", "")
+		_, err := ensureClaudeInstalled(context.Background(), "", io.Discard, installProxyOptions{})
+		if err == nil {
+			t.Fatalf("expected error when installer is unavailable")
+		}
+	})
+}
+
+func TestEnsureClaudeInstalledWithMissingPath(t *testing.T) {
+	_, err := ensureClaudeInstalled(context.Background(), filepath.Join(t.TempDir(), "missing"), io.Discard, installProxyOptions{})
+	if err == nil {
+		t.Fatalf("expected error for missing claude path")
+	}
+}
+
+func TestResolveInstallerProxyNoProxyAndCanceled(t *testing.T) {
+	t.Run("use proxy disabled", func(t *testing.T) {
+		url, cleanup, err := resolveInstallerProxy(context.Background(), installProxyOptions{UseProxy: false})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if url != "" || cleanup != nil {
+			t.Fatalf("expected empty proxy and cleanup, got %q cleanup=%v", url, cleanup != nil)
+		}
+	})
+
+	t.Run("context canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, _, err := resolveInstallerProxy(ctx, installProxyOptions{
+			UseProxy: true,
+			Profile:  &config.Profile{ID: "p1"},
+		})
+		if err == nil {
+			t.Fatalf("expected context error")
+		}
+	})
+}
+
+func TestResolveInstallerProxyUsesReusableInstance(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_claude_proxy/health", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":         true,
+			"instanceId": "inst-1",
+		})
+	})
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		_ = ln.Close()
+	})
+	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
+	tcp, err := net.ResolveTCPAddr("tcp", "127.0.0.1:"+portStr)
+	if err != nil {
+		t.Fatalf("parse port: %v", err)
+	}
+
+	profile := &config.Profile{ID: "p1"}
+	opts := installProxyOptions{
+		UseProxy: true,
+		Profile:  profile,
+		Instances: []config.Instance{{
+			ID:        "inst-1",
+			ProfileID: profile.ID,
+			HTTPPort:  tcp.Port,
+			DaemonPID: os.Getpid(),
+		}},
+	}
+	url, cleanup, err := resolveInstallerProxy(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("resolveInstallerProxy error: %v", err)
+	}
+	if cleanup != nil {
+		t.Fatalf("expected no cleanup for reusable instance")
+	}
+	want := fmt.Sprintf("http://127.0.0.1:%d", tcp.Port)
+	if url != want {
+		t.Fatalf("expected proxy URL %q, got %q", want, url)
+	}
+}
+
+func TestResolveInstallerProxyMissingProfile(t *testing.T) {
+	_, _, err := resolveInstallerProxy(context.Background(), installProxyOptions{UseProxy: true})
+	if err == nil {
+		t.Fatalf("expected missing profile error")
+	}
+}
+
+func TestEnsureClaudeInstalledUsesProvidedPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(path, []byte("x"), 0o700); err != nil {
+		t.Fatalf("write claude: %v", err)
+	}
+	got, err := ensureClaudeInstalled(context.Background(), path, io.Discard, installProxyOptions{})
+	if err != nil {
+		t.Fatalf("ensureClaudeInstalled error: %v", err)
+	}
+	if got != path {
+		t.Fatalf("expected path %q, got %q", path, got)
+	}
+}

@@ -3,9 +3,11 @@ package localproxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
@@ -81,6 +83,97 @@ func TestHTTPProxy_ForwardsPlainHTTP(t *testing.T) {
 	if !rec.SawAddr(originAddr) {
 		t.Fatalf("expected dialer to see origin addr %q, got %#v", originAddr, rec.Addrs())
 	}
+}
+
+func TestHTTPProxyEdgeCases(t *testing.T) {
+	t.Run("Start rejects double start", func(t *testing.T) {
+		p := NewHTTPProxy(dialerFunc(func(network, addr string) (net.Conn, error) {
+			return nil, io.EOF
+		}), Options{})
+		addr, err := p.Start("127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = p.Close(context.Background()) }()
+		if _, err := p.Start(addr); err == nil {
+			t.Fatalf("expected Start to fail when already started")
+		}
+	})
+
+	t.Run("Start fails when port is occupied", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		defer ln.Close()
+		addr := ln.Addr().String()
+		p := NewHTTPProxy(dialerFunc(func(network, addr string) (net.Conn, error) {
+			return nil, io.EOF
+		}), Options{})
+		if _, err := p.Start(addr); err == nil {
+			t.Fatalf("expected Start to fail for occupied port")
+		}
+	})
+
+	t.Run("handleConnect validates host and hijack", func(t *testing.T) {
+		p := NewHTTPProxy(dialerFunc(func(network, addr string) (net.Conn, error) {
+			return nil, errors.New("dial failed")
+		}), Options{})
+		rec := httptest.NewRecorder()
+		req := &http.Request{Method: http.MethodConnect}
+		p.handleConnect(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for missing host, got %d", rec.Code)
+		}
+
+		rec = httptest.NewRecorder()
+		req = httptest.NewRequest(http.MethodConnect, "http://example.com", nil)
+		req.Host = "example.com:443"
+		p.handleConnect(rec, req)
+		if rec.Code != http.StatusBadGateway {
+			t.Fatalf("expected 502 for dial failure, got %d", rec.Code)
+		}
+
+		upstream, downstream := net.Pipe()
+		defer upstream.Close()
+		defer downstream.Close()
+		p = NewHTTPProxy(dialerFunc(func(network, addr string) (net.Conn, error) {
+			return upstream, nil
+		}), Options{})
+		rec = httptest.NewRecorder()
+		req = httptest.NewRequest(http.MethodConnect, "http://example.com", nil)
+		req.Host = "example.com:443"
+		p.handleConnect(rec, req)
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("expected 500 for missing hijacker, got %d", rec.Code)
+		}
+	})
+
+	t.Run("handleHTTP forwards non-200 status", func(t *testing.T) {
+		originAddr, closeOrigin := startHTTPOrigin(t)
+		defer closeOrigin()
+		originURL := "http://" + originAddr + "/fail"
+
+		p := NewHTTPProxy(dialerFunc(func(network, addr string) (net.Conn, error) {
+			return net.DialTimeout(network, addr, 2*time.Second)
+		}), Options{})
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, originURL, nil)
+		p.handleHTTP(rec, req)
+		if rec.Code == http.StatusOK {
+			t.Fatalf("expected non-200 status")
+		}
+	})
+
+	t.Run("NewSOCKS5Dialer defaults timeout", func(t *testing.T) {
+		d, err := NewSOCKS5Dialer("127.0.0.1:9999", 0)
+		if err != nil {
+			t.Fatalf("NewSOCKS5Dialer error: %v", err)
+		}
+		if d == nil {
+			t.Fatalf("expected dialer to be created")
+		}
+	})
 }
 
 func startHTTPOrigin(t *testing.T) (addr string, closeFn func()) {

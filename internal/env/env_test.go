@@ -57,3 +57,49 @@ func containsCSV(csv, needle string) bool {
 	}
 	return false
 }
+
+func TestEnvHelpers(t *testing.T) {
+	t.Run("WithProxy handles empty env and proxy", func(t *testing.T) {
+		out := WithProxy(nil, "")
+		m := toMap(out)
+		if _, ok := m["HTTP_PROXY"]; !ok {
+			t.Fatalf("expected HTTP_PROXY to be set")
+		}
+		noProxy := firstNonEmpty(m["NO_PROXY"], m["no_proxy"])
+		for _, want := range []string{"localhost", "127.0.0.1", "::1"} {
+			if !containsCSV(noProxy, want) {
+				t.Fatalf("NO_PROXY=%q missing %q", noProxy, want)
+			}
+		}
+	})
+
+	t.Run("mergeNoProxy dedupes and trims", func(t *testing.T) {
+		out := mergeNoProxy(" example.com,EXAMPLE.com, ,localhost ", []string{"LOCALHOST", "127.0.0.1"})
+		if !containsCSV(out, "example.com") || !containsCSV(out, "localhost") || !containsCSV(out, "127.0.0.1") {
+			t.Fatalf("unexpected merge output: %q", out)
+		}
+		parts := strings.Split(out, ",")
+		seen := map[string]bool{}
+		for _, part := range parts {
+			key := strings.ToLower(strings.TrimSpace(part))
+			if key == "" {
+				continue
+			}
+			if seen[key] {
+				t.Fatalf("expected dedupe, got %q", out)
+			}
+			seen[key] = true
+		}
+	})
+
+	t.Run("toMap and fromMap handle malformed entries", func(t *testing.T) {
+		m := toMap([]string{"INVALID", "KEY=value"})
+		if m["KEY"] != "value" {
+			t.Fatalf("expected KEY=value, got %#v", m)
+		}
+		out := fromMap(map[string]string{"A": "1"})
+		if len(out) != 1 || out[0] != "A=1" {
+			t.Fatalf("unexpected fromMap output: %#v", out)
+		}
+	})
+}

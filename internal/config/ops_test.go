@@ -91,3 +91,44 @@ func TestConfigPatchFailureOps(t *testing.T) {
 		t.Fatalf("expected updated patch failure, got %#v", cfg.PatchFailures[0])
 	}
 }
+
+func TestConfigProfileAndPatchFailureEdges(t *testing.T) {
+	t.Run("FindProfile trims input", func(t *testing.T) {
+		cfg := Config{Profiles: []Profile{{ID: "p1", Name: "Name"}}}
+		if _, ok := cfg.FindProfile("  "); ok {
+			t.Fatalf("expected empty ref to return false")
+		}
+		if got, ok := cfg.FindProfile("  p1 "); !ok || got.ID != "p1" {
+			t.Fatalf("expected trimmed id match, got %#v ok=%v", got, ok)
+		}
+	})
+
+	t.Run("UpsertProfile does not merge by name", func(t *testing.T) {
+		cfg := Config{}
+		cfg.UpsertProfile(Profile{ID: "p1", Name: "Same"})
+		cfg.UpsertProfile(Profile{ID: "p2", Name: "Same"})
+		if len(cfg.Profiles) != 2 {
+			t.Fatalf("expected distinct ids to append, got %d", len(cfg.Profiles))
+		}
+	})
+
+	t.Run("HasPatchFailure requires proxy version", func(t *testing.T) {
+		cfg := Config{PatchFailures: []PatchFailure{{ProxyVersion: "v1", ClaudeVersion: "2.0"}}}
+		if cfg.HasPatchFailure("", "2.0", "") {
+			t.Fatalf("expected empty proxy version to return false")
+		}
+	})
+
+	t.Run("samePatchFailureKey matches sha and path", func(t *testing.T) {
+		a := PatchFailure{ProxyVersion: "v1", ClaudeSHA256: "ABC"}
+		b := PatchFailure{ProxyVersion: "v1", ClaudeSHA256: "abc"}
+		if !samePatchFailureKey(a, b) {
+			t.Fatalf("expected sha to match case-insensitively")
+		}
+		a = PatchFailure{ProxyVersion: "v1", ClaudePath: "/tmp/claude"}
+		b = PatchFailure{ProxyVersion: "v1", ClaudePath: "/tmp/claude"}
+		if !samePatchFailureKey(a, b) {
+			t.Fatalf("expected path match when versions missing")
+		}
+	})
+}

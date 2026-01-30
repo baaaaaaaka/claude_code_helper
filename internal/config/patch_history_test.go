@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -118,5 +119,66 @@ func TestPatchHistoryVersionMismatch(t *testing.T) {
 	}
 	if _, err := store.loadUnlocked(); err == nil {
 		t.Fatalf("expected version mismatch error")
+	}
+}
+
+func TestPatchHistoryStoreErrorPaths(t *testing.T) {
+	requireExePatchEnabled(t)
+
+	t.Run("Load missing file returns default", func(t *testing.T) {
+		dir := t.TempDir()
+		store, err := NewPatchHistoryStore(filepath.Join(dir, "config.json"))
+		if err != nil {
+			t.Fatalf("NewPatchHistoryStore error: %v", err)
+		}
+		history, err := store.Load()
+		if err != nil {
+			t.Fatalf("Load error: %v", err)
+		}
+		if history.Version != PatchHistoryVersion || len(history.Entries) != 0 {
+			t.Fatalf("unexpected history: %#v", history)
+		}
+	})
+
+	t.Run("Load upgrades version zero", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "patch_history.json")
+		if err := os.WriteFile(path, []byte(`{"version":0,"entries":[]}`), 0o600); err != nil {
+			t.Fatalf("write patch history: %v", err)
+		}
+		store := &PatchHistoryStore{path: path}
+		history, err := store.loadUnlocked()
+		if err != nil {
+			t.Fatalf("loadUnlocked error: %v", err)
+		}
+		if history.Version != PatchHistoryVersion {
+			t.Fatalf("expected version upgrade, got %d", history.Version)
+		}
+	})
+
+	t.Run("Update returns callback error", func(t *testing.T) {
+		dir := t.TempDir()
+		store, err := NewPatchHistoryStore(filepath.Join(dir, "config.json"))
+		if err != nil {
+			t.Fatalf("NewPatchHistoryStore error: %v", err)
+		}
+		if err := store.Update(func(h *PatchHistory) error {
+			return fmt.Errorf("boom")
+		}); err == nil {
+			t.Fatalf("expected callback error")
+		}
+	})
+}
+
+func TestPatchHistoryPathDefault(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	path, err := PatchHistoryPath("")
+	if err != nil {
+		t.Fatalf("PatchHistoryPath error: %v", err)
+	}
+	want := filepath.Join(dir, "claude-proxy", "patch_history.json")
+	if path != want {
+		t.Fatalf("expected %q, got %q", want, path)
 	}
 }

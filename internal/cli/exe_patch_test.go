@@ -116,3 +116,26 @@ func TestPolicySettingsPatchesPreview(t *testing.T) {
 		t.Fatalf("expected preview log output, got: %s", log.String())
 	}
 }
+
+func TestMaybePatchExecutableErrors(t *testing.T) {
+	opts := exePatchOptions{
+		enabledFlag: true,
+		regex1:      "foo",
+		regex2:      []string{"foo"},
+		regex3:      []string{"foo"},
+		replace:     []string{"bar"},
+	}
+
+	t.Run("missing command", func(t *testing.T) {
+		if _, err := maybePatchExecutable(nil, opts, "", nil); err == nil {
+			t.Fatalf("expected missing command error")
+		}
+	})
+
+	t.Run("lookpath failure", func(t *testing.T) {
+		t.Setenv("PATH", "")
+		if _, err := maybePatchExecutable([]string{"missing-bin"}, opts, "", nil); err == nil {
+			t.Fatalf("expected lookpath error")
+		}
+	})
+}

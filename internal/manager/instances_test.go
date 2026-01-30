@@ -55,3 +55,34 @@ func TestInstanceRecordHeartbeatRemove(t *testing.T) {
 		t.Fatalf("expected empty instances, got %#v", cfg.Instances)
 	}
 }
+
+func TestInstanceOpsErrorPaths(t *testing.T) {
+	dir := t.TempDir()
+	store, err := config.NewStore(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	t.Run("Heartbeat missing instance", func(t *testing.T) {
+		if err := Heartbeat(store, "missing", time.Now()); err == nil {
+			t.Fatalf("expected heartbeat error for missing instance")
+		}
+	})
+
+	t.Run("RemoveInstance missing id is no-op", func(t *testing.T) {
+		inst := config.Instance{ID: "i1", ProfileID: "p1", HTTPPort: 1, SocksPort: 2}
+		if err := RecordInstance(store, inst); err != nil {
+			t.Fatalf("RecordInstance: %v", err)
+		}
+		if err := RemoveInstance(store, "missing"); err != nil {
+			t.Fatalf("RemoveInstance error: %v", err)
+		}
+		cfg, err := store.Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if len(cfg.Instances) != 1 || cfg.Instances[0].ID != "i1" {
+			t.Fatalf("expected instance to remain, got %#v", cfg.Instances)
+		}
+	})
+}

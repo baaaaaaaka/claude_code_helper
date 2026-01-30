@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -23,6 +25,18 @@ func newTestScreen(t *testing.T, w, h int) tcell.Screen {
 	screen.SetSize(w, h)
 	t.Cleanup(func() { screen.Fini() })
 	return screen
+}
+
+type sizedScreen struct {
+	tcell.Screen
+}
+
+func (s *sizedScreen) Init() error {
+	if err := s.Screen.Init(); err != nil {
+		return err
+	}
+	s.Screen.SetSize(80, 24)
+	return nil
 }
 
 func newTestState(projects []claudehistory.Project) *uiState {
@@ -416,6 +430,336 @@ func TestHandleKeyEnterStartsNewSessionWhenNoHistory(t *testing.T) {
 	}
 	if selection == nil || selection.Cwd != dir || selection.Session.SessionID != "" {
 		t.Fatalf("expected new session in %s, got %#v", dir, selection)
+	}
+}
+
+func TestRefreshStateUpdatesOrPreserves(t *testing.T) {
+	t.Run("preserves projects on error", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		state := newTestState([]claudehistory.Project{{Key: "one"}})
+		opts := Options{
+			LoadProjects: func(ctx context.Context) ([]claudehistory.Project, error) {
+				return nil, ctx.Err()
+			},
+		}
+		refreshState(ctx, state, opts)
+		if !errors.Is(state.loadError, context.Canceled) {
+			t.Fatalf("expected canceled error, got %v", state.loadError)
+		}
+		if len(state.projects) != 1 || state.projects[0].Key != "one" {
+			t.Fatalf("expected projects to remain unchanged, got %#v", state.projects)
+		}
+	})
+
+	t.Run("resets selection state on success", func(t *testing.T) {
+		state := newTestState([]claudehistory.Project{{Key: "old"}})
+		state.projectState.selected = 3
+		state.sessionState.selected = 2
+		state.previewState.scroll = 5
+		opts := Options{
+			LoadProjects: func(ctx context.Context) ([]claudehistory.Project, error) {
+				return []claudehistory.Project{{Key: "new"}}, nil
+			},
+		}
+		refreshState(context.Background(), state, opts)
+		if state.loadError != nil {
+			t.Fatalf("expected no error, got %v", state.loadError)
+		}
+		if len(state.projects) != 1 || state.projects[0].Key != "new" {
+			t.Fatalf("expected projects to be updated, got %#v", state.projects)
+		}
+		if state.projectState.selected != 0 || state.sessionState.selected != 0 || state.previewState.scroll != 0 {
+			t.Fatalf("expected state to be reset, got %#v %#v %#v", state.projectState, state.sessionState, state.previewState)
+		}
+	})
+}
+
+func TestTextHelpers(t *testing.T) {
+	t.Run("truncate enforces width", func(t *testing.T) {
+		if got := truncate("hello", 0); got != "" {
+			t.Fatalf("expected empty string, got %q", got)
+		}
+		if got := truncate("hello", 3); got != "hel" {
+			t.Fatalf("expected truncation, got %q", got)
+		}
+		if got := truncate("hi", 5); got != "hi" {
+			t.Fatalf("expected original string, got %q", got)
+		}
+	})
+
+	t.Run("padRight pads to width", func(t *testing.T) {
+		if got := padRight("hi", 4); got != "hi  " {
+			t.Fatalf("expected padded string, got %q", got)
+		}
+		if got := padRight("hello", 3); got != "hello" {
+			t.Fatalf("expected no padding, got %q", got)
+		}
+	})
+
+	t.Run("versionLabel prefixes and normalizes", func(t *testing.T) {
+		if got := versionLabel(""); got != "dev" {
+			t.Fatalf("expected dev for empty, got %q", got)
+		}
+		if got := versionLabel("dev"); got != "dev" {
+			t.Fatalf("expected dev to stay, got %q", got)
+		}
+		if got := versionLabel("1.2.3"); got != "v1.2.3" {
+			t.Fatalf("expected v prefix, got %q", got)
+		}
+		if got := versionLabel("v2.0.0"); got != "v2.0.0" {
+			t.Fatalf("expected existing prefix to remain, got %q", got)
+		}
+	})
+}
+
+func TestSelectSessionRequiresLoadProjects(t *testing.T) {
+	if _, err := SelectSession(context.Background(), Options{}); err == nil {
+		t.Fatalf("expected error when LoadProjects is nil")
+	}
+}
+
+func TestErrorTypesAndUIEvent(t *testing.T) {
+	if (UpdateRequested{}).Error() != "update requested" {
+		t.Fatalf("unexpected UpdateRequested error")
+	}
+	if (ProxyToggleRequested{}).Error() != "proxy toggle requested" {
+		t.Fatalf("unexpected ProxyToggleRequested error")
+	}
+	now := time.Now()
+	ev := &uiEvent{when: now}
+	if ev.When() != now {
+		t.Fatalf("expected uiEvent time to match")
+	}
+}
+
+func TestPreviewTextHelpers(t *testing.T) {
+	session := &claudehistory.Session{FilePath: "/tmp/session.jsonl"}
+	subagent := &claudehistory.SubagentSession{FilePath: "/tmp/sub.jsonl"}
+
+	if got := previewFilePath(session, subagent); got != "/tmp/sub.jsonl" {
+		t.Fatalf("expected subagent file path, got %q", got)
+	}
+	if got := previewFilePath(session, nil); got != "/tmp/session.jsonl" {
+		t.Fatalf("expected session file path, got %q", got)
+	}
+	if got := previewFilePath(nil, nil); got != "" {
+		t.Fatalf("expected empty file path, got %q", got)
+	}
+
+	state := newTestState(nil)
+	cacheKey := previewCacheKey(session, nil)
+	state.previewError[cacheKey] = "boom"
+	if got := previewTextForItem(state, session, nil); got != "Preview failed: boom" {
+		t.Fatalf("unexpected preview error text: %q", got)
+	}
+	delete(state.previewError, cacheKey)
+	state.previewCache[cacheKey] = "hello"
+	if got := previewTextForItem(state, session, nil); got != "hello" {
+		t.Fatalf("unexpected preview text: %q", got)
+	}
+	delete(state.previewCache, cacheKey)
+	state.previewLoading[cacheKey] = true
+	if got := previewTextForItem(state, session, nil); got != "Loading preview…" {
+		t.Fatalf("unexpected preview loading text: %q", got)
+	}
+	if got := previewTextForItem(state, nil, nil); got != "" {
+		t.Fatalf("expected empty preview text, got %q", got)
+	}
+}
+
+func TestIsPreviewNavKey(t *testing.T) {
+	if !isPreviewNavKey(tcell.NewEventKey(tcell.KeyUp, 0, 0)) {
+		t.Fatalf("expected KeyUp to be preview nav key")
+	}
+	if !isPreviewNavKey(tcell.NewEventKey(tcell.KeyRune, 'j', 0)) {
+		t.Fatalf("expected rune j to be preview nav key")
+	}
+	if isPreviewNavKey(tcell.NewEventKey(tcell.KeyRune, 'x', 0)) {
+		t.Fatalf("expected rune x to be non-nav key")
+	}
+}
+
+func TestApplyListNavigation(t *testing.T) {
+	state := &listState{selected: 1}
+	applyListNavigation(state, 0, 2, tcell.NewEventKey(tcell.KeyUp, 0, 0))
+	if state.selected != 0 || state.scroll != 0 {
+		t.Fatalf("expected reset on empty list")
+	}
+
+	cases := []struct {
+		ev   *tcell.EventKey
+		want int
+	}{
+		{tcell.NewEventKey(tcell.KeyUp, 0, 0), 0},
+		{tcell.NewEventKey(tcell.KeyDown, 0, 0), 2},
+		{tcell.NewEventKey(tcell.KeyPgUp, 0, 0), 0},
+		{tcell.NewEventKey(tcell.KeyPgDn, 0, 0), 3},
+		{tcell.NewEventKey(tcell.KeyHome, 0, 0), 0},
+		{tcell.NewEventKey(tcell.KeyEnd, 0, 0), 4},
+		{tcell.NewEventKey(tcell.KeyRune, 'k', 0), 0},
+		{tcell.NewEventKey(tcell.KeyRune, 'j', 0), 2},
+		{tcell.NewEventKey(tcell.KeyRune, 'g', 0), 0},
+		{tcell.NewEventKey(tcell.KeyRune, 'G', 0), 4},
+	}
+	for _, tc := range cases {
+		state = &listState{selected: 1}
+		applyListNavigation(state, 5, 2, tc.ev)
+		if state.selected != tc.want {
+			t.Fatalf("expected selected %d, got %d", tc.want, state.selected)
+		}
+	}
+
+	state = &listState{selected: 1}
+	applyListNavigation(state, 5, 2, tcell.NewEventKey(tcell.KeyRune, 'x', 0))
+	if state.selected != 1 {
+		t.Fatalf("expected selection to remain unchanged")
+	}
+}
+
+func TestApplyPreviewNavigation(t *testing.T) {
+	state := &previewState{scroll: 5}
+	applyPreviewNavigation(state, 0, 2, tcell.NewEventKey(tcell.KeyUp, 0, 0))
+	if state.scroll != 0 {
+		t.Fatalf("expected reset when no lines")
+	}
+
+	cases := []struct {
+		ev   *tcell.EventKey
+		want int
+	}{
+		{tcell.NewEventKey(tcell.KeyUp, 0, 0), 0},
+		{tcell.NewEventKey(tcell.KeyDown, 0, 0), 2},
+		{tcell.NewEventKey(tcell.KeyPgUp, 0, 0), 0},
+		{tcell.NewEventKey(tcell.KeyPgDn, 0, 0), 3},
+		{tcell.NewEventKey(tcell.KeyHome, 0, 0), 0},
+		{tcell.NewEventKey(tcell.KeyEnd, 0, 0), 8},
+		{tcell.NewEventKey(tcell.KeyRune, 'k', 0), 0},
+		{tcell.NewEventKey(tcell.KeyRune, 'j', 0), 2},
+		{tcell.NewEventKey(tcell.KeyRune, 'g', 0), 0},
+		{tcell.NewEventKey(tcell.KeyRune, 'G', 0), 8},
+	}
+	for _, tc := range cases {
+		state = &previewState{scroll: 1}
+		applyPreviewNavigation(state, 10, 2, tc.ev)
+		if state.scroll != tc.want {
+			t.Fatalf("expected scroll %d, got %d", tc.want, state.scroll)
+		}
+	}
+
+	state = &previewState{scroll: 1}
+	applyPreviewNavigation(state, 10, 2, tcell.NewEventKey(tcell.KeyRune, 'x', 0))
+	if state.scroll != 1 {
+		t.Fatalf("expected scroll to remain unchanged")
+	}
+}
+
+func TestEnsurePreview(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sess.jsonl")
+	content := `{"type":"user","message":{"role":"user","content":"Hello"},"timestamp":"2026-01-01T00:00:00Z"}`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+
+	screen := newTestScreen(t, 80, 24)
+	state := newTestState(nil)
+	session := &claudehistory.Session{FilePath: path}
+	previewCh := make(chan previewEvent, 1)
+
+	ensurePreview(screen, state, Options{PreviewMessages: 1}, session, nil, previewCh)
+	cacheKey := previewCacheKey(session, nil)
+	if !state.previewLoading[cacheKey] {
+		t.Fatalf("expected preview loading to be set")
+	}
+	select {
+	case ev := <-previewCh:
+		if ev.cacheKey != cacheKey {
+			t.Fatalf("expected cache key %q, got %q", cacheKey, ev.cacheKey)
+		}
+		if ev.err != nil {
+			t.Fatalf("unexpected preview error: %v", ev.err)
+		}
+		if !strings.Contains(ev.text, "User:") {
+			t.Fatalf("unexpected preview text: %q", ev.text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timeout waiting for preview event")
+	}
+
+	state.previewCache[cacheKey] = "cached"
+	ensurePreview(screen, state, Options{}, session, nil, previewCh)
+	if !state.previewLoading[cacheKey] {
+		t.Fatalf("expected preview loading to remain set")
+	}
+}
+
+func TestSelectSessionReturnsSelectionOnEnter(t *testing.T) {
+	screen := tcell.NewSimulationScreen("UTF-8")
+	prevNewScreen := newScreen
+	newScreen = func() (tcell.Screen, error) {
+		return &sizedScreen{Screen: screen}, nil
+	}
+	t.Cleanup(func() { newScreen = prevNewScreen })
+
+	projectPath := t.TempDir()
+	projects := []claudehistory.Project{{
+		Key:  "proj-1",
+		Path: projectPath,
+		Sessions: []claudehistory.Session{{
+			SessionID:   "sess-1",
+			ProjectPath: projectPath,
+			FilePath:    filepath.Join(projectPath, "sess-1.jsonl"),
+		}},
+	}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'l', 0))
+		screen.PostEvent(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+		screen.PostEvent(tcell.NewEventKey(tcell.KeyEnter, 0, 0))
+	}()
+
+	selection, err := SelectSession(ctx, Options{
+		LoadProjects: func(context.Context) ([]claudehistory.Project, error) {
+			return projects, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("SelectSession error: %v", err)
+	}
+	if selection == nil || selection.Session.SessionID != "sess-1" {
+		t.Fatalf("unexpected selection: %#v", selection)
+	}
+}
+
+func TestSelectSessionQuit(t *testing.T) {
+	screen := tcell.NewSimulationScreen("UTF-8")
+	prevNewScreen := newScreen
+	newScreen = func() (tcell.Screen, error) {
+		return &sizedScreen{Screen: screen}, nil
+	}
+	t.Cleanup(func() { newScreen = prevNewScreen })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'q', 0))
+	}()
+
+	selection, err := SelectSession(ctx, Options{
+		LoadProjects: func(context.Context) ([]claudehistory.Project, error) {
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("SelectSession error: %v", err)
+	}
+	if selection != nil {
+		t.Fatalf("expected nil selection on quit")
 	}
 }
 

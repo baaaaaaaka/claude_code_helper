@@ -79,6 +79,16 @@ func TestCheckForUpdateRejectsDev(t *testing.T) {
 	}
 }
 
+func TestCheckForUpdateUnknownLocalVersion(t *testing.T) {
+	st := CheckForUpdate(context.Background(), CheckOptions{InstalledVersion: " "})
+	if st.Supported {
+		t.Fatalf("expected unsupported when local version unknown")
+	}
+	if !strings.Contains(st.Error, "unknown local version") {
+		t.Fatalf("expected unknown local version error, got %q", st.Error)
+	}
+}
+
 func TestPerformUpdateExplicitVersion(t *testing.T) {
 	requireRuntimeAsset(t)
 	tag := "v1.2.3"
@@ -175,6 +185,51 @@ func TestPerformUpdateLatest(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("PerformUpdate latest error: %v", err)
+	}
+}
+
+func TestPerformUpdateInvalidVersion(t *testing.T) {
+	_, err := PerformUpdate(context.Background(), UpdateOptions{
+		Version: "v",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid version") {
+		t.Fatalf("expected invalid version error, got %v", err)
+	}
+}
+
+func TestPerformUpdateDownloadFailure(t *testing.T) {
+	requireRuntimeAsset(t)
+	tag := "v9.9.9"
+	ver := "9.9.9"
+	asset, err := assetName(ver, runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("assetName error: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/checksums.txt"):
+			_, _ = fmt.Fprintf(w, "%s  %s\n", strings.Repeat("0", 64), asset)
+		case strings.Contains(r.URL.Path, "/"+asset):
+			http.Error(w, "nope", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	restore := overrideGitHubBases(server.URL)
+	defer restore()
+
+	dest := filepath.Join(t.TempDir(), "claude-proxy")
+	_, err = PerformUpdate(context.Background(), UpdateOptions{
+		Repo:        "owner/name",
+		Version:     tag,
+		InstallPath: dest,
+		Timeout:     time.Second,
+	})
+	if err == nil || !strings.Contains(err.Error(), "download failed") {
+		t.Fatalf("expected download failed error, got %v", err)
 	}
 }
 

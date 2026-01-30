@@ -55,3 +55,20 @@ func TestExecuteVersion(t *testing.T) {
 		t.Fatalf("expected Execute to return 0 for --version, got %d", code)
 	}
 }
+
+func TestExecuteInvalidArgs(t *testing.T) {
+	prevArgs := os.Args
+	t.Cleanup(func() { os.Args = prevArgs })
+	os.Args = []string{"claude-proxy", "--not-a-flag"}
+	if code := Execute(); code != 1 {
+		t.Fatalf("expected Execute to return 1 for invalid args, got %d", code)
+	}
+}
+
+func TestNewRootCmdUnknownCommand(t *testing.T) {
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"definitely-not-a-command"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("expected unknown command to return error")
+	}
+}

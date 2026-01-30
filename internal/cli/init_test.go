@@ -51,6 +51,8 @@ type stubSSHOps struct {
 	generateCalls int
 	installCalls  int
 	keyPath       string
+	generateErr   error
+	installErr    error
 }
 
 func (s *stubSSHOps) probe(_ context.Context, _ config.Profile, interactive bool) error {
@@ -65,6 +67,9 @@ func (s *stubSSHOps) probe(_ context.Context, _ config.Profile, interactive bool
 
 func (s *stubSSHOps) generateKeypair(_ context.Context, _ *config.Store, _ config.Profile) (string, error) {
 	s.generateCalls++
+	if s.generateErr != nil {
+		return "", s.generateErr
+	}
 	if s.keyPath == "" {
 		return "", fmt.Errorf("missing key path")
 	}
@@ -73,6 +78,9 @@ func (s *stubSSHOps) generateKeypair(_ context.Context, _ *config.Store, _ confi
 
 func (s *stubSSHOps) installPublicKey(_ context.Context, _ config.Profile, _ string) error {
 	s.installCalls++
+	if s.installErr != nil {
+		return s.installErr
+	}
 	return nil
 }
 
@@ -127,6 +135,54 @@ func TestInitProfileInteractiveAutoKeyWhenProbeFails(t *testing.T) {
 	}
 }
 
+func TestInitProfileInteractiveKeySetupErrors(t *testing.T) {
+	t.Run("generateKeypair failure", func(t *testing.T) {
+		store := newTempStore(t)
+		reader := bufio.NewReader(strings.NewReader("host.example\n22\nalice\n"))
+		ops := &stubSSHOps{
+			probeErrors: []error{fmt.Errorf("no auth")},
+			generateErr: fmt.Errorf("boom"),
+		}
+
+		if _, err := initProfileInteractiveWithDeps(context.Background(), store, reader, ops, io.Discard); err == nil {
+			t.Fatalf("expected generate keypair error")
+		}
+		if ops.generateCalls != 1 {
+			t.Fatalf("expected generate to be called once, got %d", ops.generateCalls)
+		}
+	})
+
+	t.Run("installPublicKey failure", func(t *testing.T) {
+		store := newTempStore(t)
+		reader := bufio.NewReader(strings.NewReader("host.example\n22\nalice\n"))
+		ops := &stubSSHOps{
+			probeErrors: []error{fmt.Errorf("no auth")},
+			keyPath:     "/tmp/claude-proxy-key",
+			installErr:  fmt.Errorf("install failed"),
+		}
+
+		if _, err := initProfileInteractiveWithDeps(context.Background(), store, reader, ops, io.Discard); err == nil {
+			t.Fatalf("expected install public key error")
+		}
+		if ops.installCalls != 1 {
+			t.Fatalf("expected install to be called once, got %d", ops.installCalls)
+		}
+	})
+
+	t.Run("probe fails after key install", func(t *testing.T) {
+		store := newTempStore(t)
+		reader := bufio.NewReader(strings.NewReader("host.example\n22\nalice\n"))
+		ops := &stubSSHOps{
+			probeErrors: []error{fmt.Errorf("no auth"), fmt.Errorf("still no auth")},
+			keyPath:     "/tmp/claude-proxy-key",
+		}
+
+		if _, err := initProfileInteractiveWithDeps(context.Background(), store, reader, ops, io.Discard); err == nil {
+			t.Fatalf("expected post-install probe error")
+		}
+	})
+}
+
 func TestNextAvailableKeyPath(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "id_ed25519_test")
@@ -157,5 +213,48 @@ func TestNextAvailableKeyPath(t *testing.T) {
 	}
 	if got != base+"_2" {
 		t.Fatalf("expected %s, got %s", base+"_2", got)
+	}
+}
+
+func TestNewInitCmdFailsWhenConfigDirUnwritable(t *testing.T) {
+	base := t.TempDir()
+	if err := os.Chmod(base, 0o500); err != nil {
+		t.Fatalf("chmod base: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(base, 0o700) })
+
+	root := &rootOptions{configPath: filepath.Join(base, "config", "config.json")}
+	cmd := newInitCmd(root)
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("expected init to fail with unwritable config dir")
+	}
+}
+
+func TestNewInitCmdSuccess(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o700); err != nil {
+		t.Fatalf("write ssh: %v", err)
+	}
+	t.Setenv("PATH", dir)
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	prevStdin := os.Stdin
+	os.Stdin = reader
+	t.Cleanup(func() { os.Stdin = prevStdin })
+	if _, err := writer.Write([]byte("host.example\n22\nalice\n")); err != nil {
+		t.Fatalf("write stdin: %v", err)
+	}
+	_ = writer.Close()
+
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	cmd := newInitCmd(&rootOptions{configPath: configPath})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("newInitCmd error: %v", err)
 	}
 }

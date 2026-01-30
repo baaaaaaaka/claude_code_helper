@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -61,6 +62,49 @@ func TestEnsureProxyPreferenceDefaultsToProxyWhenProfilesExist(t *testing.T) {
 	}
 	if !got || cfg.ProxyEnabled == nil || !*cfg.ProxyEnabled {
 		t.Fatalf("expected proxy enabled when profiles exist")
+	}
+}
+
+func TestEnsureProxyPreferenceWriteFailure(t *testing.T) {
+	store := newTempStore(t)
+	lockPath := store.Path() + ".lock"
+	if err := os.WriteFile(lockPath, []byte(""), 0o600); err != nil {
+		t.Fatalf("write lock file: %v", err)
+	}
+	dir := filepath.Dir(store.Path())
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	reader := bufio.NewReader(strings.NewReader("y\n"))
+	_, _, err := ensureProxyPreferenceWithReader(context.Background(), store, "", io.Discard, reader)
+	if err == nil {
+		t.Fatalf("expected error when config dir is read-only")
+	}
+}
+
+func TestEnsureProxyPreferenceUsesStdin(t *testing.T) {
+	store := newTempStore(t)
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	prevStdin := os.Stdin
+	os.Stdin = reader
+	t.Cleanup(func() { os.Stdin = prevStdin })
+
+	if _, err := writer.Write([]byte("y\n")); err != nil {
+		t.Fatalf("write stdin: %v", err)
+	}
+	_ = writer.Close()
+
+	enabled, _, err := ensureProxyPreference(context.Background(), store, "", io.Discard)
+	if err != nil {
+		t.Fatalf("ensureProxyPreference error: %v", err)
+	}
+	if !enabled {
+		t.Fatalf("expected proxy enabled from stdin input")
 	}
 }
 

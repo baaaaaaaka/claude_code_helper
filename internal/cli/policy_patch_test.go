@@ -119,3 +119,56 @@ func TestRemoteSettingsDisablePatch_NoMatch(t *testing.T) {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
 }
+
+func TestPolicyPatchHelpers(t *testing.T) {
+	t.Run("findBlock handles nested braces", func(t *testing.T) {
+		data := []byte("function x(){if(true){return '{';}// comment { }\nreturn 1;}")
+		open := bytes.IndexByte(data, '{')
+		if open < 0 {
+			t.Fatalf("expected opening brace")
+		}
+		start, end, ok := findBlock(data, open)
+		if !ok {
+			t.Fatalf("expected to find block")
+		}
+		if start != open || end != len(data) {
+			t.Fatalf("expected full function block, got %d:%d", start, end)
+		}
+	})
+
+	t.Run("findBlock rejects malformed input", func(t *testing.T) {
+		data := []byte("{ if(true){")
+		start, end, ok := findBlock(data, 0)
+		if ok || start != 0 || end != 0 {
+			t.Fatalf("expected malformed block to fail, got %v %d:%d", ok, start, end)
+		}
+	})
+
+	t.Run("looksLikePolicyTextBlock enforces threshold", func(t *testing.T) {
+		good := append(bytes.Repeat([]byte("a"), 90), bytes.Repeat([]byte{0x01}, 10)...)
+		if !looksLikePolicyTextBlock(good) {
+			t.Fatalf("expected threshold to allow 10%% non-printable bytes")
+		}
+		bad := append(bytes.Repeat([]byte("a"), 89), bytes.Repeat([]byte{0x01}, 11)...)
+		if looksLikePolicyTextBlock(bad) {
+			t.Fatalf("expected threshold to reject >10%% non-printable bytes")
+		}
+	})
+
+	t.Run("applyPolicySettingsDisablePatch handles multiple matches", func(t *testing.T) {
+		requireExePatchEnabled(t)
+		startRe := regexp.MustCompile(policySettingsGetterStage1)
+		input := []byte("function A(H){if(H===\"policySettings\"){let L=sqA();if(L)return L}let $=L4(H);return $}" +
+			"function B(H){if(\"policySettings\"===H){let L=sqA();if(L)return L}let $=L4(H);return $}")
+		out, stats, err := applyPolicySettingsDisablePatch(input, startRe, nil, false)
+		if err != nil {
+			t.Fatalf("applyPolicySettingsDisablePatch error: %v", err)
+		}
+		if stats.Segments != 2 || stats.Eligible != 2 || stats.Replacements != 2 {
+			t.Fatalf("unexpected stats: %+v", stats)
+		}
+		if count := bytes.Count(out, []byte("return null;")); count != 2 {
+			t.Fatalf("expected 2 replacements, got %d", count)
+		}
+	})
+}

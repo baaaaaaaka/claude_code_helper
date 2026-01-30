@@ -16,6 +16,12 @@ import (
 	"github.com/baaaaaaaka/claude_code_helper/internal/update"
 )
 
+var (
+	selectSession         = tui.SelectSession
+	runClaudeSessionFunc  = runClaudeSession
+	runClaudeNewSessionFn = runClaudeNewSession
+)
+
 func newHistoryCmd(root *rootOptions) *cobra.Command {
 	var claudeDir string
 	var claudePath string
@@ -198,7 +204,7 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 		claudePath = resolvedClaudePath
 
 		defaultCwd, _ := os.Getwd()
-		selection, err := tui.SelectSession(ctx, tui.Options{
+		selection, err := selectSession(ctx, tui.Options{
 			LoadProjects: func(ctx context.Context) ([]claudehistory.Project, error) {
 				return claudehistory.DiscoverProjects(claudeDir)
 			},
@@ -243,7 +249,7 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 			return nil
 		}
 		if selection.Cwd != "" {
-			return runClaudeNewSession(
+			return runClaudeNewSessionFn(
 				ctx,
 				root,
 				store,
@@ -257,7 +263,7 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 				cmd.ErrOrStderr(),
 			)
 		}
-		return runClaudeSession(
+		return runClaudeSessionFunc(
 			ctx,
 			root,
 			store,

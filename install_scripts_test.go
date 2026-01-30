@@ -25,6 +25,76 @@ func TestInstallShSkipsPathUpdateWhenAlreadySet(t *testing.T) {
 	runInstallSh(t, false, true)
 }
 
+func TestInstallShChecksumMismatch(t *testing.T) {
+	if _, err := exec.LookPath("sha256sum"); err != nil {
+		if _, err := exec.LookPath("shasum"); err != nil {
+			t.Skip("no checksum tool available")
+		}
+	}
+
+	run := newInstallShRun(t, false, false)
+	run.env = overrideEnv(run.env, "CLAUDE_PROXY_TEST_CHECKSUMS", strings.Repeat("0", 64)+"  "+run.asset+"\n")
+
+	cmd := exec.Command("sh", run.scriptPath)
+	cmd.Dir = run.repoRoot
+	cmd.Env = run.env
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected checksum mismatch error")
+	}
+	if !strings.Contains(string(output), "Checksum mismatch") {
+		t.Fatalf("expected checksum mismatch output, got %s", string(output))
+	}
+}
+
+func TestInstallShUsesProfileWhenShellMissing(t *testing.T) {
+	run := newInstallShRun(t, false, false)
+	run.env = overrideEnv(run.env, "SHELL", "")
+
+	cmd := exec.Command("sh", run.scriptPath)
+	cmd.Dir = run.repoRoot
+	cmd.Env = run.env
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("install.sh failed: %v\n%s", err, string(output))
+	}
+
+	profilePath := filepath.Join(run.homeDir, ".profile")
+	contents, err := os.ReadFile(profilePath)
+	if err != nil {
+		t.Fatalf("read profile: %v", err)
+	}
+	text := string(contents)
+	pathLine := fmt.Sprintf("export PATH=\"%s:$PATH\"", run.installDir)
+	if !strings.Contains(text, pathLine) {
+		t.Fatalf("missing PATH update in profile")
+	}
+	if !strings.Contains(text, "alias clp='claude-proxy'") {
+		t.Fatalf("missing clp alias in profile")
+	}
+}
+
+func TestInstallShRejectsUnknownArg(t *testing.T) {
+	repoRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	scriptPath := filepath.Join(repoRoot, "install.sh")
+	cmd := exec.Command("sh", scriptPath, "--unknown")
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected unknown arg error")
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("expected ExitError, got %T", err)
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Fatalf("expected exit code 2, got %d\n%s", exitErr.ExitCode(), string(output))
+	}
+}
+
 func runInstallSh(t *testing.T, apiFail bool, pathAlreadySet bool) {
 	t.Helper()
 	if _, err := exec.LookPath("sh"); err != nil {
@@ -119,6 +189,91 @@ func runInstallSh(t *testing.T, apiFail bool, pathAlreadySet bool) {
 	if !strings.Contains(text, "alias clp='claude-proxy'") {
 		t.Fatalf("missing clp alias in shell config")
 	}
+}
+
+type installShRun struct {
+	repoRoot   string
+	scriptPath string
+	homeDir    string
+	installDir string
+	asset      string
+	assetData  []byte
+	env        []string
+}
+
+func newInstallShRun(t *testing.T, apiFail bool, pathAlreadySet bool) installShRun {
+	t.Helper()
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	repoRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	scriptPath := filepath.Join(repoRoot, "install.sh")
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	writeStubCurl(t, binDir)
+
+	homeDir := t.TempDir()
+	installDir := t.TempDir()
+	version := "v1.2.3"
+	verNoV := strings.TrimPrefix(version, "v")
+	asset := fmt.Sprintf("claude-proxy_%s_%s_%s", verNoV, runtime.GOOS, runtime.GOARCH)
+	assetData := []byte("fake-binary")
+	checksum := sha256.Sum256(assetData)
+	checksums := fmt.Sprintf("%x  %s\n", checksum, asset)
+	apiJSON := fmt.Sprintf("{\"tag_name\":\"%s\"}", version)
+	latestURL := "https://github.com/owner/name/releases/tag/" + version
+
+	pathValue := binDir + string(os.PathListSeparator) + os.Getenv("PATH")
+	if pathAlreadySet {
+		pathValue = installDir + string(os.PathListSeparator) + pathValue
+	}
+	env := append([]string{}, os.Environ()...)
+	env = append(env,
+		"PATH="+pathValue,
+		"HOME="+homeDir,
+		"SHELL=/bin/bash",
+		"CLAUDE_PROXY_REPO=owner/name",
+		"CLAUDE_PROXY_VERSION=latest",
+		"CLAUDE_PROXY_INSTALL_DIR="+installDir,
+		"CLAUDE_PROXY_TEST_API_FAIL="+boolEnv(apiFail),
+		"CLAUDE_PROXY_TEST_API_JSON="+apiJSON,
+		"CLAUDE_PROXY_TEST_LATEST_URL="+latestURL,
+		"CLAUDE_PROXY_TEST_ASSET="+asset,
+		"CLAUDE_PROXY_TEST_ASSET_DATA="+string(assetData),
+		"CLAUDE_PROXY_TEST_CHECKSUMS="+checksums,
+	)
+
+	return installShRun{
+		repoRoot:   repoRoot,
+		scriptPath: scriptPath,
+		homeDir:    homeDir,
+		installDir: installDir,
+		asset:      asset,
+		assetData:  assetData,
+		env:        env,
+	}
+}
+
+func overrideEnv(env []string, key, value string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		k, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		if k == key {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, key+"="+value)
 }
 
 func boolEnv(v bool) string {

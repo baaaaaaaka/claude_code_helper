@@ -90,3 +90,13 @@ func TestAttachSubagentsSortsByModified(t *testing.T) {
 		t.Fatalf("expected subagents sorted by modified desc")
 	}
 }
+
+func TestAttachSubagentsEmptySessions(t *testing.T) {
+	out, err := attachSubagents(t.TempDir(), nil, false)
+	if err != nil {
+		t.Fatalf("attachSubagents error: %v", err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("expected empty sessions, got %d", len(out))
+	}
+}

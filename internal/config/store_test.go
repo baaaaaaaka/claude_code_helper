@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -97,5 +98,75 @@ func TestStore_UpdateIsSerialized(t *testing.T) {
 	}
 	if len(cfg.Profiles) != n {
 		t.Fatalf("Profiles len=%d want %d", len(cfg.Profiles), n)
+	}
+}
+
+func TestStore_ErrorPaths(t *testing.T) {
+	t.Run("Load rejects invalid JSON", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.json")
+		if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		store, err := NewStore(path)
+		if err != nil {
+			t.Fatalf("NewStore: %v", err)
+		}
+		if _, err := store.Load(); err == nil {
+			t.Fatalf("expected parse error")
+		}
+	})
+
+	t.Run("Load rejects unsupported version", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.json")
+		if err := os.WriteFile(path, []byte(`{"version":999}`), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		store, err := NewStore(path)
+		if err != nil {
+			t.Fatalf("NewStore: %v", err)
+		}
+		if _, err := store.Load(); err == nil {
+			t.Fatalf("expected version error")
+		}
+	})
+
+	t.Run("Save rejects unsupported version", func(t *testing.T) {
+		dir := t.TempDir()
+		store, err := NewStore(filepath.Join(dir, "config.json"))
+		if err != nil {
+			t.Fatalf("NewStore: %v", err)
+		}
+		if err := store.Save(Config{Version: CurrentVersion + 1}); err == nil {
+			t.Fatalf("expected save version error")
+		}
+	})
+
+	t.Run("Update propagates callback error", func(t *testing.T) {
+		dir := t.TempDir()
+		store, err := NewStore(filepath.Join(dir, "config.json"))
+		if err != nil {
+			t.Fatalf("NewStore: %v", err)
+		}
+		if err := store.Update(func(cfg *Config) error {
+			cfg.Version = CurrentVersion
+			return fmt.Errorf("boom")
+		}); err == nil {
+			t.Fatalf("expected callback error")
+		}
+	})
+}
+
+func TestNewStoreDefaultPath(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	store, err := NewStore("")
+	if err != nil {
+		t.Fatalf("NewStore error: %v", err)
+	}
+	want := filepath.Join(dir, "claude-proxy", "config.json")
+	if store.Path() != want {
+		t.Fatalf("expected path %q, got %q", want, store.Path())
 	}
 }

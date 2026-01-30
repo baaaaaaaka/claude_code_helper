@@ -31,3 +31,16 @@ func TestAtomicWriteFile(t *testing.T) {
 		t.Fatalf("expected perms 600, got %o", info.Mode().Perm()&0o777)
 	}
 }
+
+func TestAtomicWriteFileReadOnlyDir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	if err := atomicWriteFile(path, []byte("data"), 0o600); err == nil {
+		t.Fatalf("expected error for read-only dir")
+	}
+}

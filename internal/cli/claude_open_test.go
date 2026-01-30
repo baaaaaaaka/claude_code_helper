@@ -117,6 +117,91 @@ func TestNormalizeWorkingDirRejectsMissing(t *testing.T) {
 	}
 }
 
+func TestNormalizeWorkingDirRejectsFile(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	if _, err := normalizeWorkingDir(file); err == nil {
+		t.Fatalf("expected error for non-directory cwd")
+	}
+}
+
+func TestRunClaudeSessionSuccess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script execution on windows")
+	}
+	claudePath := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claudePath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write claude: %v", err)
+	}
+	store := newTempStore(t)
+	root := &rootOptions{configPath: store.Path()}
+
+	projectDir := t.TempDir()
+	session := claudehistory.Session{SessionID: "sess-1", ProjectPath: projectDir}
+	project := claudehistory.Project{Path: projectDir}
+
+	if err := runClaudeSession(context.Background(), root, store, nil, nil, session, project, claudePath, "", false, false, io.Discard); err != nil {
+		t.Fatalf("runClaudeSession error: %v", err)
+	}
+}
+
+func TestRunClaudeNewSessionSuccess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script execution on windows")
+	}
+	claudePath := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claudePath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write claude: %v", err)
+	}
+	store := newTempStore(t)
+	root := &rootOptions{configPath: store.Path()}
+
+	projectDir := t.TempDir()
+	if err := runClaudeNewSession(context.Background(), root, store, nil, nil, projectDir, claudePath, "", false, false, io.Discard); err != nil {
+		t.Fatalf("runClaudeNewSession error: %v", err)
+	}
+}
+
+func TestRunClaudeSessionRequiresProfileWhenProxyEnabled(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script execution on windows")
+	}
+	claudePath := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claudePath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write claude: %v", err)
+	}
+	store := newTempStore(t)
+	root := &rootOptions{configPath: store.Path()}
+
+	projectDir := t.TempDir()
+	session := claudehistory.Session{SessionID: "sess-1", ProjectPath: projectDir}
+	project := claudehistory.Project{Path: projectDir}
+
+	if err := runClaudeSession(context.Background(), root, store, nil, nil, session, project, claudePath, "", true, false, io.Discard); err == nil {
+		t.Fatalf("expected proxy mode error")
+	}
+}
+
+func TestRunClaudeNewSessionRequiresProfileWhenProxyEnabled(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script execution on windows")
+	}
+	claudePath := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claudePath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write claude: %v", err)
+	}
+	store := newTempStore(t)
+	root := &rootOptions{configPath: store.Path()}
+
+	projectDir := t.TempDir()
+	if err := runClaudeNewSession(context.Background(), root, store, nil, nil, projectDir, claudePath, "", true, false, io.Discard); err == nil {
+		t.Fatalf("expected proxy mode error")
+	}
+}
+
 func TestRunClaudeNewSessionUsesCwdDirect(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skip shell script test on windows")

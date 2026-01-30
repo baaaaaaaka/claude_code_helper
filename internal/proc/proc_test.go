@@ -4,6 +4,7 @@ package proc
 
 import (
 	"os"
+	"os/exec"
 	"testing"
 )
 
@@ -16,5 +17,19 @@ func TestIsAlive(t *testing.T) {
 	}
 	if !IsAlive(os.Getpid()) {
 		t.Fatalf("expected current pid to be alive")
+	}
+}
+
+func TestIsAliveAfterProcessExit(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "exit 0")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	pid := cmd.Process.Pid
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	if IsAlive(pid) {
+		t.Fatalf("expected exited process to be dead")
 	}
 }

@@ -1,9 +1,13 @@
 package cli
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
@@ -91,11 +95,26 @@ func TestIsClaudeExecutableUsesCmdArgWhenResolvedDiffers(t *testing.T) {
 }
 
 func TestIsYoloFailure(t *testing.T) {
-	if !isYoloFailure(os.ErrInvalid, "unknown flag: --permission-mode") {
-		t.Fatalf("expected yolo failure on unknown flag")
+	cases := []struct {
+		output string
+		want   bool
+	}{
+		{"", false},
+		{"unknown flag: --permission-mode", true},
+		{"permission-mode unknown", true},
+		{"permission-mode not supported", true},
+		{"permission-mode invalid", true},
+		{"permission-mode flag provided but not defined", true},
+		{"unrelated error", false},
 	}
-	if isYoloFailure(os.ErrInvalid, "unrelated error") {
-		t.Fatalf("unexpected yolo failure for unrelated error")
+	for _, tc := range cases {
+		got := isYoloFailure(os.ErrInvalid, tc.output)
+		if got != tc.want {
+			t.Fatalf("output %q: expected %v, got %v", tc.output, tc.want, got)
+		}
+	}
+	if isYoloFailure(nil, "permission-mode unknown") {
+		t.Fatalf("expected nil error to return false")
 	}
 }
 
@@ -111,6 +130,123 @@ func TestStripYoloArgs(t *testing.T) {
 			t.Fatalf("expected %v, got %v", want, out)
 		}
 	}
+}
+
+func TestExtractVersion(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"Claude Code 1.2.3", "1.2.3"},
+		{"v2.0", "2.0"},
+		{"version", "version"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := extractVersion(tc.input); got != tc.want {
+			t.Fatalf("extractVersion(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestResolveClaudeVersion(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "claude")
+	script := "#!/bin/sh\necho \"Claude Code 1.2.3\"\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	if got := resolveClaudeVersion(path); got != "1.2.3" {
+		t.Fatalf("expected version 1.2.3, got %q", got)
+	}
+}
+
+func TestHashFileSHA256(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "file.txt")
+	if err := os.WriteFile(path, []byte("hello"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	got, err := hashFileSHA256(path)
+	if err != nil {
+		t.Fatalf("hashFileSHA256 error: %v", err)
+	}
+	want := sha256.Sum256([]byte("hello"))
+	if got != hex.EncodeToString(want[:]) {
+		t.Fatalf("unexpected hash %q", got)
+	}
+}
+
+func TestIsPatchedBinaryStartupFailure(t *testing.T) {
+	if isPatchedBinaryStartupFailure(nil, "") {
+		t.Fatalf("expected nil error to be false")
+	}
+	if !isPatchedBinaryStartupFailure(os.ErrInvalid, "@bun @bytecode") {
+		t.Fatalf("expected bun bytecode output to be treated as failure")
+	}
+	if !isPatchedBinaryStartupFailure(&os.PathError{Op: "open", Path: "/nope", Err: os.ErrNotExist}, "") {
+		t.Fatalf("expected path error to be treated as failure")
+	}
+	if !isPatchedBinaryStartupFailure(&exec.Error{Name: "missing", Err: exec.ErrNotFound}, "") {
+		t.Fatalf("expected exec error to be treated as failure")
+	}
+	cmd := exec.Command("sh", "-c", "exit 1")
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("expected exit error")
+	}
+	if isPatchedBinaryStartupFailure(err, "") {
+		t.Fatalf("expected exit error to be treated as non-startup failure")
+	}
+}
+
+func TestPatchFailureHelpers(t *testing.T) {
+	t.Run("formatFailureReason truncates", func(t *testing.T) {
+		long := strings.Repeat("x", 300)
+		got := formatFailureReason(nil, long)
+		if len(got) != 243 {
+			t.Fatalf("expected truncated length 243, got %d", len(got))
+		}
+		if !strings.HasSuffix(got, "...") {
+			t.Fatalf("expected truncation suffix, got %q", got)
+		}
+	})
+
+	t.Run("recordPatchFailure merges concurrent entries", func(t *testing.T) {
+		requireExePatchEnabled(t)
+		dir := t.TempDir()
+		configPath := filepath.Join(dir, "config.json")
+		outcome := &patchOutcome{
+			IsClaude:      true,
+			TargetVersion: "2.2.0",
+			TargetSHA256:  "sha-1",
+			TargetPath:    "/tmp/claude",
+		}
+
+		const workers = 5
+		errCh := make(chan error, workers)
+		for i := 0; i < workers; i++ {
+			go func() {
+				errCh <- recordPatchFailure(configPath, outcome, "boom")
+			}()
+		}
+		for i := 0; i < workers; i++ {
+			if err := <-errCh; err != nil {
+				t.Fatalf("recordPatchFailure error: %v", err)
+			}
+		}
+
+		store, err := config.NewStore(configPath)
+		if err != nil {
+			t.Fatalf("new store: %v", err)
+		}
+		cfg, err := store.Load()
+		if err != nil {
+			t.Fatalf("load config: %v", err)
+		}
+		if len(cfg.PatchFailures) != 1 {
+			t.Fatalf("expected 1 patch failure entry, got %d", len(cfg.PatchFailures))
+		}
+	})
 }
 
 func writeProbeScript(t *testing.T, dir, name, content string) string {

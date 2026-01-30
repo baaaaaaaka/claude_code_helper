@@ -172,3 +172,23 @@ func TestRunLikeRejectsMultipleProfiles(t *testing.T) {
 		t.Fatalf("expected error for multiple profile args")
 	}
 }
+
+func TestRunLikePropagatesPatchError(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := cmd.Flags().Parse([]string{"--", "echo"}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	root := &rootOptions{
+		exePatch: exePatchOptions{
+			enabledFlag: true,
+			regex1:      "(",
+			regex2:      []string{"a"},
+			regex3:      []string{"b"},
+			replace:     []string{"c"},
+		},
+	}
+	if err := runLike(cmd, root, false); err == nil {
+		t.Fatalf("expected runLike to return patch error")
+	}
+}

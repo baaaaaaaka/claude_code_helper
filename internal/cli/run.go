@@ -21,6 +21,8 @@ import (
 	"github.com/baaaaaaaka/claude_code_helper/internal/stack"
 )
 
+var stackStart = stack.Start
+
 func newRunCmd(root *rootOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run [profile] -- [cmd args...]",
@@ -131,7 +133,7 @@ func runWithNewStackOptions(
 		return err
 	}
 
-	st, err := stack.Start(profile, instanceID, stack.Options{})
+	st, err := stackStart(profile, instanceID, stack.Options{})
 	if err != nil {
 		return err
 	}

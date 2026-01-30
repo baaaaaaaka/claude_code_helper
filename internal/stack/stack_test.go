@@ -2,9 +2,14 @@ package stack
 
 import (
 	"net"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/baaaaaaaka/claude_code_helper/internal/ssh"
 )
 
 func TestPickFreePort_IsBindable(t *testing.T) {
@@ -57,6 +62,39 @@ func TestWaitForTCPTunnel_TimesOutWhenNoTunnelAndNotListening(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), addr) {
 		t.Fatalf("expected addr in error: %v", err)
+	}
+}
+
+func TestWaitForTCPTunnel_ReturnsWhenTunnelExits(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script test on windows")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "ssh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	t.Setenv("PATH", dir)
+
+	tun, err := ssh.NewTunnel(ssh.TunnelConfig{
+		Host:      "example.com",
+		Port:      22,
+		User:      "alice",
+		SocksPort: 12345,
+	})
+	if err != nil {
+		t.Fatalf("NewTunnel error: %v", err)
+	}
+	if err := tun.Start(); err != nil {
+		t.Fatalf("Start error: %v", err)
+	}
+
+	err = waitForTCPTunnel("127.0.0.1:12345", 500*time.Millisecond, tun)
+	if err == nil {
+		t.Fatalf("expected early tunnel exit error")
+	}
+	if !strings.Contains(err.Error(), "ssh tunnel exited") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
