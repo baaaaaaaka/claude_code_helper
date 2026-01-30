@@ -13,10 +13,12 @@ import (
 
 func setStubPath(t *testing.T, dir string) {
 	t.Helper()
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if runtime.GOOS == "windows" {
+		t.Setenv("PATH", dir)
 		t.Setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+		return
 	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 func writeStub(t *testing.T, dir, name, unixBody, windowsBody string) {
@@ -85,7 +87,7 @@ func TestInstallPublicKeyAddsNewline(t *testing.T) {
 	dir := t.TempDir()
 	outPath := filepath.Join(dir, "received.pub")
 	unix := "#!/bin/sh\ncat - > \"$OUT_FILE\"\nexit 0\n"
-	win := "@echo off\r\nmore > \"%OUT_FILE%\"\r\nexit /b 0\r\n"
+	win := "@echo off\r\nsetlocal\r\nset \"line=\"\r\nset /p line=\r\nif defined OUT_FILE (\r\n  > \"%OUT_FILE%\" echo(!line!\r\n)\r\nexit /b 0\r\n"
 	writeStub(t, dir, "ssh", unix, win)
 	setStubPath(t, dir)
 	t.Setenv("OUT_FILE", outPath)
