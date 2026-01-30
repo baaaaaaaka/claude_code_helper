@@ -28,6 +28,8 @@ func (ProxyToggleRequested) Error() string { return "proxy toggle requested" }
 
 var errQuit = errors.New("quit")
 
+const updateErrorDisplayDuration = 4 * time.Second
+
 type Selection struct {
 	Project  claudehistory.Project
 	Session  claudehistory.Session
@@ -56,9 +58,9 @@ type uiEvent struct {
 func (e *uiEvent) When() time.Time { return e.when }
 
 type previewEvent struct {
-	sessionID string
-	text      string
-	err       error
+	cacheKey string
+	text     string
+	err      error
 }
 
 type updateEvent struct {
@@ -99,29 +101,42 @@ type projectItem struct {
 type sessionItem struct {
 	label         string
 	session       claudehistory.Session
-	isNew         bool
+	subagent      claudehistory.SubagentSession
+	parentSession claudehistory.Session
+	kind          sessionItemKind
 	alwaysVisible bool
 }
 
+type sessionItemKind string
+
+const (
+	sessionItemNew      sessionItemKind = "new"
+	sessionItemMain     sessionItemKind = "main"
+	sessionItemSubagent sessionItemKind = "subagent"
+)
+
 type uiState struct {
-	projects       []claudehistory.Project
-	loadError      error
-	focus          string
-	lastListFocus  string
-	inputMode      string
-	inputBuffer    string
-	projectFilter  string
-	sessionFilter  string
-	projectState   listState
-	sessionState   listState
-	previewState   previewState
-	updateStatus   *update.Status
-	updateChecking bool
+	projects         []claudehistory.Project
+	loadError        error
+	focus            string
+	lastListFocus    string
+	inputMode        string
+	inputBuffer      string
+	projectFilter    string
+	sessionFilter    string
+	projectState     listState
+	sessionState     listState
+	previewState     previewState
+	updateStatus     *update.Status
+	updateChecking   bool
+	updateErrorUntil time.Time
+	updateErrorTimer *time.Timer
 
 	proxyEnabled    bool
 	proxyConfigured bool
 	yoloEnabled     bool
 
+	expandedSessions map[string]bool
 	previewCache     map[string]string
 	previewError     map[string]string
 	previewLoading   map[string]bool
@@ -140,17 +155,18 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 
 	projects, err := opts.LoadProjects(ctx)
 	state := &uiState{
-		projects:        projects,
-		loadError:       err,
-		focus:           "projects",
-		lastListFocus:   "projects",
-		proxyEnabled:    opts.ProxyEnabled,
-		proxyConfigured: opts.ProxyConfigured,
-		yoloEnabled:     opts.YoloEnabled,
-		previewCache:    map[string]string{},
-		previewError:    map[string]string{},
-		previewLoading:  map[string]bool{},
-		statusHeight:    1,
+		projects:         projects,
+		loadError:        err,
+		focus:            "projects",
+		lastListFocus:    "projects",
+		proxyEnabled:     opts.ProxyEnabled,
+		proxyConfigured:  opts.ProxyConfigured,
+		yoloEnabled:      opts.YoloEnabled,
+		expandedSessions: map[string]bool{},
+		previewCache:     map[string]string{},
+		previewError:     map[string]string{},
+		previewLoading:   map[string]bool{},
+		statusHeight:     1,
 	}
 
 	screen, err := tcell.NewScreen()
@@ -227,6 +243,22 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 						if ev.status != nil {
 							state.updateStatus = ev.status
 							state.updateChecking = false
+							if ev.status.Error != "" && !ev.status.Supported {
+								until := time.Now().Add(updateErrorDisplayDuration)
+								state.updateErrorUntil = until
+								if state.updateErrorTimer != nil {
+									state.updateErrorTimer.Stop()
+								}
+								state.updateErrorTimer = time.AfterFunc(time.Until(until), func() {
+									screen.PostEvent(&uiEvent{when: time.Now(), kind: "update"})
+								})
+							} else {
+								state.updateErrorUntil = time.Time{}
+								if state.updateErrorTimer != nil {
+									state.updateErrorTimer.Stop()
+									state.updateErrorTimer = nil
+								}
+							}
 						}
 					default:
 						goto nextEvent
@@ -236,14 +268,14 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 				for {
 					select {
 					case ev := <-previewCh:
-						if ev.sessionID != "" {
+						if ev.cacheKey != "" {
 							if ev.err != nil {
-								state.previewError[ev.sessionID] = ev.err.Error()
+								state.previewError[ev.cacheKey] = ev.err.Error()
 							} else {
-								state.previewCache[ev.sessionID] = ev.text
-								delete(state.previewError, ev.sessionID)
+								state.previewCache[ev.cacheKey] = ev.text
+								delete(state.previewError, ev.cacheKey)
 							}
-							state.previewLoading[ev.sessionID] = false
+							state.previewLoading[ev.cacheKey] = false
 						}
 					default:
 						goto nextEvent
@@ -444,10 +476,38 @@ func handleKey(
 	state.projectState.clamp(len(filteredProjects))
 	selectedProject := selectedProject(filteredProjects, state.projectState.selected)
 
-	sessions := buildSessionItems(selectedProject)
+	sessions := buildSessionItems(selectedProject, state.expandedSessions)
 	filteredSessions := filterSessions(sessions, state.sessionFilter)
 	state.sessionState.clamp(len(filteredSessions))
-	selectedSession, selectedIsNew := selectedSessionItem(filteredSessions, state.sessionState.selected)
+	selectedItem, selectedOk := selectedSessionItem(filteredSessions, state.sessionState.selected)
+	selectedSession, selectedSubagent, selectedIsNew := sessionSelection(selectedItem)
+	if !selectedOk {
+		selectedSession = nil
+		selectedSubagent = nil
+		selectedIsNew = false
+	}
+
+	if ev.Key() == tcell.KeyCtrlO {
+		if listFocus != "sessions" {
+			return nil, nil
+		}
+		if !selectedOk || selectedItem.kind == sessionItemNew {
+			return nil, nil
+		}
+		parentID := sessionItemParentID(selectedItem)
+		if parentID == "" {
+			return nil, nil
+		}
+		state.expandedSessions[parentID] = !state.expandedSessions[parentID]
+		sessions = buildSessionItems(selectedProject, state.expandedSessions)
+		filteredSessions = filterSessions(sessions, state.sessionFilter)
+		state.sessionState.clamp(len(filteredSessions))
+		if idx := findSessionIndex(filteredSessions, parentID); idx >= 0 {
+			state.sessionState.selected = idx
+			state.sessionState.ensureVisible(layoutMode.sessions.h-2, len(filteredSessions))
+		}
+		return nil, nil
+	}
 
 	if ev.Key() == tcell.KeyCtrlN {
 		if cwd := newSessionCwd(selectedProject, opts.DefaultCwd); cwd != "" {
@@ -474,8 +534,8 @@ func handleKey(
 	}
 
 	if state.focus == "preview" && isPreviewNavKey(ev) {
-		previewText := previewTextForSession(state, selectedSession)
-		lines := buildPreviewLines(selectedProject, selectedSession, selectedIsNew, state, previewText, opts)
+		previewText := previewTextForItem(state, selectedSession, selectedSubagent)
+		lines := buildPreviewLines(selectedProject, selectedSession, selectedSubagent, selectedIsNew, state, previewText, opts)
 		lines = buildWrappedLines(lines, max(0, layoutMode.preview.w-2))
 		applyPreviewNavigation(&state.previewState, len(lines), max(0, layoutMode.preview.h-2), ev)
 		return nil, nil
@@ -502,8 +562,8 @@ func handleKey(
 	}
 
 	if state.focus == "preview" {
-		previewText := previewTextForSession(state, selectedSession)
-		lines := buildPreviewLines(selectedProject, selectedSession, selectedIsNew, state, previewText, opts)
+		previewText := previewTextForItem(state, selectedSession, selectedSubagent)
+		lines := buildPreviewLines(selectedProject, selectedSession, selectedSubagent, selectedIsNew, state, previewText, opts)
 		lines = buildWrappedLines(lines, max(0, layoutMode.preview.w-2))
 		applyPreviewNavigation(&state.previewState, len(lines), max(0, layoutMode.preview.h-2), ev)
 		return nil, nil
@@ -581,11 +641,17 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 
 	selectedProject := selectedProject(filteredProjects, state.projectState.selected)
 
-	sessions := buildSessionItems(selectedProject)
+	sessions := buildSessionItems(selectedProject, state.expandedSessions)
 	filteredSessions := filterSessions(sessions, state.sessionFilter)
 	state.sessionState.clamp(len(filteredSessions))
 
-	selectedSession, selectedIsNew := selectedSessionItem(filteredSessions, state.sessionState.selected)
+	selectedItem, selectedOk := selectedSessionItem(filteredSessions, state.sessionState.selected)
+	selectedSession, selectedSubagent, selectedIsNew := sessionSelection(selectedItem)
+	if !selectedOk {
+		selectedSession = nil
+		selectedSubagent = nil
+		selectedIsNew = false
+	}
 
 	projectFilter := state.projectFilter
 	sessionFilter := state.sessionFilter
@@ -596,8 +662,8 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 		sessionFilter = state.inputBuffer
 	}
 
-	if selectedSession != nil {
-		ensurePreview(screen, state, opts, *selectedSession, previewCh)
+	if selectedSession != nil || selectedSubagent != nil {
+		ensurePreview(screen, state, opts, selectedSession, selectedSubagent, previewCh)
 	}
 
 	proxyLabel := "Proxy mode (Ctrl+P): off"
@@ -623,7 +689,7 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 		}
 	}
 	statusSegments := []statusSegment{
-		{text: "Tab/Left/Right: switch  /: search  " + openLabel + "  r: refresh" + newHint + "  " + proxyLabel + "  ", style: baseStatusStyle},
+		{text: "Tab/Left/Right: switch  /: search  Ctrl+O: subagents  " + openLabel + "  r: refresh" + newHint + "  " + proxyLabel + "  ", style: baseStatusStyle},
 		{text: yoloLabel, style: yoloStatusStyle},
 		{text: "  q: quit", style: baseStatusStyle},
 	}
@@ -634,7 +700,7 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 		}
 	} else if state.focus == "preview" {
 		statusSegments = []statusSegment{
-			{text: "Up/Down PgUp/PgDn: scroll  /: search  " + openLabel + "  Tab/Left/Right: switch" + newHint + "  " + proxyLabel + "  ", style: baseStatusStyle},
+			{text: "Up/Down PgUp/PgDn: scroll  /: search  Ctrl+O: subagents  " + openLabel + "  Tab/Left/Right: switch" + newHint + "  " + proxyLabel + "  ", style: baseStatusStyle},
 			{text: yoloLabel, style: yoloStatusStyle},
 			{text: "  q: quit", style: baseStatusStyle},
 		}
@@ -653,7 +719,14 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 			statusSegments = []statusSegment{{text: fmt.Sprintf("Load error: %v", state.loadError), style: baseStatusStyle}}
 		}
 	}
-	if state.loadError == nil && state.updateStatus != nil && !state.updateStatus.Supported && state.updateStatus.Error != "" && state.inputMode == "" {
+
+	showUpdateError := state.updateStatus != nil &&
+		!state.updateStatus.Supported &&
+		state.updateStatus.Error != "" &&
+		!state.updateErrorUntil.IsZero() &&
+		time.Now().Before(state.updateErrorUntil)
+
+	if state.loadError == nil && showUpdateError && state.inputMode == "" {
 		statusSegments = []statusSegment{{text: fmt.Sprintf("Update check failed: %s", state.updateStatus.Error), style: baseStatusStyle}}
 	}
 
@@ -669,7 +742,7 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 			} else {
 				updateRight = updateRight + " latest"
 			}
-		} else if state.updateStatus.Error != "" {
+		} else if showUpdateError {
 			updateRight = updateRight + " update failed"
 			updateBold = true
 		}
@@ -727,7 +800,7 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 		)
 	}
 
-	previewText := previewTextForSession(state, selectedSession)
+	previewText := previewTextForItem(state, selectedSession, selectedSubagent)
 
 	previewFilter := ""
 	if state.inputMode == "preview" {
@@ -736,12 +809,12 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 		previewFilter = state.previewSearch
 	}
 	drawBox(screen, layoutMode.preview, "Preview", state.focus == "preview", previewFilter)
-	lines := buildPreviewLines(selectedProject, selectedSession, selectedIsNew, state, previewText, opts)
+	lines := buildPreviewLines(selectedProject, selectedSession, selectedSubagent, selectedIsNew, state, previewText, opts)
 	lines = buildWrappedLines(lines, max(0, layoutMode.preview.w-2))
 	viewH := max(0, layoutMode.preview.h-2)
 	state.previewState.scroll = clamp(state.previewState.scroll, 0, max(0, len(lines)-viewH))
 
-	previewKey := fmt.Sprintf("%s|%d|%s|%s", sessionID(selectedSession), layoutMode.preview.w, previewText, state.previewSearch)
+	previewKey := fmt.Sprintf("%s|%d|%s|%s", previewCacheKey(selectedSession, selectedSubagent), layoutMode.preview.w, previewText, state.previewSearch)
 	if previewKey != state.previewSearchKey {
 		state.previewSearchKey = previewKey
 		if state.previewSearch != "" {
@@ -770,32 +843,41 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 	return nil
 }
 
-func ensurePreview(screen tcell.Screen, state *uiState, opts Options, session claudehistory.Session, previewCh chan<- previewEvent) {
-	if session.SessionID == "" || session.FilePath == "" {
+func ensurePreview(
+	screen tcell.Screen,
+	state *uiState,
+	opts Options,
+	session *claudehistory.Session,
+	subagent *claudehistory.SubagentSession,
+	previewCh chan<- previewEvent,
+) {
+	cacheKey := previewCacheKey(session, subagent)
+	filePath := previewFilePath(session, subagent)
+	if cacheKey == "" || filePath == "" {
 		return
 	}
-	if _, ok := state.previewCache[session.SessionID]; ok {
+	if _, ok := state.previewCache[cacheKey]; ok {
 		return
 	}
-	if state.previewLoading[session.SessionID] {
+	if state.previewLoading[cacheKey] {
 		return
 	}
-	state.previewLoading[session.SessionID] = true
+	state.previewLoading[cacheKey] = true
 
 	maxMessages := opts.PreviewMessages
 	if maxMessages <= 0 {
 		maxMessages = 20
 	}
 
-	go func(sess claudehistory.Session, maxMsgs int) {
-		msgs, err := claudehistory.ReadSessionMessages(sess.FilePath, maxMsgs)
+	go func(key string, path string, maxMsgs int) {
+		msgs, err := claudehistory.ReadSessionMessages(path, maxMsgs)
 		text := ""
 		if err == nil {
 			text = claudehistory.FormatMessages(msgs, 400)
 		}
-		previewCh <- previewEvent{sessionID: sess.SessionID, text: text, err: err}
+		previewCh <- previewEvent{cacheKey: key, text: text, err: err}
 		screen.PostEvent(&uiEvent{when: time.Now(), kind: "preview"})
-	}(session, maxMessages)
+	}(cacheKey, filePath, maxMessages)
 }
 
 func buildProjectItems(projects []claudehistory.Project, defaultCwd string) []projectItem {
@@ -849,10 +931,10 @@ func buildProjectItems(projects []claudehistory.Project, defaultCwd string) []pr
 	return items
 }
 
-func buildSessionItems(project claudehistory.Project) []sessionItem {
+func buildSessionItems(project claudehistory.Project, expanded map[string]bool) []sessionItem {
 	items := []sessionItem{{
 		label:         "(New Agent)",
-		isNew:         true,
+		kind:          sessionItemNew,
 		alwaysVisible: true,
 	}}
 	for _, session := range project.Sessions {
@@ -861,8 +943,36 @@ func buildSessionItems(project claudehistory.Project) []sessionItem {
 		if !session.ModifiedAt.IsZero() {
 			ts = session.ModifiedAt.Format("2006-01-02 15:04")
 		}
-		label := fmt.Sprintf("%s  (%s)", title, ts)
-		items = append(items, sessionItem{label: label, session: session})
+		marker := "   "
+		if len(session.Subagents) > 0 {
+			if expanded != nil && expanded[session.SessionID] {
+				marker = "[-]"
+			} else {
+				marker = "[+]"
+			}
+		}
+		label := fmt.Sprintf("%s %s  (%s)", marker, title, ts)
+		items = append(items, sessionItem{
+			label:   label,
+			session: session,
+			kind:    sessionItemMain,
+		})
+		if expanded != nil && expanded[session.SessionID] {
+			for _, sub := range session.Subagents {
+				subTitle := sub.DisplayTitle()
+				subTS := "unknown"
+				if !sub.ModifiedAt.IsZero() {
+					subTS = sub.ModifiedAt.Format("2006-01-02 15:04")
+				}
+				subLabel := fmt.Sprintf("  |- subagent %s  (%s)", subTitle, subTS)
+				items = append(items, sessionItem{
+					label:         subLabel,
+					subagent:      sub,
+					parentSession: session,
+					kind:          sessionItemSubagent,
+				})
+			}
+		}
 	}
 	return items
 }
@@ -874,15 +984,51 @@ func selectedProject(items []projectItem, idx int) claudehistory.Project {
 	return items[idx].project
 }
 
-func selectedSessionItem(items []sessionItem, idx int) (*claudehistory.Session, bool) {
+func selectedSessionItem(items []sessionItem, idx int) (sessionItem, bool) {
 	if idx < 0 || idx >= len(items) {
-		return nil, false
+		return sessionItem{}, false
 	}
-	item := items[idx]
-	if item.isNew {
-		return nil, true
+	return items[idx], true
+}
+
+func sessionSelection(item sessionItem) (*claudehistory.Session, *claudehistory.SubagentSession, bool) {
+	switch item.kind {
+	case sessionItemNew:
+		return nil, nil, true
+	case sessionItemSubagent:
+		return &item.parentSession, &item.subagent, false
+	case sessionItemMain:
+		return &item.session, nil, false
+	default:
+		return nil, nil, false
 	}
-	return &item.session, false
+}
+
+func sessionItemParentID(item sessionItem) string {
+	switch item.kind {
+	case sessionItemSubagent:
+		return strings.TrimSpace(item.parentSession.SessionID)
+	case sessionItemMain:
+		return strings.TrimSpace(item.session.SessionID)
+	default:
+		return ""
+	}
+}
+
+func findSessionIndex(items []sessionItem, sessionID string) int {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return -1
+	}
+	for i, item := range items {
+		if item.kind != sessionItemMain {
+			continue
+		}
+		if strings.TrimSpace(item.session.SessionID) == sessionID {
+			return i
+		}
+	}
+	return -1
 }
 
 func normalizePathForCompare(path string) string {
@@ -919,6 +1065,7 @@ func newSessionCwd(project claudehistory.Project, defaultCwd string) string {
 func buildPreviewLines(
 	project claudehistory.Project,
 	session *claudehistory.Session,
+	subagent *claudehistory.SubagentSession,
 	selectedIsNew bool,
 	state *uiState,
 	previewText string,
@@ -954,6 +1101,35 @@ func buildPreviewLines(
 		return lines
 	}
 
+	if subagent != nil {
+		lines = append(lines, "")
+		lines = append(lines, "Subagent:")
+		if subagent.AgentID != "" {
+			lines = append(lines, "  ID: "+subagent.AgentID)
+		}
+		if session.SessionID != "" {
+			lines = append(lines, "  Parent: "+session.SessionID)
+		}
+		if subagent.FirstPrompt != "" {
+			lines = append(lines, "  First prompt: "+subagent.FirstPrompt)
+		}
+		if subagent.MessageCount > 0 {
+			lines = append(lines, fmt.Sprintf("  Messages: %d", subagent.MessageCount))
+		}
+		if !subagent.CreatedAt.IsZero() {
+			lines = append(lines, "  Created: "+subagent.CreatedAt.Format(time.RFC3339))
+		}
+		if !subagent.ModifiedAt.IsZero() {
+			lines = append(lines, "  Modified: "+subagent.ModifiedAt.Format(time.RFC3339))
+		}
+		if previewText != "" {
+			lines = append(lines, "")
+			lines = append(lines, "Preview:")
+			lines = append(lines, previewText)
+		}
+		return lines
+	}
+
 	lines = append(lines, "")
 	lines = append(lines, "Session:")
 	lines = append(lines, "  ID: "+session.SessionID)
@@ -965,6 +1141,9 @@ func buildPreviewLines(
 	}
 	if session.MessageCount > 0 {
 		lines = append(lines, fmt.Sprintf("  Messages: %d", session.MessageCount))
+	}
+	if len(session.Subagents) > 0 {
+		lines = append(lines, fmt.Sprintf("  Subagents: %d", len(session.Subagents)))
 	}
 	if !session.CreatedAt.IsZero() {
 		lines = append(lines, "  Created: "+session.CreatedAt.Format(time.RFC3339))
@@ -996,7 +1175,12 @@ func renderSessionRows(items []sessionItem, focused bool, state listState, viewH
 	start := clamp(state.scroll, 0, max(0, len(items)))
 	end := min(len(items), start+max(0, viewH))
 	for i := start; i < end; i++ {
-		rows = append(rows, row{label: items[i].label})
+		item := items[i]
+		rowItem := row{label: item.label}
+		if item.kind == sessionItemSubagent {
+			rowItem.dim = true
+		}
+		rows = append(rows, rowItem)
 	}
 	return applySelection(rows, focused, listState{selected: state.selected - start})
 }
@@ -1009,27 +1193,51 @@ type row struct {
 	focused  bool
 }
 
-func previewTextForSession(state *uiState, session *claudehistory.Session) string {
-	if session == nil {
-		return ""
+func previewCacheKey(session *claudehistory.Session, subagent *claudehistory.SubagentSession) string {
+	if subagent != nil {
+		if path := strings.TrimSpace(subagent.FilePath); path != "" {
+			return "subagent:" + path
+		}
+		if agentID := strings.TrimSpace(subagent.AgentID); agentID != "" {
+			return "subagent:" + agentID
+		}
 	}
-	if errMsg, ok := state.previewError[session.SessionID]; ok && errMsg != "" {
-		return "Preview failed: " + errMsg
-	}
-	if text, ok := state.previewCache[session.SessionID]; ok && text != "" {
-		return text
-	}
-	if state.previewLoading[session.SessionID] {
-		return "Loading preview…"
+	if session != nil {
+		if sessionID := strings.TrimSpace(session.SessionID); sessionID != "" {
+			return "session:" + sessionID
+		}
+		if path := strings.TrimSpace(session.FilePath); path != "" {
+			return "session:" + path
+		}
 	}
 	return ""
 }
 
-func sessionID(session *claudehistory.Session) string {
-	if session == nil {
+func previewFilePath(session *claudehistory.Session, subagent *claudehistory.SubagentSession) string {
+	if subagent != nil {
+		return strings.TrimSpace(subagent.FilePath)
+	}
+	if session != nil {
+		return strings.TrimSpace(session.FilePath)
+	}
+	return ""
+}
+
+func previewTextForItem(state *uiState, session *claudehistory.Session, subagent *claudehistory.SubagentSession) string {
+	cacheKey := previewCacheKey(session, subagent)
+	if cacheKey == "" {
 		return ""
 	}
-	return session.SessionID
+	if errMsg, ok := state.previewError[cacheKey]; ok && errMsg != "" {
+		return "Preview failed: " + errMsg
+	}
+	if text, ok := state.previewCache[cacheKey]; ok && text != "" {
+		return text
+	}
+	if state.previewLoading[cacheKey] {
+		return "Loading preview…"
+	}
+	return ""
 }
 
 func applySelection(rows []row, focused bool, state listState) []row {

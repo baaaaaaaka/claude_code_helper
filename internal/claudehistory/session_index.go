@@ -75,6 +75,39 @@ func readSessionFileMeta(filePath string) (sessionFileMeta, error) {
 	return meta, nil
 }
 
+type sessionIDEnvelope struct {
+	SessionID string `json:"sessionId"`
+}
+
+func readSessionFileSessionID(filePath string) (string, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	reader := bufio.NewReader(f)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if err != nil && err != io.EOF {
+			return "", err
+		}
+		line = bytes.TrimSpace(line)
+		if len(line) > 0 {
+			var env sessionIDEnvelope
+			if json.Unmarshal(line, &env) == nil {
+				if sessionID := strings.TrimSpace(env.SessionID); sessionID != "" {
+					return sessionID, nil
+				}
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+	}
+	return "", nil
+}
+
 func selectProjectPath(sessions []Session) string {
 	counts := map[string]int{}
 	for _, sess := range sessions {

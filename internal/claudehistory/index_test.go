@@ -311,3 +311,144 @@ func TestSessionWorkingDirSkipsMissingSessionPath(t *testing.T) {
 		t.Fatalf("unexpected working dir: %q", got)
 	}
 }
+
+func TestDiscoverProjectsAttachesSubagents(t *testing.T) {
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "projects", "proj-subagents")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	mainPath := filepath.Join(projectDir, "sess-main.jsonl")
+	mainContent := `{"type":"user","message":{"role":"user","content":"Hello"},"timestamp":"2026-01-01T00:00:00Z","cwd":"/tmp/project"}
+{"type":"assistant","message":{"role":"assistant","content":"Hi"},"timestamp":"2026-01-01T00:01:00Z","cwd":"/tmp/project"}`
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0o644); err != nil {
+		t.Fatalf("write main session: %v", err)
+	}
+
+	agentPath := filepath.Join(projectDir, "agent-abc.jsonl")
+	agentContent := `{"type":"user","message":{"role":"user","content":"Sub task"},"timestamp":"2026-01-01T00:02:00Z","cwd":"/tmp/project","sessionId":"sess-main","isSidechain":true}`
+	if err := os.WriteFile(agentPath, []byte(agentContent), 0o644); err != nil {
+		t.Fatalf("write agent session: %v", err)
+	}
+
+	subagentsDir := filepath.Join(projectDir, "sess-main", "subagents")
+	if err := os.MkdirAll(subagentsDir, 0o755); err != nil {
+		t.Fatalf("mkdir subagents: %v", err)
+	}
+	nestedAgentPath := filepath.Join(subagentsDir, "agent-xyz.jsonl")
+	nestedContent := `{"type":"user","message":{"role":"user","content":"Nested task"},"timestamp":"2026-01-01T00:03:00Z","cwd":"/tmp/project","sessionId":"agent-session-xyz","isSidechain":true}`
+	if err := os.WriteFile(nestedAgentPath, []byte(nestedContent), 0o644); err != nil {
+		t.Fatalf("write nested agent session: %v", err)
+	}
+
+	projects, err := DiscoverProjects(root)
+	if err != nil {
+		t.Fatalf("DiscoverProjects error: %v", err)
+	}
+	if len(projects) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(projects))
+	}
+	project := projects[0]
+	if len(project.Sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(project.Sessions))
+	}
+	session := project.Sessions[0]
+	if session.SessionID != "sess-main" {
+		t.Fatalf("unexpected session id: %q", session.SessionID)
+	}
+	if session.MessageCount != 2 {
+		t.Fatalf("unexpected message count: %d", session.MessageCount)
+	}
+	if len(session.Subagents) != 2 {
+		t.Fatalf("expected 2 subagents, got %d", len(session.Subagents))
+	}
+	subagentIDs := map[string]bool{}
+	for _, sub := range session.Subagents {
+		subagentIDs[sub.AgentID] = true
+		if sub.ParentSessionID != "sess-main" {
+			t.Fatalf("unexpected parent session id: %q", sub.ParentSessionID)
+		}
+	}
+	if !subagentIDs["abc"] || !subagentIDs["xyz"] {
+		t.Fatalf("unexpected subagent IDs: %#v", subagentIDs)
+	}
+}
+
+func TestDiscoverProjectsSkipsSnapshotOnlySessions(t *testing.T) {
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "projects", "proj-snapshot")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	sessionPath := filepath.Join(projectDir, "sess-snapshot.jsonl")
+	content := `{"type":"file-history-snapshot","messageId":"snap-1","snapshot":{"messageId":"snap-1","trackedFileBackups":{},"timestamp":"2026-01-01T00:00:00Z"},"isSnapshotUpdate":false}`
+	if err := os.WriteFile(sessionPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+
+	projects, err := DiscoverProjects(root)
+	if err != nil {
+		t.Fatalf("DiscoverProjects error: %v", err)
+	}
+	if len(projects) != 0 {
+		t.Fatalf("expected 0 projects, got %d", len(projects))
+	}
+}
+
+func TestDiscoverProjectsSkipsIndexSidechainEntries(t *testing.T) {
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "projects", "proj-index")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	indexPath := filepath.Join(projectDir, "sessions-index.json")
+	index := `{"version":1,"entries":[{"sessionId":"sess-main","fullPath":"","messageCount":1},{"sessionId":"agent-ignored","fullPath":"","isSidechain":true,"messageCount":5}],"originalPath":"/tmp/original"}`
+	if err := os.WriteFile(indexPath, []byte(index), 0o644); err != nil {
+		t.Fatalf("write index: %v", err)
+	}
+
+	sessionPath := filepath.Join(projectDir, "sess-main.jsonl")
+	content := `{"type":"user","message":{"role":"user","content":"Hello"},"timestamp":"2026-01-01T00:00:00Z","cwd":"/tmp/project"}`
+	if err := os.WriteFile(sessionPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+
+	projects, err := DiscoverProjects(root)
+	if err != nil {
+		t.Fatalf("DiscoverProjects error: %v", err)
+	}
+	if len(projects) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(projects))
+	}
+	if len(projects[0].Sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(projects[0].Sessions))
+	}
+	if projects[0].Sessions[0].SessionID != "sess-main" {
+		t.Fatalf("unexpected session id: %q", projects[0].Sessions[0].SessionID)
+	}
+}
+
+func TestDiscoverProjectsIgnoresAgentOnlyProject(t *testing.T) {
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "projects", "proj-agent-only")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	agentPath := filepath.Join(projectDir, "agent-abc.jsonl")
+	content := `{"type":"user","message":{"role":"user","content":"Sub task"},"timestamp":"2026-01-01T00:00:00Z","cwd":"/tmp/project","sessionId":"sess-main","isSidechain":true}`
+	if err := os.WriteFile(agentPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write agent: %v", err)
+	}
+
+	projects, err := DiscoverProjects(root)
+	if err != nil {
+		t.Fatalf("DiscoverProjects error: %v", err)
+	}
+	if len(projects) != 0 {
+		t.Fatalf("expected 0 projects, got %d", len(projects))
+	}
+}

@@ -101,6 +101,9 @@ func (idx sessionsIndex) EntriesProjectPath() string {
 func parseSessions(entries []sessionIndexEntry) []Session {
 	sessions := make([]Session, 0, len(entries))
 	for _, entry := range entries {
+		if entry.IsSidechain {
+			continue
+		}
 		created := parseTime(entry.Created)
 		modified := parseTime(entry.Modified)
 		sessions = append(sessions, Session{
@@ -192,6 +195,11 @@ func loadProject(projectsDir string, key string, history historyIndex) (Project,
 					}, scanErr
 				}
 			}
+			sessions, attachErr := attachSubagents(dir, sessions, true)
+			if rehydrateErr == nil && attachErr != nil {
+				rehydrateErr = attachErr
+			}
+			sessions = filterEmptySessions(sessions)
 			return Project{
 				Key:      key,
 				Path:     projectPath,
@@ -277,6 +285,11 @@ func loadProjectFromSessionFilesWithOptions(dir string, key string, history hist
 		}
 	}
 
+	sessions, attachErr := attachSubagents(dir, sessions, recursive)
+	if firstErr == nil && attachErr != nil {
+		firstErr = attachErr
+	}
+	sessions = filterEmptySessions(sessions)
 	return Project{
 		Key:      key,
 		Path:     projectPath,

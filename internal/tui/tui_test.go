@@ -27,12 +27,13 @@ func newTestScreen(t *testing.T, w, h int) tcell.Screen {
 
 func newTestState(projects []claudehistory.Project) *uiState {
 	return &uiState{
-		projects:       projects,
-		focus:          "projects",
-		lastListFocus:  "projects",
-		previewCache:   map[string]string{},
-		previewError:   map[string]string{},
-		previewLoading: map[string]bool{},
+		projects:         projects,
+		focus:            "projects",
+		lastListFocus:    "projects",
+		expandedSessions: map[string]bool{},
+		previewCache:     map[string]string{},
+		previewError:     map[string]string{},
+		previewLoading:   map[string]bool{},
 	}
 }
 
@@ -185,18 +186,61 @@ func TestFilterProjectsKeepsCurrentVisible(t *testing.T) {
 
 func TestBuildSessionItemsIncludesNewAgent(t *testing.T) {
 	project := claudehistory.Project{Sessions: []claudehistory.Session{{SessionID: "sess-1"}}}
-	items := buildSessionItems(project)
-	if len(items) == 0 || !items[0].isNew {
+	items := buildSessionItems(project, nil)
+	if len(items) == 0 || items[0].kind != sessionItemNew {
 		t.Fatalf("expected new agent item first, got %#v", items)
 	}
 }
 
 func TestFilterSessionsKeepsNewAgent(t *testing.T) {
 	project := claudehistory.Project{Sessions: []claudehistory.Session{{SessionID: "sess-1"}}}
-	items := buildSessionItems(project)
+	items := buildSessionItems(project, nil)
 	filtered := filterSessions(items, "nomatch")
-	if len(filtered) == 0 || !filtered[0].isNew {
+	if len(filtered) == 0 || filtered[0].kind != sessionItemNew {
 		t.Fatalf("expected new agent item to remain visible")
+	}
+}
+
+func TestBuildSessionItemsShowsSubagentMarkers(t *testing.T) {
+	now := time.Now()
+	project := claudehistory.Project{
+		Sessions: []claudehistory.Session{{
+			SessionID:  "sess-1",
+			ModifiedAt: now,
+			Subagents:  []claudehistory.SubagentSession{{AgentID: "agent-1", ModifiedAt: now}},
+		}},
+	}
+
+	collapsed := buildSessionItems(project, map[string]bool{})
+	if len(collapsed) < 2 {
+		t.Fatalf("expected main session row, got %#v", collapsed)
+	}
+	if !strings.HasPrefix(collapsed[1].label, "[+] ") {
+		t.Fatalf("expected collapsed marker, got %q", collapsed[1].label)
+	}
+
+	expanded := buildSessionItems(project, map[string]bool{"sess-1": true})
+	if len(expanded) < 3 {
+		t.Fatalf("expected subagent row when expanded, got %#v", expanded)
+	}
+	if !strings.HasPrefix(expanded[1].label, "[-] ") {
+		t.Fatalf("expected expanded marker, got %q", expanded[1].label)
+	}
+	if expanded[2].kind != sessionItemSubagent {
+		t.Fatalf("expected subagent row, got %#v", expanded[2])
+	}
+}
+
+func TestBuildSessionItemsNoMarkerWithoutSubagents(t *testing.T) {
+	project := claudehistory.Project{
+		Sessions: []claudehistory.Session{{SessionID: "sess-1"}},
+	}
+	items := buildSessionItems(project, map[string]bool{})
+	if len(items) < 2 {
+		t.Fatalf("expected main session row, got %#v", items)
+	}
+	if !strings.HasPrefix(items[1].label, "   ") {
+		t.Fatalf("expected empty marker, got %q", items[1].label)
 	}
 }
 
@@ -210,6 +254,120 @@ func TestBuildStatusLinesKeepsGroups(t *testing.T) {
 	want := []string{"A: one", "B: two", "C: three"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected groups: %#v", got)
+	}
+}
+
+func TestHandleKeyCtrlOTogglesSubagents(t *testing.T) {
+	screen := newTestScreen(t, 120, 40)
+	now := time.Now()
+	project := claudehistory.Project{
+		Key:  "one",
+		Path: "/tmp/one",
+		Sessions: []claudehistory.Session{{
+			SessionID:  "sess-1",
+			ModifiedAt: now,
+			Subagents:  []claudehistory.SubagentSession{{AgentID: "agent-1", ModifiedAt: now}},
+		}},
+	}
+	state := newTestState([]claudehistory.Project{project})
+	state.focus = "sessions"
+	state.lastListFocus = "sessions"
+	state.sessionState.selected = 1
+
+	_, err := handleKey(context.Background(), screen, state, Options{}, tcell.NewEventKey(tcell.KeyCtrlO, 0, 0))
+	if err != nil {
+		t.Fatalf("handleKey error: %v", err)
+	}
+	if !state.expandedSessions["sess-1"] {
+		t.Fatalf("expected session to be expanded")
+	}
+	if state.sessionState.selected != 1 {
+		t.Fatalf("expected selection to stay on parent, got %d", state.sessionState.selected)
+	}
+
+	_, err = handleKey(context.Background(), screen, state, Options{}, tcell.NewEventKey(tcell.KeyCtrlO, 0, 0))
+	if err != nil {
+		t.Fatalf("handleKey error: %v", err)
+	}
+	if state.expandedSessions["sess-1"] {
+		t.Fatalf("expected session to be collapsed")
+	}
+}
+
+func TestHandleKeyCtrlOFromSubagentSelectsParent(t *testing.T) {
+	screen := newTestScreen(t, 120, 40)
+	now := time.Now()
+	project := claudehistory.Project{
+		Key:  "one",
+		Path: "/tmp/one",
+		Sessions: []claudehistory.Session{{
+			SessionID:  "sess-1",
+			ModifiedAt: now,
+			Subagents:  []claudehistory.SubagentSession{{AgentID: "agent-1", ModifiedAt: now}},
+		}},
+	}
+	state := newTestState([]claudehistory.Project{project})
+	state.focus = "sessions"
+	state.lastListFocus = "sessions"
+	state.expandedSessions["sess-1"] = true
+	state.sessionState.selected = 2
+
+	_, err := handleKey(context.Background(), screen, state, Options{}, tcell.NewEventKey(tcell.KeyCtrlO, 0, 0))
+	if err != nil {
+		t.Fatalf("handleKey error: %v", err)
+	}
+	if state.expandedSessions["sess-1"] {
+		t.Fatalf("expected session to be collapsed")
+	}
+	if state.sessionState.selected != 1 {
+		t.Fatalf("expected selection to move to parent, got %d", state.sessionState.selected)
+	}
+}
+
+func TestHandleKeyCtrlOIgnoredWhenNotSessions(t *testing.T) {
+	screen := newTestScreen(t, 120, 40)
+	project := claudehistory.Project{
+		Key:  "one",
+		Path: "/tmp/one",
+		Sessions: []claudehistory.Session{{
+			SessionID: "sess-1",
+			Subagents: []claudehistory.SubagentSession{{AgentID: "agent-1"}},
+		}},
+	}
+	state := newTestState([]claudehistory.Project{project})
+	state.focus = "projects"
+	state.lastListFocus = "projects"
+
+	_, err := handleKey(context.Background(), screen, state, Options{}, tcell.NewEventKey(tcell.KeyCtrlO, 0, 0))
+	if err != nil {
+		t.Fatalf("handleKey error: %v", err)
+	}
+	if len(state.expandedSessions) != 0 {
+		t.Fatalf("expected no expansion when not in sessions")
+	}
+}
+
+func TestHandleKeyCtrlOIgnoredOnNewAgent(t *testing.T) {
+	screen := newTestScreen(t, 120, 40)
+	project := claudehistory.Project{
+		Key:  "one",
+		Path: "/tmp/one",
+		Sessions: []claudehistory.Session{{
+			SessionID: "sess-1",
+			Subagents: []claudehistory.SubagentSession{{AgentID: "agent-1"}},
+		}},
+	}
+	state := newTestState([]claudehistory.Project{project})
+	state.focus = "sessions"
+	state.lastListFocus = "sessions"
+	state.sessionState.selected = 0
+
+	_, err := handleKey(context.Background(), screen, state, Options{}, tcell.NewEventKey(tcell.KeyCtrlO, 0, 0))
+	if err != nil {
+		t.Fatalf("handleKey error: %v", err)
+	}
+	if len(state.expandedSessions) != 0 {
+		t.Fatalf("expected no expansion from new agent row")
 	}
 }
 
@@ -376,7 +534,7 @@ func TestPreviewArrowScrollsWhenFocused(t *testing.T) {
 	state.focus = "preview"
 	state.lastListFocus = "sessions"
 	state.sessionState.selected = 1
-	state.previewCache["sess-3"] = strings.Repeat("line ", 80)
+	state.previewCache[previewCacheKey(&project.Sessions[0], nil)] = strings.Repeat("line ", 80)
 
 	_, err := handleKey(context.Background(), screen, state, Options{}, tcell.NewEventKey(tcell.KeyDown, 0, 0))
 	if err != nil {
@@ -414,7 +572,7 @@ func TestPreviewSearchMatches(t *testing.T) {
 	state.focus = "preview"
 	state.lastListFocus = "sessions"
 	state.sessionState.selected = 1
-	state.previewCache["sess-4"] = "alpha\nbeta\nalpha"
+	state.previewCache[previewCacheKey(&project.Sessions[0], nil)] = "alpha\nbeta\nalpha"
 
 	_, err := handleKey(context.Background(), screen, state, Options{}, tcell.NewEventKey(tcell.KeyRune, '/', 0))
 	if err != nil {
@@ -483,6 +641,7 @@ func TestDrawShowsUpdateErrorWhenCheckFails(t *testing.T) {
 	screen := newTestScreen(t, 160, 20)
 	state := newTestState([]claudehistory.Project{})
 	state.updateStatus = &update.Status{Supported: false, Error: "network timeout"}
+	state.updateErrorUntil = time.Now().Add(updateErrorDisplayDuration)
 
 	previewCh := make(chan previewEvent, 1)
 	if err := draw(screen, state, Options{Version: "1.0.0"}, previewCh); err != nil {
@@ -496,6 +655,27 @@ func TestDrawShowsUpdateErrorWhenCheckFails(t *testing.T) {
 	}
 	if !strings.Contains(line, "update failed") {
 		t.Fatalf("expected update failed hint in status line, got %q", strings.TrimSpace(line))
+	}
+}
+
+func TestDrawHidesUpdateErrorAfterTimeout(t *testing.T) {
+	screen := newTestScreen(t, 160, 20)
+	state := newTestState([]claudehistory.Project{{Key: "one", Path: "/tmp"}})
+	state.updateStatus = &update.Status{Supported: false, Error: "network timeout"}
+	state.updateErrorUntil = time.Now().Add(-time.Second)
+
+	previewCh := make(chan previewEvent, 1)
+	if err := draw(screen, state, Options{Version: "1.0.0"}, previewCh); err != nil {
+		t.Fatalf("draw error: %v", err)
+	}
+
+	_, h := screen.Size()
+	line := readScreenLine(screen, h-1)
+	if strings.Contains(line, "Update check failed") {
+		t.Fatalf("expected update error to be hidden, got %q", strings.TrimSpace(line))
+	}
+	if strings.Contains(line, "update failed") {
+		t.Fatalf("expected update failed hint to be hidden, got %q", strings.TrimSpace(line))
 	}
 }
 
@@ -529,6 +709,97 @@ func TestDrawShowsYoloWarningWhenEnabled(t *testing.T) {
 	line := readScreenLine(screen, h-1)
 	if !strings.Contains(line, "[!] YOLO mode (Ctrl+Y): on") {
 		t.Fatalf("expected yolo warning in status line, got %q", strings.TrimSpace(line))
+	}
+}
+
+func TestDrawShowsSubagentToggleHint(t *testing.T) {
+	screen := newTestScreen(t, 160, 20)
+	state := newTestState([]claudehistory.Project{{Key: "one", Path: "/tmp"}})
+
+	previewCh := make(chan previewEvent, 1)
+	if err := draw(screen, state, Options{}, previewCh); err != nil {
+		t.Fatalf("draw error: %v", err)
+	}
+
+	_, h := screen.Size()
+	line := readScreenLine(screen, h-1)
+	if !strings.Contains(line, "Ctrl+O: subagents") {
+		t.Fatalf("expected subagent hint in status line, got %q", strings.TrimSpace(line))
+	}
+}
+
+func TestPreviewCacheKeySeparatesSessionAndSubagent(t *testing.T) {
+	session := claudehistory.Session{SessionID: "sess-1", FilePath: "/tmp/sess-1.jsonl"}
+	subagent := claudehistory.SubagentSession{AgentID: "agent-1", FilePath: "/tmp/agent-1.jsonl"}
+
+	sessionKey := previewCacheKey(&session, nil)
+	subagentKey := previewCacheKey(&session, &subagent)
+
+	if sessionKey == "" || subagentKey == "" {
+		t.Fatalf("expected non-empty cache keys")
+	}
+	if sessionKey == subagentKey {
+		t.Fatalf("expected different cache keys, got %q", sessionKey)
+	}
+	if !strings.HasPrefix(subagentKey, "subagent:") {
+		t.Fatalf("expected subagent cache key, got %q", subagentKey)
+	}
+}
+
+func TestPreviewCacheKeyFallsBackToFilePath(t *testing.T) {
+	session := claudehistory.Session{FilePath: "/tmp/sess-1.jsonl"}
+	key := previewCacheKey(&session, nil)
+	if key == "" || !strings.HasPrefix(key, "session:") {
+		t.Fatalf("expected session cache key from file path, got %q", key)
+	}
+
+	subagent := claudehistory.SubagentSession{FilePath: "/tmp/agent-1.jsonl"}
+	subKey := previewCacheKey(&session, &subagent)
+	if subKey == "" || !strings.HasPrefix(subKey, "subagent:") {
+		t.Fatalf("expected subagent cache key from file path, got %q", subKey)
+	}
+}
+
+func TestHandleKeyEnterOpensParentForSubagent(t *testing.T) {
+	screen := newTestScreen(t, 120, 40)
+	now := time.Now()
+	project := claudehistory.Project{
+		Key:  "one",
+		Path: "/tmp/one",
+		Sessions: []claudehistory.Session{{
+			SessionID:  "sess-1",
+			ModifiedAt: now,
+			Subagents:  []claudehistory.SubagentSession{{AgentID: "agent-1", ModifiedAt: now}},
+		}},
+	}
+	state := newTestState([]claudehistory.Project{project})
+	state.focus = "sessions"
+	state.lastListFocus = "sessions"
+	state.expandedSessions["sess-1"] = true
+	state.sessionState.selected = 2
+
+	selection, err := handleKey(context.Background(), screen, state, Options{}, tcell.NewEventKey(tcell.KeyEnter, 0, 0))
+	if err != nil {
+		t.Fatalf("handleKey error: %v", err)
+	}
+	if selection == nil || selection.Session.SessionID != "sess-1" {
+		t.Fatalf("expected parent session sess-1, got %#v", selection)
+	}
+}
+
+func TestBuildPreviewLinesForSubagent(t *testing.T) {
+	state := newTestState(nil)
+	project := claudehistory.Project{Path: "/tmp/project"}
+	session := &claudehistory.Session{SessionID: "sess-1"}
+	subagent := &claudehistory.SubagentSession{AgentID: "agent-1", ParentSessionID: "sess-1"}
+
+	lines := buildPreviewLines(project, session, subagent, false, state, "preview", Options{})
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Subagent:") {
+		t.Fatalf("expected subagent header, got %q", joined)
+	}
+	if !strings.Contains(joined, "Parent: sess-1") {
+		t.Fatalf("expected parent id, got %q", joined)
 	}
 }
 

@@ -25,6 +25,9 @@ func collectSessionFiles(dir string, recursive bool) ([]string, error) {
 			if !strings.HasSuffix(name, ".jsonl") {
 				continue
 			}
+			if isAgentSessionFileName(name) {
+				continue
+			}
 			files = append(files, filepath.Join(dir, name))
 		}
 		return files, nil
@@ -38,7 +41,7 @@ func collectSessionFiles(dir string, recursive bool) ([]string, error) {
 		if d.IsDir() {
 			return nil
 		}
-		if strings.HasSuffix(d.Name(), ".jsonl") {
+		if strings.HasSuffix(d.Name(), ".jsonl") && !isAgentSessionFileName(d.Name()) {
 			files = append(files, path)
 		}
 		return nil
@@ -47,6 +50,48 @@ func collectSessionFiles(dir string, recursive bool) ([]string, error) {
 		return nil, err
 	}
 	return files, nil
+}
+
+func collectAgentSessionFiles(dir string, recursive bool) ([]string, error) {
+	if !recursive {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return nil, err
+		}
+		files := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if isAgentSessionFileName(name) {
+				files = append(files, filepath.Join(dir, name))
+			}
+		}
+		return files, nil
+	}
+
+	var files []string
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if isAgentSessionFileName(d.Name()) {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return files, nil
+}
+
+func isAgentSessionFileName(name string) bool {
+	return strings.HasPrefix(name, "agent-") && strings.HasSuffix(name, ".jsonl")
 }
 
 func resolveSessionFilePath(dir string, sessionID string, recursive bool) (string, error) {
