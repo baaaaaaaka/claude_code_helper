@@ -67,15 +67,9 @@ func TestEnsureProxyPreferenceDefaultsToProxyWhenProfilesExist(t *testing.T) {
 
 func TestEnsureProxyPreferenceWriteFailure(t *testing.T) {
 	store := newTempStore(t)
-	lockPath := store.Path() + ".lock"
-	if err := os.WriteFile(lockPath, []byte(""), 0o600); err != nil {
-		t.Fatalf("write lock file: %v", err)
+	if err := os.MkdirAll(store.Path(), 0o700); err != nil {
+		t.Fatalf("mkdir config path: %v", err)
 	}
-	dir := filepath.Dir(store.Path())
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatalf("chmod dir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
 	reader := bufio.NewReader(strings.NewReader("y\n"))
 	_, _, err := ensureProxyPreferenceWithReader(context.Background(), store, "", io.Discard, reader)

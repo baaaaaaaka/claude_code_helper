@@ -152,10 +152,10 @@ func TestExtractVersion(t *testing.T) {
 func TestResolveClaudeVersion(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "claude")
-	script := "#!/bin/sh\necho \"Claude Code 1.2.3\"\n"
-	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
-		t.Fatalf("write script: %v", err)
+	if runtime.GOOS == "windows" {
+		path += ".cmd"
 	}
+	writeStub(t, dir, "claude", "#!/bin/sh\necho \"Claude Code 1.2.3\"\n", "@echo off\r\necho Claude Code 1.2.3\r\n")
 	if got := resolveClaudeVersion(path); got != "1.2.3" {
 		t.Fatalf("expected version 1.2.3, got %q", got)
 	}

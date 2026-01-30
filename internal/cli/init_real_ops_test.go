@@ -87,7 +87,7 @@ func TestInstallPublicKeyAddsNewline(t *testing.T) {
 	dir := t.TempDir()
 	outPath := filepath.Join(dir, "received.pub")
 	unix := "#!/bin/sh\ncat - > \"$OUT_FILE\"\nexit 0\n"
-	win := "@echo off\r\nsetlocal\r\nset \"line=\"\r\nset /p line=\r\nif defined OUT_FILE (\r\n  > \"%OUT_FILE%\" echo(!line!\r\n)\r\nexit /b 0\r\n"
+	win := "@echo off\r\nset \"line=\"\r\nset /p line=\r\nif defined OUT_FILE (\r\n  > \"%OUT_FILE%\" echo %line%\r\n)\r\nexit /b 0\r\n"
 	writeStub(t, dir, "ssh", unix, win)
 	setStubPath(t, dir)
 	t.Setenv("OUT_FILE", outPath)

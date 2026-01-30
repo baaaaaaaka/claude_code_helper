@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
@@ -40,11 +39,8 @@ func TestEnsureProfileSelectsProfile(t *testing.T) {
 
 func TestEnsureProfileAutoInitReturnsCreated(t *testing.T) {
 	dir := t.TempDir()
-	script := "#!/bin/sh\nexit 0\n"
-	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o700); err != nil {
-		t.Fatalf("write ssh: %v", err)
-	}
-	t.Setenv("PATH", dir)
+	writeStub(t, dir, "ssh", "#!/bin/sh\nexit 0\n", "@echo off\r\nexit /b 0\r\n")
+	setStubPath(t, dir)
 
 	reader, writer, err := os.Pipe()
 	if err != nil {

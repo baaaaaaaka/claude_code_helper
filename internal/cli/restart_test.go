@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -51,10 +52,14 @@ func TestHandleUpdateAndRestartCallsRestart(t *testing.T) {
 	prevUpdate := performUpdate
 	prevExec := execSelf
 	prevExecutable := executablePath
+	prevStart := startSelf
+	prevExit := exitFunc
 	t.Cleanup(func() {
 		performUpdate = prevUpdate
 		execSelf = prevExec
 		executablePath = prevExecutable
+		startSelf = prevStart
+		exitFunc = prevExit
 	})
 
 	performUpdate = func(ctx context.Context, opts update.UpdateOptions) (update.ApplyResult, error) {
@@ -63,9 +68,17 @@ func TestHandleUpdateAndRestartCallsRestart(t *testing.T) {
 	executablePath = func() (string, error) { return "/tmp/claude-proxy", nil }
 
 	called := false
-	execSelf = func(path string, args []string, env []string) error {
-		called = true
-		return nil
+	if runtime.GOOS == "windows" {
+		startSelf = func(exe string, args []string) error {
+			called = true
+			return nil
+		}
+		exitFunc = func(code int) {}
+	} else {
+		execSelf = func(path string, args []string, env []string) error {
+			called = true
+			return nil
+		}
 	}
 
 	cmd := &cobra.Command{}

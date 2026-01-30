@@ -156,11 +156,13 @@ func TestRunTargetOnceWithOptionsFailures(t *testing.T) {
 
 func TestRunTargetWithFallbackYoloRetry(t *testing.T) {
 	dir := t.TempDir()
-	script := "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"--permission-mode\" ]; then\n    echo \"permission-mode unknown\"\n    exit 1\n  fi\n done\nexit 0\n"
 	path := filepath.Join(dir, "mockcmd")
-	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
-		t.Fatalf("write script: %v", err)
+	if runtime.GOOS == "windows" {
+		path += ".cmd"
 	}
+	unix := "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"--permission-mode\" ]; then\n    echo \"permission-mode unknown\"\n    exit 1\n  fi\n done\nexit 0\n"
+	win := "@echo off\r\nset has=0\r\n:loop\r\nif \"%~1\"==\"\" goto done\r\nif \"%~1\"==\"--permission-mode\" set has=1\r\nshift\r\ngoto loop\r\n:done\r\nif \"%has%\"==\"1\" (\r\n  echo permission-mode unknown\r\n  exit /b 1\r\n)\r\nexit /b 0\r\n"
+	writeStub(t, dir, "mockcmd", unix, win)
 
 	called := false
 	opts := runTargetOptions{
