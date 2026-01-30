@@ -105,7 +105,8 @@ func TestInstallPublicKeyAddsNewline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read output: %v", err)
 	}
-	if string(content) != "ssh-ed25519 AAAA\n" {
+	got := strings.ReplaceAll(string(content), "\r\n", "\n")
+	if got != "ssh-ed25519 AAAA\n" {
 		t.Fatalf("expected newline-appended key, got %q", string(content))
 	}
 }

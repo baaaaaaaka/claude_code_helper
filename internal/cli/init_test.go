@@ -218,12 +218,12 @@ func TestNextAvailableKeyPath(t *testing.T) {
 
 func TestNewInitCmdFailsWhenConfigDirUnwritable(t *testing.T) {
 	base := t.TempDir()
-	if err := os.Chmod(base, 0o500); err != nil {
-		t.Fatalf("chmod base: %v", err)
+	blocked := filepath.Join(base, "config")
+	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write blocking file: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(base, 0o700) })
 
-	root := &rootOptions{configPath: filepath.Join(base, "config", "config.json")}
+	root := &rootOptions{configPath: filepath.Join(blocked, "config.json")}
 	cmd := newInitCmd(root)
 	if err := cmd.Execute(); err == nil {
 		t.Fatalf("expected init to fail with unwritable config dir")
