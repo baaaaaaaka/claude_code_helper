@@ -48,6 +48,7 @@ type Options struct {
 	ProxyEnabled    bool
 	ProxyConfigured bool
 	YoloEnabled     bool
+	RefreshInterval time.Duration
 	PersistYolo     func(bool) error
 	DefaultCwd      string
 }
@@ -219,6 +220,24 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 
 	previewCh := make(chan previewEvent, 8)
 
+	if opts.RefreshInterval > 0 {
+		interval := opts.RefreshInterval
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					screen.PostEvent(&uiEvent{when: time.Now(), kind: "refresh"})
+				case <-done:
+					return
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
 	go func() {
 		<-ctx.Done()
 		screen.PostEvent(&uiEvent{when: time.Now(), kind: "quit"})
@@ -266,6 +285,8 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 						goto nextEvent
 					}
 				}
+			case "refresh":
+				refreshStatePreserveSelection(ctx, state, opts)
 			case "preview":
 				for {
 					select {
@@ -585,6 +606,16 @@ func refreshState(ctx context.Context, state *uiState, opts Options) {
 	state.projectState = listState{}
 	state.sessionState = listState{}
 	state.previewState = previewState{}
+}
+
+func refreshStatePreserveSelection(ctx context.Context, state *uiState, opts Options) {
+	projects, err := opts.LoadProjects(ctx)
+	if err != nil {
+		state.loadError = err
+		return
+	}
+	state.loadError = nil
+	state.projects = projects
 }
 
 func computeLayout(screen tcell.Screen, statusHeight int) layout {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -16,6 +17,8 @@ type sessionFileMeta struct {
 	MessageCount int
 	CreatedAt    time.Time
 	ModifiedAt   time.Time
+	ParseErrors  int
+	SnapshotOnly bool
 }
 
 func readSessionFileMeta(filePath string) (sessionFileMeta, error) {
@@ -27,6 +30,8 @@ func readSessionFileMeta(filePath string) (sessionFileMeta, error) {
 	defer f.Close()
 
 	reader := bufio.NewReader(f)
+	snapshotLines := 0
+	nonSnapshotLines := 0
 	for {
 		line, err := reader.ReadBytes('\n')
 		if err != nil && err != io.EOF {
@@ -35,7 +40,17 @@ func readSessionFileMeta(filePath string) (sessionFileMeta, error) {
 		line = bytes.TrimSpace(line)
 		if len(line) > 0 {
 			var env sessionEnvelopeMeta
-			if json.Unmarshal(line, &env) == nil {
+			if json.Unmarshal(line, &env) != nil {
+				meta.ParseErrors++
+			} else {
+				if strings.TrimSpace(env.Type) == "file-history-snapshot" {
+					snapshotLines++
+					if err == io.EOF {
+						break
+					}
+					continue
+				}
+				nonSnapshotLines++
 				if meta.ProjectPath == "" {
 					if cwd := strings.TrimSpace(env.Cwd); cwd != "" {
 						meta.ProjectPath = cwd
@@ -43,7 +58,7 @@ func readSessionFileMeta(filePath string) (sessionFileMeta, error) {
 				}
 				if msg, ok := parseEnvelopeMessage(env.sessionEnvelope); ok {
 					meta.MessageCount++
-					if msg.Role == "user" && meta.FirstPrompt == "" {
+					if msg.Role == "user" && meta.FirstPrompt == "" && !shouldSkipFirstPrompt(msg.Content) {
 						meta.FirstPrompt = msg.Content
 					}
 					if !msg.Timestamp.IsZero() {
@@ -62,6 +77,9 @@ func readSessionFileMeta(filePath string) (sessionFileMeta, error) {
 		}
 	}
 
+	if meta.ParseErrors == 0 && snapshotLines > 0 && nonSnapshotLines == 0 {
+		meta.SnapshotOnly = true
+	}
 	if meta.CreatedAt.IsZero() || meta.ModifiedAt.IsZero() {
 		if st, err := os.Stat(filePath); err == nil {
 			if meta.CreatedAt.IsZero() {
@@ -106,6 +124,22 @@ func readSessionFileSessionID(filePath string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+func resolveSessionIDFromFile(filePath string) (string, error) {
+	sessionID, err := readSessionFileSessionID(filePath)
+	if err != nil {
+		return "", err
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID != "" {
+		return sessionID, nil
+	}
+	name := filepath.Base(filePath)
+	if strings.HasSuffix(name, ".jsonl") {
+		name = strings.TrimSuffix(name, ".jsonl")
+	}
+	return strings.TrimSpace(name), nil
 }
 
 func selectProjectPath(sessions []Session) string {
@@ -162,8 +196,8 @@ func resolveProjectPath(preferred string, sessions []Session) string {
 	if existing := selectProjectPathExisting(sessions); existing != "" {
 		return existing
 	}
-	if preferred != "" {
-		return preferred
+	if sessionPath := selectProjectPath(sessions); sessionPath != "" {
+		return sessionPath
 	}
-	return selectProjectPath(sessions)
+	return preferred
 }

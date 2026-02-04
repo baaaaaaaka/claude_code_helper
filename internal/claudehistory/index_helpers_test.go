@@ -40,17 +40,17 @@ func TestIndexHelpers(t *testing.T) {
 		}
 	})
 
-	t.Run("parseSessions skips sidechain and sorts", func(t *testing.T) {
+	t.Run("parseSessions includes sidechain and sorts", func(t *testing.T) {
 		entries := []sessionIndexEntry{
 			{SessionID: "skip", IsSidechain: true, Modified: "2026-01-02T00:00:00Z"},
 			{SessionID: "first", Modified: "2026-01-01T00:00:00Z"},
 			{SessionID: "second", Modified: "2026-01-03T00:00:00Z"},
 		}
 		sessions := parseSessions(entries)
-		if len(sessions) != 2 {
-			t.Fatalf("expected 2 sessions, got %d", len(sessions))
+		if len(sessions) != 3 {
+			t.Fatalf("expected 3 sessions, got %d", len(sessions))
 		}
-		if sessions[0].SessionID != "second" || sessions[1].SessionID != "first" {
+		if sessions[0].SessionID != "second" || sessions[1].SessionID != "skip" || sessions[2].SessionID != "first" {
 			t.Fatalf("expected sorted by modified desc, got %#v", sessions)
 		}
 	})

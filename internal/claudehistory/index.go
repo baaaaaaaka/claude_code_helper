@@ -101,15 +101,21 @@ func (idx sessionsIndex) EntriesProjectPath() string {
 func parseSessions(entries []sessionIndexEntry) []Session {
 	sessions := make([]Session, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsSidechain {
-			continue
+		summary := entry.Summary
+		firstPrompt := entry.FirstPrompt
+		if entry.IsSidechain && strings.TrimSpace(summary) == "" && strings.TrimSpace(firstPrompt) == "" {
+			if strings.HasPrefix(entry.SessionID, "agent-") {
+				summary = entry.SessionID
+			} else {
+				summary = "Subagent session"
+			}
 		}
 		created := parseTime(entry.Created)
 		modified := parseTime(entry.Modified)
 		sessions = append(sessions, Session{
 			SessionID:    entry.SessionID,
-			Summary:      entry.Summary,
-			FirstPrompt:  entry.FirstPrompt,
+			Summary:      summary,
+			FirstPrompt:  firstPrompt,
 			MessageCount: entry.MessageCount,
 			CreatedAt:    created,
 			ModifiedAt:   modified,
@@ -135,6 +141,190 @@ func parseTime(raw string) time.Time {
 		return t
 	}
 	return time.Time{}
+}
+
+func scanSessionsFromFiles(dir string, history historyIndex, recursive bool) ([]Session, string, error) {
+	files, err := collectSessionFiles(dir, recursive)
+	if err != nil {
+		return nil, "", err
+	}
+	var firstErr error
+	sessions := make([]Session, 0, len(files))
+	sessionIndex := map[string]int{}
+	for _, filePath := range files {
+		name := filepath.Base(filePath)
+		if !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		sessionID, err := resolveSessionIDFromFileCached(filePath)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("read session id %s: %w", filePath, err)
+			}
+			continue
+		}
+		if strings.TrimSpace(sessionID) == "" {
+			continue
+		}
+		meta, err := readSessionFileMetaCached(filePath)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("read session %s: %w", filePath, err)
+			}
+			continue
+		}
+		if info, ok := history.lookup(sessionID); ok {
+			if info.ProjectPath != "" {
+				meta.ProjectPath = info.ProjectPath
+			}
+			if meta.FirstPrompt == "" && info.FirstPrompt != "" {
+				meta.FirstPrompt = info.FirstPrompt
+			}
+			if meta.CreatedAt.IsZero() && !info.FirstPromptTime.IsZero() {
+				meta.CreatedAt = info.FirstPromptTime
+			}
+			if meta.ModifiedAt.IsZero() && !info.FirstPromptTime.IsZero() {
+				meta.ModifiedAt = info.FirstPromptTime
+			}
+		}
+		session := Session{
+			SessionID:    sessionID,
+			Summary:      "",
+			FirstPrompt:  meta.FirstPrompt,
+			MessageCount: meta.MessageCount,
+			CreatedAt:    meta.CreatedAt,
+			ModifiedAt:   meta.ModifiedAt,
+			ProjectPath:  strings.TrimSpace(meta.ProjectPath),
+			FilePath:     filePath,
+		}
+		if existingIdx, ok := sessionIndex[sessionID]; ok {
+			if session.ModifiedAt.After(sessions[existingIdx].ModifiedAt) {
+				sessions[existingIdx] = session
+			}
+			continue
+		}
+		sessionIndex[sessionID] = len(sessions)
+		sessions = append(sessions, session)
+	}
+
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].ModifiedAt.After(sessions[j].ModifiedAt)
+	})
+	projectPath := resolveProjectPath("", sessions)
+	if projectPath != "" {
+		for i := range sessions {
+			if strings.TrimSpace(sessions[i].ProjectPath) == "" {
+				sessions[i].ProjectPath = projectPath
+			}
+		}
+	}
+	return sessions, projectPath, firstErr
+}
+
+func mergeSessionMetadata(base Session, other Session) Session {
+	basePath := strings.TrimSpace(base.FilePath)
+	otherPath := strings.TrimSpace(other.FilePath)
+	baseFileOK := isFile(basePath)
+	otherFileOK := isFile(otherPath)
+	if !baseFileOK && otherFileOK {
+		base.FilePath = otherPath
+	} else if basePath == "" && otherPath != "" {
+		base.FilePath = otherPath
+	}
+
+	if base.Summary == "" && other.Summary != "" {
+		base.Summary = other.Summary
+	}
+	if base.FirstPrompt == "" && other.FirstPrompt != "" {
+		base.FirstPrompt = other.FirstPrompt
+	}
+	if other.MessageCount > base.MessageCount {
+		base.MessageCount = other.MessageCount
+	}
+
+	if base.CreatedAt.IsZero() {
+		base.CreatedAt = other.CreatedAt
+	} else if !other.CreatedAt.IsZero() && other.CreatedAt.Before(base.CreatedAt) {
+		base.CreatedAt = other.CreatedAt
+	}
+
+	if base.ModifiedAt.IsZero() {
+		base.ModifiedAt = other.ModifiedAt
+	} else if !other.ModifiedAt.IsZero() && other.ModifiedAt.After(base.ModifiedAt) {
+		base.ModifiedAt = other.ModifiedAt
+	}
+
+	baseProjectPath := strings.TrimSpace(base.ProjectPath)
+	otherProjectPath := strings.TrimSpace(other.ProjectPath)
+	if baseProjectPath == "" && otherProjectPath != "" {
+		base.ProjectPath = other.ProjectPath
+	} else if baseProjectPath != "" && !isDir(baseProjectPath) && isDir(otherProjectPath) {
+		base.ProjectPath = other.ProjectPath
+	}
+
+	return base
+}
+
+func mergeSessions(indexSessions []Session, scannedSessions []Session) []Session {
+	merged := make(map[string]Session, len(indexSessions)+len(scannedSessions))
+	for _, sess := range indexSessions {
+		sessionID := strings.TrimSpace(sess.SessionID)
+		if sessionID == "" {
+			continue
+		}
+		merged[sessionID] = sess
+	}
+	for _, sess := range scannedSessions {
+		sessionID := strings.TrimSpace(sess.SessionID)
+		if sessionID == "" {
+			continue
+		}
+		if existing, ok := merged[sessionID]; ok {
+			merged[sessionID] = mergeSessionMetadata(existing, sess)
+			continue
+		}
+		merged[sessionID] = sess
+	}
+	out := make([]Session, 0, len(merged))
+	for _, sess := range merged {
+		out = append(out, sess)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].ModifiedAt.After(out[j].ModifiedAt)
+	})
+	return out
+}
+
+func dropAttachedSubagentSessions(sessions []Session) []Session {
+	if len(sessions) == 0 {
+		return sessions
+	}
+	subagentFiles := map[string]bool{}
+	subagentIDs := map[string]bool{}
+	for _, sess := range sessions {
+		for _, sub := range sess.Subagents {
+			if path := strings.TrimSpace(sub.FilePath); path != "" {
+				subagentFiles[path] = true
+			}
+			if id := strings.TrimSpace(sub.AgentID); id != "" {
+				subagentIDs["agent-"+id] = true
+			}
+		}
+	}
+	if len(subagentFiles) == 0 && len(subagentIDs) == 0 {
+		return sessions
+	}
+	out := make([]Session, 0, len(sessions))
+	for _, sess := range sessions {
+		if path := strings.TrimSpace(sess.FilePath); path != "" && subagentFiles[path] {
+			continue
+		}
+		if subagentIDs[strings.TrimSpace(sess.SessionID)] {
+			continue
+		}
+		out = append(out, sess)
+	}
+	return out
 }
 
 func loadProject(projectsDir string, key string, history historyIndex) (Project, error) {
@@ -166,6 +356,14 @@ func loadProject(projectsDir string, key string, history historyIndex) (Project,
 				projectPath = selectProjectPath(sessions)
 			}
 			sessions, validFiles, rehydrateErr := rehydrateSessionsFromFiles(dir, sessions, true)
+			scannedSessions, scannedPath, scanErr := scanSessionsFromFiles(dir, history, true)
+			if validFiles == 0 && len(scannedSessions) > 0 {
+				sessions = nil
+			}
+			sessions = mergeSessions(sessions, scannedSessions)
+			if strings.TrimSpace(projectPath) == "" {
+				projectPath = strings.TrimSpace(scannedPath)
+			}
 			projectPath = resolveProjectPath(projectPath, sessions)
 			if projectPath != "" {
 				for i := range sessions {
@@ -174,31 +372,14 @@ func loadProject(projectsDir string, key string, history historyIndex) (Project,
 					}
 				}
 			}
-			if len(sessions) == 0 || validFiles == 0 {
-				scanned, scanErr := loadProjectFromSessionFilesWithOptions(dir, key, history, true)
-				if scanErr == nil && len(scanned.Sessions) > 0 {
-					scanned.Path = resolveProjectPath(projectPath, scanned.Sessions)
-					if scanned.Path != "" {
-						for i := range scanned.Sessions {
-							if strings.TrimSpace(scanned.Sessions[i].ProjectPath) == "" {
-								scanned.Sessions[i].ProjectPath = scanned.Path
-							}
-						}
-					}
-					return scanned, nil
-				}
-				if scanErr != nil {
-					return Project{
-						Key:      key,
-						Path:     projectPath,
-						Sessions: sessions,
-					}, scanErr
-				}
-			}
 			sessions, attachErr := attachSubagents(dir, sessions, true)
 			if rehydrateErr == nil && attachErr != nil {
 				rehydrateErr = attachErr
 			}
+			if rehydrateErr == nil && scanErr != nil {
+				rehydrateErr = scanErr
+			}
+			sessions = dropAttachedSubagentSessions(sessions)
 			sessions = filterEmptySessions(sessions)
 			return Project{
 				Key:      key,
@@ -223,72 +404,12 @@ func loadProjectFromSessionFiles(dir string, key string, history historyIndex) (
 }
 
 func loadProjectFromSessionFilesWithOptions(dir string, key string, history historyIndex, recursive bool) (Project, error) {
-	files, err := collectSessionFiles(dir, recursive)
-	if err != nil {
-		return Project{Key: key}, err
-	}
-	var firstErr error
-	var sessions []Session
-	seen := map[string]bool{}
-	for _, filePath := range files {
-		name := filepath.Base(filePath)
-		if !strings.HasSuffix(name, ".jsonl") {
-			continue
-		}
-		sessionID := strings.TrimSuffix(name, ".jsonl")
-		if strings.TrimSpace(sessionID) == "" || seen[sessionID] {
-			continue
-		}
-		seen[sessionID] = true
-		meta, err := readSessionFileMeta(filePath)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("read session %s: %w", filePath, err)
-			}
-			continue
-		}
-		if info, ok := history.lookup(sessionID); ok {
-			if info.ProjectPath != "" {
-				meta.ProjectPath = info.ProjectPath
-			}
-			if meta.FirstPrompt == "" && info.FirstPrompt != "" {
-				meta.FirstPrompt = info.FirstPrompt
-			}
-			if meta.CreatedAt.IsZero() && !info.FirstPromptTime.IsZero() {
-				meta.CreatedAt = info.FirstPromptTime
-			}
-			if meta.ModifiedAt.IsZero() && !info.FirstPromptTime.IsZero() {
-				meta.ModifiedAt = info.FirstPromptTime
-			}
-		}
-		sessions = append(sessions, Session{
-			SessionID:    sessionID,
-			Summary:      "",
-			FirstPrompt:  meta.FirstPrompt,
-			MessageCount: meta.MessageCount,
-			CreatedAt:    meta.CreatedAt,
-			ModifiedAt:   meta.ModifiedAt,
-			ProjectPath:  strings.TrimSpace(meta.ProjectPath),
-			FilePath:     filePath,
-		})
-	}
-
-	sort.Slice(sessions, func(i, j int) bool {
-		return sessions[i].ModifiedAt.After(sessions[j].ModifiedAt)
-	})
-	projectPath := resolveProjectPath("", sessions)
-	if projectPath != "" {
-		for i := range sessions {
-			if strings.TrimSpace(sessions[i].ProjectPath) == "" {
-				sessions[i].ProjectPath = projectPath
-			}
-		}
-	}
-
+	sessions, projectPath, firstErr := scanSessionsFromFiles(dir, history, recursive)
 	sessions, attachErr := attachSubagents(dir, sessions, recursive)
 	if firstErr == nil && attachErr != nil {
 		firstErr = attachErr
 	}
+	sessions = dropAttachedSubagentSessions(sessions)
 	sessions = filterEmptySessions(sessions)
 	return Project{
 		Key:      key,

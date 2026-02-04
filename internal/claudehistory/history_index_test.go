@@ -23,7 +23,7 @@ func TestHistoryIndexHelpers(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "history.jsonl")
 		content := `not-json
-{"display":"/command","timestamp":1700000000000,"project":"/tmp/project","sessionId":"sess-1"}
+{"display":"/clear","timestamp":1700000000000,"project":"/tmp/project","sessionId":"sess-1"}
 {"display":"hello","timestamp":1700000001000,"project":"/tmp/project","sessionId":"sess-1"}
 {"display":"later","timestamp":1700000002000,"project":"/tmp/project","sessionId":"sess-1"}`
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
@@ -75,12 +75,15 @@ func TestHistoryIndexHelpers(t *testing.T) {
 		}
 	})
 
-	t.Run("isHistoryCommandDisplay trims whitespace", func(t *testing.T) {
-		if !isHistoryCommandDisplay(" /cmd") {
-			t.Fatalf("expected command display to be true")
+	t.Run("shouldSkipFirstPrompt handles commands and warmup", func(t *testing.T) {
+		if !shouldSkipFirstPrompt(" /clear") {
+			t.Fatalf("expected /clear to be skipped")
 		}
-		if isHistoryCommandDisplay("hello") {
-			t.Fatalf("expected non-command display to be false")
+		if shouldSkipFirstPrompt("/help") {
+			t.Fatalf("expected /help to be allowed")
+		}
+		if !shouldSkipFirstPrompt("Warmup") {
+			t.Fatalf("expected Warmup to be skipped")
 		}
 	})
 }

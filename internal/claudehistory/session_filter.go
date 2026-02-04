@@ -17,6 +17,13 @@ func filterEmptySessions(sessions []Session) []Session {
 }
 
 func isEmptySession(session Session) bool {
+	if isFile(session.FilePath) {
+		meta, err := readSessionFileMetaCached(session.FilePath)
+		if err == nil && meta.SnapshotOnly {
+			return true
+		}
+		return false
+	}
 	if session.MessageCount > 0 {
 		return false
 	}

@@ -160,7 +160,7 @@ func rehydrateSessionsFromFiles(dir string, sessions []Session, recursive bool) 
 		}
 
 		validFiles++
-		meta, err := readSessionFileMeta(filePath)
+		meta, err := readSessionFileMetaCached(filePath)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("read session %s: %w", filePath, err)

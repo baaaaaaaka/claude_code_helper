@@ -29,5 +29,5 @@ func runDefaultTui(cmd *cobra.Command, root *rootOptions) error {
 		profileRef = before[0]
 	}
 
-	return runHistoryTui(cmd, root, profileRef, "", "")
+	return runHistoryTui(cmd, root, profileRef, "", "", defaultRefreshInterval)
 }

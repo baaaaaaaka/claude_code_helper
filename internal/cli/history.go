@@ -22,6 +22,8 @@ var (
 	runClaudeNewSessionFn = runClaudeNewSession
 )
 
+const defaultRefreshInterval = 5 * time.Second
+
 func newHistoryCmd(root *rootOptions) *cobra.Command {
 	var claudeDir string
 	var claudePath string
@@ -45,14 +47,16 @@ func newHistoryCmd(root *rootOptions) *cobra.Command {
 }
 
 func newHistoryTuiCmd(root *rootOptions, claudeDir *string, claudePath *string, profileRef *string) *cobra.Command {
+	var refreshInterval time.Duration
 	cmd := &cobra.Command{
 		Use:   "tui",
 		Short: "Browse history in a terminal UI",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runHistoryTui(cmd, root, *profileRef, *claudeDir, *claudePath)
+			return runHistoryTui(cmd, root, *profileRef, *claudeDir, *claudePath, refreshInterval)
 		},
 	}
+	cmd.Flags().DurationVar(&refreshInterval, "refresh-interval", defaultRefreshInterval, "Auto-refresh interval (0 to disable)")
 	return cmd
 }
 
@@ -169,7 +173,7 @@ func newHistoryOpenCmd(root *rootOptions, claudeDir *string, claudePath *string,
 	return cmd
 }
 
-func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, claudeDir string, claudePath string) error {
+func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, claudeDir string, claudePath string, refreshInterval time.Duration) error {
 	ctx := cmd.Context()
 	store, err := config.NewStore(root.configPath)
 	if err != nil {
@@ -212,6 +216,7 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 			ProxyEnabled:    useProxy,
 			ProxyConfigured: len(cfg.Profiles) > 0,
 			YoloEnabled:     useYolo,
+			RefreshInterval: refreshInterval,
 			DefaultCwd:      defaultCwd,
 			PersistYolo: func(enabled bool) error {
 				return persistYoloEnabled(store, enabled)

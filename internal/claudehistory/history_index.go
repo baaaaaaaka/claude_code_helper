@@ -62,7 +62,7 @@ func loadHistoryIndex(root string) (historyIndex, error) {
 					info.ProjectPath = project
 				}
 				display := strings.TrimSpace(entry.Display)
-				if display != "" && !isHistoryCommandDisplay(display) {
+				if display != "" && !shouldSkipFirstPrompt(display) {
 					ts := historyTimestamp(entry.Timestamp)
 					if info.FirstPrompt == "" || (!ts.IsZero() && (info.FirstPromptTime.IsZero() || ts.Before(info.FirstPromptTime))) {
 						info.FirstPrompt = display

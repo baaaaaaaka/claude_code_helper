@@ -91,6 +91,34 @@ func TestAttachSubagentsSortsByModified(t *testing.T) {
 	}
 }
 
+func TestAttachSubagentsRecursiveFindsSubagentsDir(t *testing.T) {
+	root := t.TempDir()
+	subagentsDir := filepath.Join(root, "sess-main", "subagents")
+	if err := os.MkdirAll(subagentsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	agentPath := filepath.Join(subagentsDir, "agent-abc.jsonl")
+	content := `{"type":"user","message":{"role":"user","content":"Nested"},"timestamp":"2026-01-02T00:00:00Z","cwd":"/tmp/project","sessionId":"agent-session-abc","isSidechain":true}`
+	if err := os.WriteFile(agentPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write agent: %v", err)
+	}
+
+	sessions := []Session{{SessionID: "sess-main"}}
+	out, err := attachSubagents(root, sessions, true)
+	if err != nil {
+		t.Fatalf("attachSubagents error: %v", err)
+	}
+	if len(out) != 1 || len(out[0].Subagents) != 1 {
+		t.Fatalf("expected 1 subagent, got %#v", out)
+	}
+	if out[0].Subagents[0].AgentID != "abc" {
+		t.Fatalf("unexpected agent id: %q", out[0].Subagents[0].AgentID)
+	}
+	if out[0].Subagents[0].ParentSessionID != "sess-main" {
+		t.Fatalf("unexpected parent session id: %q", out[0].Subagents[0].ParentSessionID)
+	}
+}
+
 func TestAttachSubagentsEmptySessions(t *testing.T) {
 	out, err := attachSubagents(t.TempDir(), nil, false)
 	if err != nil {

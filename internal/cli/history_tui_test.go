@@ -31,7 +31,7 @@ func TestRunHistoryTuiFailsWhenConfigDirReadOnly(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 
-	if err := runHistoryTui(cmd, root, "", "", ""); err == nil {
+	if err := runHistoryTui(cmd, root, "", "", "", 0); err == nil {
 		t.Fatalf("expected error when config dir is read-only")
 	}
 }
@@ -83,7 +83,7 @@ func TestRunHistoryTuiRunsNewSession(t *testing.T) {
 
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
-	if err := runHistoryTui(cmd, &rootOptions{configPath: store.Path()}, "", "", claudePath); err != nil {
+	if err := runHistoryTui(cmd, &rootOptions{configPath: store.Path()}, "", "", claudePath, 0); err != nil {
 		t.Fatalf("runHistoryTui error: %v", err)
 	}
 	if !calledNew {
@@ -144,7 +144,7 @@ func TestRunHistoryTuiRunsSession(t *testing.T) {
 
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
-	if err := runHistoryTui(cmd, &rootOptions{configPath: store.Path()}, "", "", claudePath); err != nil {
+	if err := runHistoryTui(cmd, &rootOptions{configPath: store.Path()}, "", "", claudePath, 0); err != nil {
 		t.Fatalf("runHistoryTui error: %v", err)
 	}
 	if !called {
@@ -180,7 +180,7 @@ func TestRunHistoryTuiHandlesUpdateRequest(t *testing.T) {
 
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
-	if err := runHistoryTui(cmd, &rootOptions{configPath: store.Path()}, "", "", claudePath); err != nil {
+	if err := runHistoryTui(cmd, &rootOptions{configPath: store.Path()}, "", "", claudePath, 0); err != nil {
 		t.Fatalf("runHistoryTui error: %v", err)
 	}
 }
@@ -211,7 +211,7 @@ func TestRunHistoryTuiHandlesProxyToggle(t *testing.T) {
 
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
-	if err := runHistoryTui(cmd, &rootOptions{configPath: store.Path()}, "", "", claudePath); err != nil {
+	if err := runHistoryTui(cmd, &rootOptions{configPath: store.Path()}, "", "", claudePath, 0); err != nil {
 		t.Fatalf("runHistoryTui error: %v", err)
 	}
 }

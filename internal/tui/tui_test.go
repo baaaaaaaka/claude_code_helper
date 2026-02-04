@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -473,6 +474,26 @@ func TestRefreshStateUpdatesOrPreserves(t *testing.T) {
 			t.Fatalf("expected state to be reset, got %#v %#v %#v", state.projectState, state.sessionState, state.previewState)
 		}
 	})
+
+	t.Run("preserves selection state on auto refresh", func(t *testing.T) {
+		state := newTestState([]claudehistory.Project{{Key: "one"}, {Key: "two"}})
+		state.projectState.selected = 1
+		state.sessionState.selected = 2
+		state.sessionState.scroll = 1
+		state.previewState.scroll = 5
+		opts := Options{
+			LoadProjects: func(ctx context.Context) ([]claudehistory.Project, error) {
+				return []claudehistory.Project{{Key: "one"}, {Key: "two"}}, nil
+			},
+		}
+		refreshStatePreserveSelection(context.Background(), state, opts)
+		if state.loadError != nil {
+			t.Fatalf("expected no error, got %v", state.loadError)
+		}
+		if state.projectState.selected != 1 || state.sessionState.selected != 2 || state.sessionState.scroll != 1 || state.previewState.scroll != 5 {
+			t.Fatalf("expected selection to be preserved, got %#v %#v %#v", state.projectState, state.sessionState, state.previewState)
+		}
+	})
 }
 
 func TestTextHelpers(t *testing.T) {
@@ -760,6 +781,132 @@ func TestSelectSessionQuit(t *testing.T) {
 	}
 	if selection != nil {
 		t.Fatalf("expected nil selection on quit")
+	}
+}
+
+func TestSelectSessionRefreshInterval(t *testing.T) {
+	screen := tcell.NewSimulationScreen("UTF-8")
+	prevNewScreen := newScreen
+	newScreen = func() (tcell.Screen, error) {
+		return &sizedScreen{Screen: screen}, nil
+	}
+	t.Cleanup(func() { newScreen = prevNewScreen })
+
+	var mu sync.Mutex
+	calls := 0
+	refreshCh := make(chan struct{})
+	var once sync.Once
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := SelectSession(ctx, Options{
+			LoadProjects: func(context.Context) ([]claudehistory.Project, error) {
+				mu.Lock()
+				calls++
+				if calls >= 2 {
+					once.Do(func() { close(refreshCh) })
+				}
+				mu.Unlock()
+				return nil, nil
+			},
+			RefreshInterval: 10 * time.Millisecond,
+		})
+		done <- err
+	}()
+
+	select {
+	case <-refreshCh:
+	case <-time.After(1 * time.Second):
+		t.Fatalf("timeout waiting for refresh")
+	}
+
+	screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'q', 0))
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("SelectSession error: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatalf("timeout waiting for SelectSession to exit")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if calls < 2 {
+		t.Fatalf("expected LoadProjects to refresh, got %d calls", calls)
+	}
+}
+
+func TestSelectSessionAutoRefreshPreservesSelection(t *testing.T) {
+	screen := tcell.NewSimulationScreen("UTF-8")
+	prevNewScreen := newScreen
+	newScreen = func() (tcell.Screen, error) {
+		return &sizedScreen{Screen: screen}, nil
+	}
+	t.Cleanup(func() { newScreen = prevNewScreen })
+
+	projectPath1 := t.TempDir()
+	projectPath2 := t.TempDir()
+	projects := []claudehistory.Project{
+		{
+			Key:  "proj-1",
+			Path: projectPath1,
+			Sessions: []claudehistory.Session{{
+				SessionID:   "sess-1",
+				ProjectPath: projectPath1,
+				FilePath:    filepath.Join(projectPath1, "sess-1.jsonl"),
+			}},
+		},
+		{
+			Key:  "proj-2",
+			Path: projectPath2,
+			Sessions: []claudehistory.Session{{
+				SessionID:   "sess-2",
+				ProjectPath: projectPath2,
+				FilePath:    filepath.Join(projectPath2, "sess-2.jsonl"),
+			}},
+		},
+	}
+
+	var mu sync.Mutex
+	calls := 0
+	refreshCh := make(chan struct{})
+	var once sync.Once
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'j', 0))
+		screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'l', 0))
+		screen.PostEvent(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+
+		<-refreshCh
+		screen.PostEvent(tcell.NewEventKey(tcell.KeyEnter, 0, 0))
+	}()
+
+	selection, err := SelectSession(ctx, Options{
+		LoadProjects: func(context.Context) ([]claudehistory.Project, error) {
+			mu.Lock()
+			calls++
+			if calls >= 2 {
+				once.Do(func() { close(refreshCh) })
+			}
+			mu.Unlock()
+			return projects, nil
+		},
+		RefreshInterval: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("SelectSession error: %v", err)
+	}
+	if selection == nil || selection.Session.SessionID != "sess-2" {
+		t.Fatalf("unexpected selection: %#v", selection)
 	}
 }
 

@@ -1,6 +1,10 @@
 package claudehistory
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestFilterEmptySessionsDropsEmpty(t *testing.T) {
 	sessions := []Session{{SessionID: "empty"}}
@@ -37,8 +41,43 @@ func TestFilterEmptySessionsKeepsSubagents(t *testing.T) {
 	}
 }
 
+func TestFilterEmptySessionsKeepsExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sess.jsonl")
+	if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	sessions := []Session{{SessionID: "file", FilePath: path}}
+	filtered := filterEmptySessions(sessions)
+	if len(filtered) != 1 {
+		t.Fatalf("expected file-backed session to remain, got %d", len(filtered))
+	}
+}
+
+func TestFilterEmptySessionsDropsSnapshotOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sess.jsonl")
+	content := `{"type":"file-history-snapshot","messageId":"snap-1","snapshot":{"messageId":"snap-1","trackedFileBackups":{},"timestamp":"2026-01-01T00:00:00Z"},"isSnapshotUpdate":false}`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	sessions := []Session{{SessionID: "file", FilePath: path}}
+	filtered := filterEmptySessions(sessions)
+	if len(filtered) != 0 {
+		t.Fatalf("expected snapshot-only session to be dropped, got %d", len(filtered))
+	}
+}
+
 func TestIsEmptySessionAndFilterOrder(t *testing.T) {
 	t.Run("isEmptySession respects message count and trimmed fields", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "sess.jsonl")
+		if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+			t.Fatalf("write file: %v", err)
+		}
+		if isEmptySession(Session{FilePath: path}) {
+			t.Fatalf("expected file-backed session to be non-empty")
+		}
 		if isEmptySession(Session{MessageCount: 1}) {
 			t.Fatalf("expected message count to mark session as non-empty")
 		}

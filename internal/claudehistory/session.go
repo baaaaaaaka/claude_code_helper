@@ -41,6 +41,7 @@ func ReadSessionMessages(filePath string, maxMessages int) ([]Message, error) {
 	defer f.Close()
 
 	var ring []Message
+	var fallback []Message
 	reader := bufio.NewReader(f)
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -50,16 +51,19 @@ func ReadSessionMessages(filePath string, maxMessages int) ([]Message, error) {
 		line = bytes.TrimSpace(line)
 		if len(line) > 0 {
 			if msg, ok := parseLineMessage(line); ok {
-				if maxMessages > 0 && len(ring) >= maxMessages {
-					ring = append(ring[1:], msg)
-				} else {
-					ring = append(ring, msg)
+				appendMessage(&ring, msg, maxMessages)
+			} else {
+				for _, fb := range parseLineFallbackMessages(line) {
+					appendMessage(&fallback, fb, maxMessages)
 				}
 			}
 		}
 		if err == io.EOF {
 			break
 		}
+	}
+	if len(ring) == 0 && len(fallback) > 0 {
+		return fallback, nil
 	}
 	return ring, nil
 }
@@ -76,6 +80,14 @@ func FormatMessages(messages []Message, maxCharsPerMessage int) string {
 			role = "User"
 		case "assistant":
 			role = "Assistant"
+		case "thinking":
+			role = "Thinking"
+		case "tool":
+			role = "Tool"
+		case "tool_result":
+			role = "Tool Result"
+		case "meta":
+			role = "Meta"
 		}
 		b.WriteString(role)
 		b.WriteString(":")
@@ -132,12 +144,148 @@ func FormatSession(session Session, messages []Message) string {
 	return b.String()
 }
 
+func appendMessage(ring *[]Message, msg Message, maxMessages int) {
+	if maxMessages > 0 && len(*ring) >= maxMessages {
+		*ring = append((*ring)[1:], msg)
+		return
+	}
+	*ring = append(*ring, msg)
+}
+
 func parseLineMessage(line []byte) (Message, bool) {
 	var env sessionEnvelope
 	if err := json.Unmarshal(line, &env); err != nil {
 		return Message{}, false
 	}
 	return parseEnvelopeMessage(env)
+}
+
+func parseLineFallbackMessages(line []byte) []Message {
+	var env sessionEnvelope
+	if err := json.Unmarshal(line, &env); err != nil {
+		return nil
+	}
+	ts := parseTime(env.Timestamp)
+	if env.IsMeta || env.Type == "file-history-snapshot" {
+		return []Message{{
+			Role:      "meta",
+			Content:   string(line),
+			Timestamp: ts,
+		}}
+	}
+	if len(env.Message) == 0 {
+		return nil
+	}
+	var msg sessionMessage
+	if err := json.Unmarshal(env.Message, &msg); err != nil {
+		return nil
+	}
+	return fallbackMessagesFromContent(msg.Content, ts)
+}
+
+func fallbackMessagesFromContent(raw json.RawMessage, timestamp time.Time) []Message {
+	if len(raw) == 0 {
+		return nil
+	}
+	var payload any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil
+	}
+	var out []Message
+	switch content := payload.(type) {
+	case []any:
+		for _, item := range content {
+			out = append(out, fallbackMessageFromItem(item, timestamp)...)
+		}
+	case map[string]any:
+		out = append(out, fallbackMessageFromItem(content, timestamp)...)
+	}
+	return out
+}
+
+func fallbackMessageFromItem(item any, timestamp time.Time) []Message {
+	entry, ok := item.(map[string]any)
+	if !ok {
+		return nil
+	}
+	typ, _ := entry["type"].(string)
+	switch typ {
+	case "thinking":
+		if text, ok := entry["thinking"].(string); ok && strings.TrimSpace(text) != "" {
+			return []Message{{Role: "thinking", Content: text, Timestamp: timestamp}}
+		}
+		if text, ok := entry["text"].(string); ok && strings.TrimSpace(text) != "" {
+			return []Message{{Role: "thinking", Content: text, Timestamp: timestamp}}
+		}
+	case "tool_use":
+		name, _ := entry["name"].(string)
+		id, _ := entry["id"].(string)
+		label := "Tool use"
+		if name != "" {
+			label = label + " " + name
+		}
+		if id != "" {
+			label = label + " (" + id + ")"
+		}
+		content := label
+		if input, ok := entry["input"]; ok {
+			if formatted := formatJSONBlock(input); formatted != "" {
+				content = content + "\n" + formatted
+			}
+		}
+		return []Message{{Role: "tool", Content: content, Timestamp: timestamp}}
+	case "tool_result":
+		id, _ := entry["tool_use_id"].(string)
+		label := "Tool result"
+		if isErr, ok := entry["is_error"].(bool); ok && isErr {
+			label = "Tool result error"
+		}
+		if id != "" {
+			label = label + " (" + id + ")"
+		}
+		content := label
+		if text := extractToolResultText(entry["content"]); text != "" {
+			content = content + "\n" + text
+		} else if formatted := formatJSONBlock(entry["content"]); formatted != "" {
+			content = content + "\n" + formatted
+		}
+		return []Message{{Role: "tool_result", Content: content, Timestamp: timestamp}}
+	}
+	return nil
+}
+
+func extractToolResultText(content any) string {
+	switch raw := content.(type) {
+	case string:
+		return raw
+	case []any:
+		parts := []string{}
+		for _, item := range raw {
+			switch v := item.(type) {
+			case string:
+				parts = append(parts, v)
+			case map[string]any:
+				if typ, _ := v["type"].(string); typ == "text" {
+					if txt, ok := v["text"].(string); ok {
+						parts = append(parts, txt)
+					}
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	return ""
+}
+
+func formatJSONBlock(value any) string {
+	if value == nil {
+		return ""
+	}
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 func parseEnvelopeMessage(env sessionEnvelope) (Message, bool) {

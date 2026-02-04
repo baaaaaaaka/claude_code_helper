@@ -37,7 +37,7 @@ func attachSubagents(dir string, sessions []Session, recursive bool) ([]Session,
 		if !ok {
 			continue
 		}
-		meta, err := readSessionFileMeta(filePath)
+		meta, err := readSessionFileMetaCached(filePath)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("read session %s: %w", filePath, err)
@@ -78,8 +78,11 @@ func parentSessionIDForAgentFile(filePath string) (string, error) {
 	if strings.EqualFold(filepath.Base(dir), "subagents") {
 		parent := strings.TrimSpace(filepath.Base(filepath.Dir(dir)))
 		if parent != "" {
+			if _, err := readSessionFileSessionIDCached(filePath); err != nil {
+				return "", err
+			}
 			return parent, nil
 		}
 	}
-	return readSessionFileSessionID(filePath)
+	return readSessionFileSessionIDCached(filePath)
 }
