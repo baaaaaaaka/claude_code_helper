@@ -4,14 +4,15 @@ set -euo pipefail
 # End-to-end smoke for CentOS 7:
 # - starts local sshd
 # - runs claude-proxy run ... claude --version
-# - verifies claude-proxy auto-applies glibc compat patch via patchelf
+# - verifies claude-proxy auto-downloads and applies glibc compat patch via patchelf
 
 CLAUDE_PROXY_BIN="${CLAUDE_PROXY_BIN:-/dist/claude-proxy}"
-GLIBC_BUNDLE_PATH="${GLIBC_BUNDLE_PATH:-/bundle.tar.xz}"
 CLAUDE_VERSION="${CLAUDE_VERSION:-2.1.38}"
 CLAUDE_BUCKET="${CLAUDE_BUCKET:-https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases}"
 TEST_USER="${TEST_USER:-testuser}"
 SSHD_PORT="${SSHD_PORT:-2222}"
+GLIBC_COMPAT_REPO="${GLIBC_COMPAT_REPO:-}"
+GLIBC_COMPAT_TAG="${GLIBC_COMPAT_TAG:-}"
 
 sshd_pid=""
 
@@ -99,13 +100,8 @@ prepare_runtime() {
     echo "missing claude-proxy binary at $CLAUDE_PROXY_BIN" >&2
     exit 1
   fi
-  if [[ ! -f "$GLIBC_BUNDLE_PATH" ]]; then
-    echo "missing glibc bundle at $GLIBC_BUNDLE_PATH" >&2
-    exit 1
-  fi
 
-  mkdir -p /opt/compat /tmp/claude
-  tar -C /opt/compat -xJf "$GLIBC_BUNDLE_PATH"
+  mkdir -p /tmp/claude
 
   CLAUDE_URL="${CLAUDE_BUCKET}/${CLAUDE_VERSION}/linux-x64/claude"
   curl -fsSL "$CLAUDE_URL" -o /tmp/claude/claude
@@ -113,12 +109,6 @@ prepare_runtime() {
 }
 
 run_clp_smoke() {
-  local glibc_root="/opt/compat/glibc-2.31"
-  if [[ ! -d "$glibc_root/lib" ]]; then
-    echo "missing expected glibc runtime dir: $glibc_root/lib" >&2
-    exit 1
-  fi
-
   cat > /tmp/config.json <<EOF
 {
   "version": 1,
@@ -148,11 +138,18 @@ run_clp_smoke() {
 }
 EOF
 
+  local -a run_env=("CLAUDE_PROXY_GLIBC_COMPAT=1")
+  if [[ -n "$GLIBC_COMPAT_REPO" ]]; then
+    run_env+=("CLAUDE_PROXY_GLIBC_COMPAT_REPO=$GLIBC_COMPAT_REPO")
+  fi
+  if [[ -n "$GLIBC_COMPAT_TAG" ]]; then
+    run_env+=("CLAUDE_PROXY_GLIBC_COMPAT_TAG=$GLIBC_COMPAT_TAG")
+  fi
+
   set +e
   run_out="$(
-    CLAUDE_PROXY_GLIBC_COMPAT=1 \
-    CLAUDE_PROXY_GLIBC_COMPAT_ROOT="$glibc_root" \
-    timeout 40s "$CLAUDE_PROXY_BIN" --config /tmp/config.json run p1 -- /tmp/claude/claude --version 2>&1
+    env "${run_env[@]}" \
+      timeout 180s "$CLAUDE_PROXY_BIN" --config /tmp/config.json run p1 -- /tmp/claude/claude --version 2>&1
   )"
   run_ec=$?
   set -e
@@ -178,16 +175,22 @@ EOF
   echo "[patched interpreter] ${interp}"
   echo "[patched rpath] ${rpath}"
 
-  if [[ "$interp" != "${glibc_root}/lib/ld-linux-x86-64.so.2" ]]; then
+  if [[ "$interp" != */glibc-2.31/lib/ld-linux-x86-64.so.2 ]]; then
     echo "unexpected patched interpreter: $interp" >&2
     exit 1
   fi
-  if ! grep -q "${glibc_root}/lib" <<<"$rpath"; then
-    echo "patched rpath missing glibc lib dir: $rpath" >&2
+  local glibc_lib_dir
+  glibc_lib_dir="$(dirname "$interp")"
+  if [[ ! -f "${glibc_lib_dir}/libc.so.6" ]]; then
+    echo "patched glibc runtime missing libc.so.6 in ${glibc_lib_dir}" >&2
+    exit 1
+  fi
+  if ! grep -q "${glibc_lib_dir}" <<<"$rpath"; then
+    echo "patched rpath missing glibc lib dir ${glibc_lib_dir}: $rpath" >&2
     exit 1
   fi
 
-  echo "PASS: claude-proxy auto-patched Claude glibc and started successfully on CentOS 7."
+  echo "PASS: claude-proxy auto-downloaded and patched Claude glibc successfully on CentOS 7."
 }
 
 cleanup() {

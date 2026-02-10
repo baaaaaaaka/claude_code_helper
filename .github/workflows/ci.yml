@@ -240,37 +240,18 @@ jobs:
               "$img" bash /ci/container_claude_install_launch_smoke.sh
           done
 
-      - name: Download prebuilt CentOS7 glibc compat bundle
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GLIBC_COMPAT_TAG: "glibc-compat-v2.31"
-          GLIBC_COMPAT_BUNDLE: "glibc-2.31-centos7-runtime-x86_64.tar.xz"
-        run: |
-          set -euo pipefail
-          mkdir -p dist/glibc-compat
-          if ! gh release download "$GLIBC_COMPAT_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern "$GLIBC_COMPAT_BUNDLE" \
-            --pattern "$GLIBC_COMPAT_BUNDLE.sha256" \
-            --dir dist/glibc-compat; then
-            echo "Failed to download prebuilt glibc compat bundle (${GLIBC_COMPAT_TAG})." >&2
-            echo "Run workflow 'Build glibc compat bundle' to publish the bundle first." >&2
-            exit 1
-          fi
-          (
-            cd dist/glibc-compat
-            sha256sum -c "$GLIBC_COMPAT_BUNDLE.sha256"
-          )
-
-      - name: Smoke test in CentOS7 (Claude startup via auto glibc patch)
+      - name: Smoke test in CentOS7 (Claude startup via auto glibc download+patch)
         shell: bash
         timeout-minutes: 15
+        env:
+          GLIBC_COMPAT_REPO: "baaaaaaaka/claude_code_helper"
+          GLIBC_COMPAT_TAG: "glibc-compat-v2.31"
         run: |
           set -euo pipefail
           docker run --rm \
             -v "$PWD/dist:/dist:ro" \
-            -v "$PWD/dist/glibc-compat/glibc-2.31-centos7-runtime-x86_64.tar.xz:/bundle.tar.xz:ro" \
             -v "$PWD/scripts/glibc:/scripts:ro" \
+            -e GLIBC_COMPAT_REPO \
+            -e GLIBC_COMPAT_TAG \
             centos:7 bash /scripts/test_centos7_clp_autopatch.sh
 
