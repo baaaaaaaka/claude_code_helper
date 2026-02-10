@@ -119,7 +119,10 @@ EOF
   chmod +x "${runtime_root}/run-with-glibc-${GLIBC_VERSION}.sh"
 
   tar -C "$runtime_root" -cJf "$tar_path" .
-  sha256sum "$tar_path" > "${tar_path}.sha256"
+  (
+    cd /out
+    sha256sum "${bundle_base}.tar.xz" > "${bundle_base}.tar.xz.sha256"
+  )
 
   echo "Built runtime bundle:"
   ls -lh "$tar_path" "${tar_path}.sha256"

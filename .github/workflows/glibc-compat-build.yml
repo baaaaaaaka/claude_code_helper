@@ -44,7 +44,25 @@ jobs:
           cd dist/glibc-compat
           test -f "$GLIBC_COMPAT_BUNDLE"
           test -f "$GLIBC_COMPAT_BUNDLE.sha256"
-          sha256sum -c "$GLIBC_COMPAT_BUNDLE.sha256"
+          expected="$(awk '{
+            for (i = 1; i <= NF; i++) {
+              if ($i ~ /^[0-9A-Fa-f]{64}$/) {
+                print tolower($i)
+                exit
+              }
+            }
+          }' "$GLIBC_COMPAT_BUNDLE.sha256")"
+          if [ -z "$expected" ]; then
+            echo "Missing SHA256 in $GLIBC_COMPAT_BUNDLE.sha256" >&2
+            exit 1
+          fi
+          actual="$(sha256sum "$GLIBC_COMPAT_BUNDLE" | awk '{print tolower($1)}')"
+          if [ "$actual" != "$expected" ]; then
+            echo "SHA256 mismatch for $GLIBC_COMPAT_BUNDLE" >&2
+            echo "expected=$expected" >&2
+            echo "actual=$actual" >&2
+            exit 1
+          fi
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
