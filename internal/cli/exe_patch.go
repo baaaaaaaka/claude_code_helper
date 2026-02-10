@@ -54,7 +54,7 @@ func (o exePatchOptions) customRulesEnabled() bool {
 }
 
 func (o exePatchOptions) glibcCompatConfigured() bool {
-	return o.glibcCompat && strings.TrimSpace(o.glibcCompatRoot) != ""
+	return o.glibcCompat
 }
 
 func (o exePatchOptions) validate() error {

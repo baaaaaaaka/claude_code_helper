@@ -78,3 +78,31 @@ func TestMergeRPathAndContains(t *testing.T) {
 		t.Fatalf("expected merged rpath to contain glibc lib dir")
 	}
 }
+
+func TestFirstSHA256Token(t *testing.T) {
+	raw := "42c5a00561352e4e7504f38bd1d15e7a4da1fca2288558981e14b25bbf91b344  /out/glibc.tar.xz\n"
+	got := firstSHA256Token(raw)
+	if got != "42c5a00561352e4e7504f38bd1d15e7a4da1fca2288558981e14b25bbf91b344" {
+		t.Fatalf("unexpected checksum token: %q", got)
+	}
+}
+
+func TestResolveGlibcCompatRepoAndTag(t *testing.T) {
+	t.Run("explicit glibc repo and tag env", func(t *testing.T) {
+		t.Setenv(glibcCompatRepoEnv, "foo/bar")
+		t.Setenv(glibcCompatTagEnv, "glibc-compat-vX")
+		if got := resolveGlibcCompatRepo(); got != "foo/bar" {
+			t.Fatalf("expected repo foo/bar, got %q", got)
+		}
+		if got := resolveGlibcCompatTag(); got != "glibc-compat-vX" {
+			t.Fatalf("expected custom tag, got %q", got)
+		}
+	})
+
+	t.Run("default glibc tag", func(t *testing.T) {
+		t.Setenv(glibcCompatTagEnv, "")
+		if got := resolveGlibcCompatTag(); got != glibcCompatDefaultTag {
+			t.Fatalf("expected default tag %q, got %q", glibcCompatDefaultTag, got)
+		}
+	})
+}
