@@ -1,0 +1,80 @@
+name: Build glibc compat bundle
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+  push:
+    branches: ["main"]
+    paths:
+      - "scripts/glibc/**"
+      - ".github/workflows/glibc-compat-build.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: glibc-compat-build
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    name: Build and publish glibc 2.31 compat bundle
+    runs-on: ubuntu-latest
+    env:
+      GLIBC_COMPAT_TAG: "glibc-compat-v2.31"
+      GLIBC_COMPAT_BUNDLE: "glibc-2.31-centos7-runtime-x86_64.tar.xz"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build CentOS7 glibc compat bundle
+        shell: bash
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          mkdir -p dist/glibc-compat
+          OUT_DIR="$PWD/dist/glibc-compat" JOBS=4 bash scripts/glibc/build_glibc_231_centos7.sh
+
+      - name: Verify bundle checksum file
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist/glibc-compat
+          test -f "$GLIBC_COMPAT_BUNDLE"
+          test -f "$GLIBC_COMPAT_BUNDLE.sha256"
+          sha256sum -c "$GLIBC_COMPAT_BUNDLE.sha256"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: glibc-compat-bundle
+          path: |
+            dist/glibc-compat/${{ env.GLIBC_COMPAT_BUNDLE }}
+            dist/glibc-compat/${{ env.GLIBC_COMPAT_BUNDLE }}.sha256
+
+      - name: Ensure release exists
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$GLIBC_COMPAT_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$GLIBC_COMPAT_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "glibc compat bundle v2.31" \
+              --notes "Automated CentOS7-compatible glibc 2.31 runtime bundle for Claude startup smoke tests."
+          fi
+
+      - name: Publish release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "$GLIBC_COMPAT_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            "dist/glibc-compat/$GLIBC_COMPAT_BUNDLE" \
+            "dist/glibc-compat/$GLIBC_COMPAT_BUNDLE.sha256" \
+            --clobber

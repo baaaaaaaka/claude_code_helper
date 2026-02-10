@@ -17,14 +17,16 @@ import (
 )
 
 type exePatchOptions struct {
-	enabledFlag    bool
-	regex1         string
-	regex2         []string
-	regex3         []string
-	replace        []string
-	preview        bool
-	policySettings bool
-	dryRun         bool
+	enabledFlag     bool
+	regex1          string
+	regex2          []string
+	regex3          []string
+	replace         []string
+	preview         bool
+	policySettings  bool
+	dryRun          bool
+	glibcCompat     bool
+	glibcCompatRoot string
 }
 
 type patchOutcome struct {
@@ -44,11 +46,15 @@ func (o exePatchOptions) enabled() bool {
 	if !o.enabledFlag {
 		return false
 	}
-	return o.policySettings || o.customRulesEnabled()
+	return o.policySettings || o.customRulesEnabled() || o.glibcCompatConfigured()
 }
 
 func (o exePatchOptions) customRulesEnabled() bool {
 	return o.regex1 != "" || len(o.regex2) > 0 || len(o.regex3) > 0 || len(o.replace) > 0
+}
+
+func (o exePatchOptions) glibcCompatConfigured() bool {
+	return o.glibcCompat && strings.TrimSpace(o.glibcCompatRoot) != ""
 }
 
 func (o exePatchOptions) validate() error {
@@ -216,7 +222,8 @@ func maybePatchExecutable(cmdArgs []string, opts exePatchOptions, configPath str
 	if err != nil {
 		return nil, err
 	}
-	if len(specs) == 0 {
+	glibcCompat := opts.glibcCompatConfigured()
+	if len(specs) == 0 && !glibcCompat {
 		return nil, nil
 	}
 	if len(cmdArgs) == 0 {
@@ -271,47 +278,71 @@ func maybePatchExecutable(cmdArgs []string, opts exePatchOptions, configPath str
 		historyStore = nil
 	}
 
-	outcome, err := patchExecutable(resolvedPath, specs, log, opts.preview, opts.dryRun, historyStore, proxyVersion)
-	if err != nil {
-		return nil, err
-	}
-	if outcome != nil {
-		outcome.TargetVersion = targetVersion
-		if outcome.TargetSHA256 == "" {
-			outcome.TargetSHA256 = targetSHA
-		}
-		outcome.IsClaude = isClaude
-		outcome.ConfigPath = configPath
-		if outcome.Applied && outcome.IsClaude {
-			if signErr := adhocCodesign(resolvedPath, log); signErr != nil {
-				_, _ = fmt.Fprintln(log, "exe-patch: codesign failed; restoring backup")
-				if restoreErr := restoreExecutableFromBackup(outcome); restoreErr != nil {
-					return nil, fmt.Errorf("restore patched executable: %w", restoreErr)
-				}
-				if historyErr := cleanupPatchHistory(outcome); historyErr != nil {
-					return nil, fmt.Errorf("cleanup patch history: %w", historyErr)
-				}
-				if recordErr := recordPatchFailure(configPath, outcome, formatFailureReason(signErr, "")); recordErr != nil {
-					_, _ = fmt.Fprintf(log, "exe-patch: failed to record patch failure: %v\n", recordErr)
-				}
-				return nil, nil
-			}
-			out, probeErr := runClaudeProbe(resolvedPath, "--version")
-			if probeErr != nil {
-				_, _ = fmt.Fprintln(log, "exe-patch: detected startup failure; restoring backup")
-				if restoreErr := restoreExecutableFromBackup(outcome); restoreErr != nil {
-					return nil, fmt.Errorf("restore patched executable: %w", restoreErr)
-				}
-				if historyErr := cleanupPatchHistory(outcome); historyErr != nil {
-					return nil, fmt.Errorf("cleanup patch history: %w", historyErr)
-				}
-				if recordErr := recordPatchFailure(configPath, outcome, formatFailureReason(probeErr, out)); recordErr != nil {
-					_, _ = fmt.Fprintf(log, "exe-patch: failed to record patch failure: %v\n", recordErr)
-				}
-				return nil, nil
-			}
+	var outcome *patchOutcome
+	if len(specs) > 0 {
+		outcome, err = patchExecutable(resolvedPath, specs, log, opts.preview, opts.dryRun, historyStore, proxyVersion)
+		if err != nil {
+			return nil, err
 		}
 	}
+	if outcome == nil {
+		outcome = &patchOutcome{
+			TargetPath:   resolvedPath,
+			HistoryStore: historyStore,
+		}
+	}
+
+	outcome.TargetVersion = targetVersion
+	if outcome.TargetSHA256 == "" {
+		outcome.TargetSHA256 = targetSHA
+	}
+	outcome.IsClaude = isClaude
+	outcome.ConfigPath = configPath
+
+	bytePatchApplied := outcome.Applied
+	if bytePatchApplied && outcome.IsClaude {
+		if signErr := adhocCodesign(resolvedPath, log); signErr != nil {
+			_, _ = fmt.Fprintln(log, "exe-patch: codesign failed; restoring backup")
+			if restoreErr := restoreExecutableFromBackup(outcome); restoreErr != nil {
+				return nil, fmt.Errorf("restore patched executable: %w", restoreErr)
+			}
+			if historyErr := cleanupPatchHistory(outcome); historyErr != nil {
+				return nil, fmt.Errorf("cleanup patch history: %w", historyErr)
+			}
+			if recordErr := recordPatchFailure(configPath, outcome, formatFailureReason(signErr, "")); recordErr != nil {
+				_, _ = fmt.Fprintf(log, "exe-patch: failed to record patch failure: %v\n", recordErr)
+			}
+			return nil, nil
+		}
+	}
+
+	needProbe := outcome.IsClaude && (bytePatchApplied || glibcCompat)
+	if needProbe {
+		out, probeErr := runClaudeProbe(resolvedPath, "--version")
+		if probeErr != nil && glibcCompat && isMissingGlibcSymbolError(out) {
+			patchedOutcome, compatApplied, compatErr := applyClaudeGlibcCompatPatch(resolvedPath, opts, log, opts.dryRun, outcome)
+			outcome = patchedOutcome
+			if compatErr != nil {
+				_, _ = fmt.Fprintf(log, "exe-patch: glibc compat patch failed: %v\n", compatErr)
+			} else if compatApplied {
+				out, probeErr = runClaudeProbe(resolvedPath, "--version")
+			}
+		}
+		if probeErr != nil && outcome.Applied {
+			_, _ = fmt.Fprintln(log, "exe-patch: detected startup failure; restoring backup")
+			if restoreErr := restoreExecutableFromBackup(outcome); restoreErr != nil {
+				return nil, fmt.Errorf("restore patched executable: %w", restoreErr)
+			}
+			if historyErr := cleanupPatchHistory(outcome); historyErr != nil {
+				return nil, fmt.Errorf("cleanup patch history: %w", historyErr)
+			}
+			if recordErr := recordPatchFailure(configPath, outcome, formatFailureReason(probeErr, out)); recordErr != nil {
+				_, _ = fmt.Fprintf(log, "exe-patch: failed to record patch failure: %v\n", recordErr)
+			}
+			return nil, nil
+		}
+	}
+
 	return outcome, nil
 }
 

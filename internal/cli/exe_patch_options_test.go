@@ -27,6 +27,24 @@ func TestExePatchOptionsEnabledAndValidate(t *testing.T) {
 
 	opts = exePatchOptions{
 		enabledFlag: true,
+		glibcCompat: true,
+	}
+	if opts.glibcCompatConfigured() {
+		t.Fatalf("expected glibc compat to require root path")
+	}
+	if opts.enabled() {
+		t.Fatalf("expected glibc compat without root to remain disabled")
+	}
+	opts.glibcCompatRoot = "/tmp/glibc"
+	if !opts.glibcCompatConfigured() {
+		t.Fatalf("expected glibc compat to be configured with root path")
+	}
+	if !opts.enabled() {
+		t.Fatalf("expected glibc compat to enable options when root is configured")
+	}
+
+	opts = exePatchOptions{
+		enabledFlag: true,
 		regex1:      "a",
 		regex2:      []string{"b"},
 		regex3:      []string{"c"},

@@ -31,3 +31,33 @@ func TestExePatchEnabledDefaultEnvParsing(t *testing.T) {
 		}
 	})
 }
+
+func TestExePatchGlibcCompatDefaultEnvParsing(t *testing.T) {
+	t.Run("empty defaults true", func(t *testing.T) {
+		t.Setenv(exePatchGlibcCompatEnv, "")
+		if !exePatchGlibcCompatDefault() {
+			t.Fatalf("expected glibc compat enabled when env empty")
+		}
+	})
+
+	t.Run("invalid defaults false", func(t *testing.T) {
+		t.Setenv(exePatchGlibcCompatEnv, "bad")
+		if exePatchGlibcCompatDefault() {
+			t.Fatalf("expected glibc compat disabled when env invalid")
+		}
+	})
+
+	t.Run("explicit false", func(t *testing.T) {
+		t.Setenv(exePatchGlibcCompatEnv, "false")
+		if exePatchGlibcCompatDefault() {
+			t.Fatalf("expected glibc compat disabled when env false")
+		}
+	})
+}
+
+func TestExePatchGlibcCompatRootDefault(t *testing.T) {
+	t.Setenv(exePatchGlibcCompatRootEnv, "  /tmp/glibc-root  ")
+	if got := exePatchGlibcCompatRootDefault(); got != "/tmp/glibc-root" {
+		t.Fatalf("expected trimmed root, got %q", got)
+	}
+}

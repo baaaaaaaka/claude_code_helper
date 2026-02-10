@@ -35,6 +35,12 @@ func TestNewRootCmdFlags(t *testing.T) {
 	if flag.DefValue != "true" {
 		t.Fatalf("expected policySettings default true, got %q", flag.DefValue)
 	}
+	if cmd.PersistentFlags().Lookup("exe-patch-glibc-compat") == nil {
+		t.Fatalf("expected exe-patch-glibc-compat flag to exist")
+	}
+	if cmd.PersistentFlags().Lookup("exe-patch-glibc-root") == nil {
+		t.Fatalf("expected exe-patch-glibc-root flag to exist")
+	}
 }
 
 func TestNewNotImplementedCmd(t *testing.T) {

@@ -149,6 +149,24 @@ jobs:
         run: |
           go test ./internal/cli -run TestClaudePatchIntegration -count=1
 
+      - name: Claude install+launch smoke (all platforms)
+        shell: bash
+        timeout-minutes: 15
+        env:
+          CLAUDE_INSTALL_TEST: "1"
+        run: |
+          set -euo pipefail
+          for attempt in 1 2; do
+            if go test ./internal/cli -run TestClaudeInstallLaunchIntegration -count=1; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 2 ]; then
+              exit 1
+            fi
+            echo "Retrying Claude install+launch smoke after transient failure..."
+            sleep 3
+          done
+
       - name: go test -race (Linux only)
         if: runner.os == 'Linux'
         run: go test -race ./...
@@ -191,6 +209,14 @@ jobs:
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o dist/claude-proxy ./cmd/claude-proxy
           chmod +x dist/claude-proxy
 
+      - name: Build linux install integration test binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test ./internal/cli -c -o dist/claude_cli_test
+          chmod +x dist/claude_cli_test
+
       - name: Smoke test in containers (doctor)
         shell: bash
         run: |
@@ -199,4 +225,52 @@ jobs:
             echo "==> $img"
             docker run --rm -v "$PWD/dist:/dist:ro" "$img" /dist/claude-proxy proxy doctor
           done
+
+      - name: Smoke test in containers (Claude install+launch)
+        shell: bash
+        run: |
+          set -euo pipefail
+          for img in rockylinux:8 ubuntu:20.04; do
+            echo "==> $img"
+            docker run --rm \
+              -v "$PWD/dist:/dist:ro" \
+              -v "$PWD/scripts/ci:/ci:ro" \
+              -e CLAUDE_INSTALL_TEST=1 \
+              -e CI=true \
+              "$img" bash /ci/container_claude_install_launch_smoke.sh
+          done
+
+      - name: Download prebuilt CentOS7 glibc compat bundle
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GLIBC_COMPAT_TAG: "glibc-compat-v2.31"
+          GLIBC_COMPAT_BUNDLE: "glibc-2.31-centos7-runtime-x86_64.tar.xz"
+        run: |
+          set -euo pipefail
+          mkdir -p dist/glibc-compat
+          if ! gh release download "$GLIBC_COMPAT_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$GLIBC_COMPAT_BUNDLE" \
+            --pattern "$GLIBC_COMPAT_BUNDLE.sha256" \
+            --dir dist/glibc-compat; then
+            echo "Failed to download prebuilt glibc compat bundle (${GLIBC_COMPAT_TAG})." >&2
+            echo "Run workflow 'Build glibc compat bundle' to publish the bundle first." >&2
+            exit 1
+          fi
+          (
+            cd dist/glibc-compat
+            sha256sum -c "$GLIBC_COMPAT_BUNDLE.sha256"
+          )
+
+      - name: Smoke test in CentOS7 (Claude startup via auto glibc patch)
+        shell: bash
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/dist:/dist:ro" \
+            -v "$PWD/dist/glibc-compat/glibc-2.31-centos7-runtime-x86_64.tar.xz:/bundle.tar.xz:ro" \
+            -v "$PWD/scripts/glibc:/scripts:ro" \
+            centos:7 bash /scripts/test_centos7_clp_autopatch.sh
 
