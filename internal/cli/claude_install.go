@@ -22,6 +22,8 @@ type installCmd struct {
 	args []string
 }
 
+const claudeInstallBootstrap = `url="https://claude.ai/install.sh"; if command -v curl >/dev/null 2>&1; then curl -fsSL "$url" | bash; elif command -v wget >/dev/null 2>&1; then wget -qO- "$url" | bash; else echo "need curl or wget" >&2; exit 1; fi`
+
 type installProxyOptions struct {
 	UseProxy  bool
 	Profile   *config.Profile
@@ -65,8 +67,14 @@ func runClaudeInstaller(ctx context.Context, out io.Writer, installOpts installP
 		_, _ = fmt.Fprintln(out, "Using SSH proxy for Claude installer.")
 	}
 
-	for _, cmd := range installerCandidates(runtime.GOOS) {
+	candidates := installerCandidates(runtime.GOOS)
+	if len(candidates) == 0 {
+		return fmt.Errorf("no supported installer available for %s", runtime.GOOS)
+	}
+	attemptErrors := make([]string, 0, len(candidates))
+	for _, cmd := range candidates {
 		if _, err := exec.LookPath(cmd.path); err != nil {
+			attemptErrors = append(attemptErrors, fmt.Sprintf("%s: not found in PATH", installerAttemptLabel(cmd)))
 			continue
 		}
 		c := exec.CommandContext(ctx, cmd.path, cmd.args...)
@@ -77,11 +85,15 @@ func runClaudeInstaller(ctx context.Context, out io.Writer, installOpts installP
 		c.Stderr = out
 		c.Stdin = os.Stdin
 		if err := c.Run(); err != nil {
-			return err
+			attemptErrors = append(attemptErrors, fmt.Sprintf("%s: %v", installerAttemptLabel(cmd), err))
+			continue
 		}
 		return nil
 	}
-	return fmt.Errorf("no supported installer available for %s", runtime.GOOS)
+	if len(attemptErrors) == 0 {
+		return fmt.Errorf("no supported installer available for %s", runtime.GOOS)
+	}
+	return fmt.Errorf("failed to run Claude installer for %s (%s)", runtime.GOOS, strings.Join(attemptErrors, "; "))
 }
 
 func resolveInstallerProxy(ctx context.Context, opts installProxyOptions) (string, func() error, error) {
@@ -121,11 +133,19 @@ func installerCandidates(goos string) []installCmd {
 		}
 	case "darwin", "linux":
 		return []installCmd{
-			{path: "bash", args: []string{"-lc", "curl -fsSL https://claude.ai/install.sh | bash"}},
+			{path: "bash", args: []string{"-c", claudeInstallBootstrap}},
+			{path: "sh", args: []string{"-c", claudeInstallBootstrap}},
 		}
 	default:
 		return nil
 	}
+}
+
+func installerAttemptLabel(cmd installCmd) string {
+	if len(cmd.args) == 0 {
+		return cmd.path
+	}
+	return fmt.Sprintf("%s %s", cmd.path, cmd.args[0])
 }
 
 func executableExists(path string) bool {

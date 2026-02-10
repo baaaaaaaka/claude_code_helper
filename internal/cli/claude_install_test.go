@@ -18,11 +18,28 @@ import (
 
 func TestInstallerCandidatesLinux(t *testing.T) {
 	cmds := installerCandidates("linux")
-	if len(cmds) != 1 {
-		t.Fatalf("expected 1 linux installer, got %d", len(cmds))
+	if len(cmds) != 2 {
+		t.Fatalf("expected 2 linux installers, got %d", len(cmds))
 	}
-	if cmds[0].path != "bash" {
-		t.Fatalf("expected bash installer, got %s", cmds[0].path)
+	if cmds[0].path != "bash" || cmds[1].path != "sh" {
+		t.Fatalf("expected bash then sh installers, got %q then %q", cmds[0].path, cmds[1].path)
+	}
+	for i, cmd := range cmds {
+		if len(cmd.args) < 2 {
+			t.Fatalf("expected shell command args for candidate %d, got %v", i, cmd.args)
+		}
+		if cmd.args[0] != "-c" {
+			t.Fatalf("expected non-login shell (-c) for candidate %d, got %q", i, cmd.args[0])
+		}
+		if strings.Contains(cmd.args[0], "l") {
+			t.Fatalf("unexpected login-shell flag for candidate %d: %q", i, cmd.args[0])
+		}
+		if !strings.Contains(cmd.args[1], "curl") || !strings.Contains(cmd.args[1], "wget") {
+			t.Fatalf("expected curl/wget fallback for candidate %d, got %q", i, cmd.args[1])
+		}
+		if !strings.Contains(cmd.args[1], "https://claude.ai/install.sh") {
+			t.Fatalf("expected official install url for candidate %d, got %q", i, cmd.args[1])
+		}
 	}
 }
 
@@ -95,6 +112,58 @@ func TestRunClaudeInstallerUsesProxyEnv(t *testing.T) {
 	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 	if lines[0] != proxyURL || lines[1] != proxyURL {
 		t.Fatalf("expected proxy env %q, got %q", proxyURL, strings.Join(lines, ","))
+	}
+}
+
+func TestRunClaudeInstallerFallsBackToNextCandidate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script test on windows")
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "sh-ran")
+	bashScript := filepath.Join(dir, "bash")
+	shScript := filepath.Join(dir, "sh")
+
+	if err := os.WriteFile(bashScript, []byte("#!/bin/sh\nexit 42\n"), 0o700); err != nil {
+		t.Fatalf("write bash script: %v", err)
+	}
+	shBody := "#!/bin/sh\nprintf \"ok\" > \"" + marker + "\"\nexit 0\n"
+	if err := os.WriteFile(shScript, []byte(shBody), 0o700); err != nil {
+		t.Fatalf("write sh script: %v", err)
+	}
+
+	t.Setenv("PATH", dir)
+
+	if err := runClaudeInstaller(context.Background(), io.Discard, installProxyOptions{}); err != nil {
+		t.Fatalf("runClaudeInstaller fallback error: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected fallback candidate to run: %v", err)
+	}
+}
+
+func TestRunClaudeInstallerReportsAttemptDetails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script test on windows")
+	}
+	dir := t.TempDir()
+	failScript := []byte("#!/bin/sh\nexit 7\n")
+	for _, name := range []string{"bash", "sh"} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, failScript, 0o700); err != nil {
+			t.Fatalf("write %s script: %v", name, err)
+		}
+	}
+
+	t.Setenv("PATH", dir)
+
+	err := runClaudeInstaller(context.Background(), io.Discard, installProxyOptions{})
+	if err == nil {
+		t.Fatalf("expected installer failure")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "bash -c") || !strings.Contains(msg, "sh -c") {
+		t.Fatalf("expected attempt details in error, got %q", msg)
 	}
 }
 
