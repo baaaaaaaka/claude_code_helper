@@ -77,7 +77,7 @@ func supportsYoloFlag(path string) bool {
 }
 
 func runClaudeProbe(path string, arg string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, arg)
 	out, err := cmd.CombinedOutput()
