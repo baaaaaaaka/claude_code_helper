@@ -24,6 +24,34 @@ type installCmd struct {
 
 const claudeInstallBootstrap = `url="https://claude.ai/install.sh"; if command -v curl >/dev/null 2>&1; then curl -fsSL "$url" | bash; elif command -v wget >/dev/null 2>&1; then wget -qO- "$url" | bash; else echo "need curl or wget" >&2; exit 1; fi`
 
+const claudeInstallBootstrapWindows = `$installerUrl = 'https://claude.ai/install.ps1'
+$logPath = Join-Path ([IO.Path]::GetTempPath()) ('claude-installer-error-' + [DateTime]::UtcNow.ToString('yyyyMMddHHmmssfff') + '.log')
+$previousErrorActionPreference = $ErrorActionPreference
+$previousProgressPreference = $ProgressPreference
+try {
+  $ErrorActionPreference = 'Stop'
+  $ProgressPreference = 'SilentlyContinue'
+  $content = [string](Invoke-RestMethod -Uri $installerUrl -MaximumRedirection 5)
+  if ([string]::IsNullOrWhiteSpace($content)) {
+    throw "Installer endpoint returned empty content."
+  }
+  if ($content -match '(?is)^\ufeff?\s*(<!doctype html|<html\b)') {
+    throw "Installer endpoint returned HTML content instead of a PowerShell script."
+  }
+  $ErrorActionPreference = $previousErrorActionPreference
+  Invoke-Expression $content
+} catch {
+  $details = $_ | Out-String
+  try {
+    "[$([DateTime]::UtcNow.ToString('o'))] $details" | Out-File -FilePath $logPath -Encoding utf8 -Append
+  } catch {}
+  Write-Host ("Primary Claude installer failed; trying fallback installer. Details: " + $logPath)
+  exit 1
+} finally {
+  $ErrorActionPreference = $previousErrorActionPreference
+  $ProgressPreference = $previousProgressPreference
+}`
+
 type installProxyOptions struct {
 	UseProxy  bool
 	Profile   *config.Profile
@@ -127,8 +155,8 @@ func installerCandidates(goos string) []installCmd {
 	switch strings.ToLower(goos) {
 	case "windows":
 		return []installCmd{
-			{path: "powershell", args: []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "irm https://claude.ai/install.ps1 | iex"}},
-			{path: "pwsh", args: []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "irm https://claude.ai/install.ps1 | iex"}},
+			{path: "powershell", args: []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", claudeInstallBootstrapWindows}},
+			{path: "pwsh", args: []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", claudeInstallBootstrapWindows}},
 			{path: "cmd.exe", args: []string{"/c", "curl -fsSL https://claude.ai/install.cmd -o install.cmd && install.cmd && del install.cmd"}},
 		}
 	case "darwin", "linux":

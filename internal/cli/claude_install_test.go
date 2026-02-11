@@ -45,8 +45,32 @@ func TestInstallerCandidatesLinux(t *testing.T) {
 
 func TestInstallerCandidatesWindows(t *testing.T) {
 	cmds := installerCandidates("windows")
-	if len(cmds) < 2 {
-		t.Fatalf("expected at least 2 windows installers, got %d", len(cmds))
+	if len(cmds) < 3 {
+		t.Fatalf("expected at least 3 windows installers, got %d", len(cmds))
+	}
+	if cmds[0].path != "powershell" || cmds[1].path != "pwsh" {
+		t.Fatalf("expected powershell then pwsh candidates, got %q then %q", cmds[0].path, cmds[1].path)
+	}
+	for i, cmd := range cmds[:2] {
+		if len(cmd.args) < 5 {
+			t.Fatalf("expected bootstrap command args for candidate %d, got %v", i, cmd.args)
+		}
+		bootstrap := cmd.args[4]
+		if strings.Contains(bootstrap, "irm https://claude.ai/install.ps1 | iex") {
+			t.Fatalf("candidate %d unexpectedly uses raw irm|iex bootstrap", i)
+		}
+		if !strings.Contains(bootstrap, "Invoke-RestMethod -Uri $installerUrl") {
+			t.Fatalf("candidate %d missing script download step", i)
+		}
+		if !strings.Contains(bootstrap, "Installer endpoint returned HTML content") {
+			t.Fatalf("candidate %d missing HTML guard", i)
+		}
+		if !strings.Contains(bootstrap, "Out-File -FilePath $logPath") {
+			t.Fatalf("candidate %d missing error logging step", i)
+		}
+		if !strings.Contains(bootstrap, "Invoke-Expression $content") {
+			t.Fatalf("candidate %d missing script execution step", i)
+		}
 	}
 }
 
