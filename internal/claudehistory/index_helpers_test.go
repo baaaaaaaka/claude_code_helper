@@ -66,24 +66,53 @@ func TestIndexHelpers(t *testing.T) {
 	})
 
 	t.Run("FindSessionByID and FindSessionWithProject", func(t *testing.T) {
-		project := Project{
-			Key:  "p1",
-			Path: "/tmp",
-			Sessions: []Session{
-				{SessionID: "sess-1"},
+		projects := []Project{
+			{
+				Key:  "p1",
+				Path: "/tmp/a",
+				Sessions: []Session{
+					{SessionID: "sess-1", Aliases: []string{"sess-old"}},
+					{SessionID: "sess-2", Aliases: []string{"dup-alias"}},
+				},
+			},
+			{
+				Key:  "p2",
+				Path: "/tmp/b",
+				Sessions: []Session{
+					{SessionID: "sess-3", Aliases: []string{"dup-alias"}},
+				},
 			},
 		}
-		if _, ok := FindSessionByID([]Project{project}, "missing"); ok {
+		if _, ok := FindSessionByID(projects, "missing"); ok {
 			t.Fatalf("expected missing session to return false")
 		}
-		if sess, ok := FindSessionByID([]Project{project}, "sess-1"); !ok || sess.SessionID != "sess-1" {
+		if sess, ok := FindSessionByID(projects, "sess-1"); !ok || sess.SessionID != "sess-1" {
 			t.Fatalf("expected to find session, got %#v ok=%v", sess, ok)
 		}
-		if _, _, ok := FindSessionWithProject([]Project{project}, "missing"); ok {
+		if sess, ok := FindSessionByID(projects, "sess-old"); !ok || sess.SessionID != "sess-1" {
+			t.Fatalf("expected alias lookup to find canonical session, got %#v ok=%v", sess, ok)
+		}
+		if _, ok, ambiguous := FindSessionByIDMatch(projects, "dup-alias"); ok || !ambiguous {
+			t.Fatalf("expected duplicate alias to be ambiguous")
+		}
+		if _, _, ok := FindSessionWithProject(projects, "missing"); ok {
 			t.Fatalf("expected missing session to return false")
 		}
-		if sess, proj, ok := FindSessionWithProject([]Project{project}, "sess-1"); !ok || sess.SessionID != "sess-1" || proj.Key != "p1" {
+		if sess, proj, ok := FindSessionWithProject(projects, "sess-1"); !ok || sess.SessionID != "sess-1" || proj.Key != "p1" {
 			t.Fatalf("expected to find session and project, got %#v %#v ok=%v", sess, proj, ok)
+		}
+		if sess, proj, ok, ambiguous := FindSessionWithProjectMatch(projects, "sess-old"); !ok || ambiguous || sess.SessionID != "sess-1" || proj.Key != "p1" {
+			t.Fatalf("expected alias lookup to resolve uniquely, got %#v %#v ok=%v ambiguous=%v", sess, proj, ok, ambiguous)
+		}
+		if _, _, ok, ambiguous := FindSessionWithProjectMatch(projects, "dup-alias"); ok || !ambiguous {
+			t.Fatalf("expected duplicate alias to be ambiguous")
+		}
+		matches := FindSessionAliasMatches(projects, "dup-alias")
+		if len(matches) != 2 {
+			t.Fatalf("expected 2 alias matches, got %d", len(matches))
+		}
+		if matches[0].Session.SessionID != "sess-2" || matches[1].Session.SessionID != "sess-3" {
+			t.Fatalf("unexpected alias matches order/content: %#v", matches)
 		}
 	})
 

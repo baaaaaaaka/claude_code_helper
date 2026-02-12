@@ -6,13 +6,13 @@ import (
 	"encoding/json"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
 
 type sessionFileMeta struct {
 	ProjectPath  string
+	SessionIDs   []string
 	FirstPrompt  string
 	MessageCount int
 	CreatedAt    time.Time
@@ -32,6 +32,8 @@ func readSessionFileMeta(filePath string) (sessionFileMeta, error) {
 	reader := bufio.NewReader(f)
 	snapshotLines := 0
 	nonSnapshotLines := 0
+	sessionIDs := []string{}
+	seenSessionIDs := map[string]bool{}
 	for {
 		line, err := reader.ReadBytes('\n')
 		if err != nil && err != io.EOF {
@@ -43,6 +45,10 @@ func readSessionFileMeta(filePath string) (sessionFileMeta, error) {
 			if json.Unmarshal(line, &env) != nil {
 				meta.ParseErrors++
 			} else {
+				if sessionID := strings.TrimSpace(env.SessionID); sessionID != "" && !seenSessionIDs[sessionID] {
+					seenSessionIDs[sessionID] = true
+					sessionIDs = append(sessionIDs, sessionID)
+				}
 				if strings.TrimSpace(env.Type) == "file-history-snapshot" {
 					snapshotLines++
 					if err == io.EOF {
@@ -90,6 +96,7 @@ func readSessionFileMeta(filePath string) (sessionFileMeta, error) {
 			}
 		}
 	}
+	meta.SessionIDs = sessionIDs
 	return meta, nil
 }
 
@@ -127,19 +134,11 @@ func readSessionFileSessionID(filePath string) (string, error) {
 }
 
 func resolveSessionIDFromFile(filePath string) (string, error) {
-	sessionID, err := readSessionFileSessionID(filePath)
-	if err != nil {
-		return "", err
-	}
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID != "" {
-		return sessionID, nil
-	}
-	name := filepath.Base(filePath)
-	if strings.HasSuffix(name, ".jsonl") {
-		name = strings.TrimSuffix(name, ".jsonl")
-	}
-	return strings.TrimSpace(name), nil
+	return sessionIDFromFilePath(filePath), nil
+}
+
+func sessionAliasesFromMeta(meta sessionFileMeta, canonicalID string) []string {
+	return normalizeSessionAliases(meta.SessionIDs, canonicalID)
 }
 
 func selectProjectPath(sessions []Session) string {

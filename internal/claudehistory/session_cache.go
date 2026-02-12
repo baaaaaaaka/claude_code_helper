@@ -2,8 +2,6 @@ package claudehistory
 
 import (
 	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 )
@@ -112,17 +110,5 @@ func readSessionFileSessionIDCached(filePath string) (string, error) {
 }
 
 func resolveSessionIDFromFileCached(filePath string) (string, error) {
-	sessionID, err := readSessionFileSessionIDCached(filePath)
-	if err != nil {
-		return "", err
-	}
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID != "" {
-		return sessionID, nil
-	}
-	name := filepath.Base(filePath)
-	if strings.HasSuffix(name, ".jsonl") {
-		name = strings.TrimSuffix(name, ".jsonl")
-	}
-	return strings.TrimSpace(name), nil
+	return sessionIDFromFilePath(filePath), nil
 }

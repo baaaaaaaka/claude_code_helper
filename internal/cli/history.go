@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -23,6 +25,36 @@ var (
 )
 
 const defaultRefreshInterval = 5 * time.Second
+
+func ambiguousSessionError(sessionID string, projects []claudehistory.Project) error {
+	matches := claudehistory.FindSessionAliasMatches(projects, sessionID)
+	candidates := make([]string, 0, len(matches))
+	seen := map[string]bool{}
+	for _, match := range matches {
+		canonicalID := strings.TrimSpace(match.Session.SessionID)
+		if canonicalID == "" {
+			continue
+		}
+		projectLabel := strings.TrimSpace(match.Project.Path)
+		if projectLabel == "" {
+			projectLabel = strings.TrimSpace(match.Project.Key)
+		}
+		label := canonicalID
+		if projectLabel != "" {
+			label = fmt.Sprintf("%s (project: %s)", canonicalID, projectLabel)
+		}
+		if seen[label] {
+			continue
+		}
+		seen[label] = true
+		candidates = append(candidates, label)
+	}
+	if len(candidates) == 0 {
+		return fmt.Errorf("session %q is ambiguous; use a canonical session id from `claude-proxy history list --pretty`", sessionID)
+	}
+	sort.Strings(candidates)
+	return fmt.Errorf("session %q is ambiguous; candidate canonical sessions: %s. Use `claude-proxy history list --pretty` for details", sessionID, strings.Join(candidates, ", "))
+}
 
 func newHistoryCmd(root *rootOptions) *cobra.Command {
 	var claudeDir string
@@ -102,7 +134,10 @@ func newHistoryShowCmd(claudeDir *string) *cobra.Command {
 				return err
 			}
 			sessionID := args[0]
-			session, ok := claudehistory.FindSessionByID(projects, sessionID)
+			session, ok, ambiguous := claudehistory.FindSessionByIDMatch(projects, sessionID)
+			if ambiguous {
+				return ambiguousSessionError(sessionID, projects)
+			}
 			if !ok {
 				return fmt.Errorf("session %q not found", sessionID)
 			}
@@ -150,11 +185,14 @@ func newHistoryOpenCmd(root *rootOptions, claudeDir *string, claudePath *string,
 				return err
 			}
 			sessionID := args[0]
-			session, project, ok := claudehistory.FindSessionWithProject(projects, sessionID)
+			session, project, ok, ambiguous := claudehistory.FindSessionWithProjectMatch(projects, sessionID)
+			if ambiguous {
+				return ambiguousSessionError(sessionID, projects)
+			}
 			if !ok {
 				return fmt.Errorf("session %q not found", sessionID)
 			}
-			return runClaudeSession(
+			return runClaudeSessionFunc(
 				cmd.Context(),
 				root,
 				store,

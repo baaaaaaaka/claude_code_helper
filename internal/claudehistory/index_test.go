@@ -215,7 +215,7 @@ func TestDiscoverProjectsMergesIndexAndScan(t *testing.T) {
 	}
 }
 
-func TestDiscoverProjectsUsesSessionIDFromFile(t *testing.T) {
+func TestDiscoverProjectsUsesFilenameCanonicalSessionID(t *testing.T) {
 	root := t.TempDir()
 	projectDir := filepath.Join(root, "projects", "proj-session-id")
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
@@ -235,12 +235,16 @@ func TestDiscoverProjectsUsesSessionIDFromFile(t *testing.T) {
 	if len(projects) != 1 || len(projects[0].Sessions) != 1 {
 		t.Fatalf("expected 1 project with 1 session, got %#v", projects)
 	}
-	if projects[0].Sessions[0].SessionID != "sess-actual" {
+	session := projects[0].Sessions[0]
+	if session.SessionID != "file-name" {
 		t.Fatalf("unexpected session id: %q", projects[0].Sessions[0].SessionID)
+	}
+	if !sessionHasAlias(session, "sess-actual") {
+		t.Fatalf("expected embedded session id to be captured as alias, got %#v", session.Aliases)
 	}
 }
 
-func TestDiscoverProjectsDedupesSessionIDFromFile(t *testing.T) {
+func TestDiscoverProjectsPrefersCanonicalWhenAliasConflicts(t *testing.T) {
 	root := t.TempDir()
 	projectDir := filepath.Join(root, "projects", "proj-dedupe")
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
@@ -263,18 +267,29 @@ func TestDiscoverProjectsDedupesSessionIDFromFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DiscoverProjects error: %v", err)
 	}
-	if len(projects) != 1 || len(projects[0].Sessions) != 1 {
-		t.Fatalf("expected 1 project with 1 session, got %#v", projects)
+	if len(projects) != 1 || len(projects[0].Sessions) != 2 {
+		t.Fatalf("expected 1 project with 2 sessions, got %#v", projects)
 	}
-	session := projects[0].Sessions[0]
-	if session.SessionID != "sess-dup" {
-		t.Fatalf("unexpected session id: %q", session.SessionID)
+	sessions := projects[0].Sessions
+	if sessions[0].SessionID != "sess-dup" {
+		t.Fatalf("unexpected first session id: %q", sessions[0].SessionID)
 	}
-	if session.FilePath != secondPath {
-		t.Fatalf("unexpected file path: %q", session.FilePath)
+	if sessions[0].FilePath != secondPath {
+		t.Fatalf("unexpected first session file path: %q", sessions[0].FilePath)
 	}
-	if session.FirstPrompt != "Second" {
-		t.Fatalf("unexpected first prompt: %q", session.FirstPrompt)
+	if sessions[1].SessionID != "file-one" {
+		t.Fatalf("unexpected second session id: %q", sessions[1].SessionID)
+	}
+	if !sessionHasAlias(sessions[1], "sess-dup") {
+		t.Fatalf("expected second session to keep embedded id as alias: %#v", sessions[1].Aliases)
+	}
+
+	resolved, ok := FindSessionByID(projects, "sess-dup")
+	if !ok {
+		t.Fatalf("expected canonical lookup to succeed")
+	}
+	if resolved.FilePath != secondPath {
+		t.Fatalf("expected canonical session to win lookup, got %q", resolved.FilePath)
 	}
 }
 

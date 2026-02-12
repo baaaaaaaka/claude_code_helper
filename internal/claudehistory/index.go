@@ -33,6 +33,11 @@ type sessionIndexEntry struct {
 	IsSidechain  bool   `json:"isSidechain"`
 }
 
+type SessionMatch struct {
+	Session Session
+	Project Project
+}
+
 func ResolveClaudeDir(override string) (string, error) {
 	if v := strings.TrimSpace(override); v != "" {
 		return filepath.Clean(os.ExpandEnv(v)), nil
@@ -101,19 +106,28 @@ func (idx sessionsIndex) EntriesProjectPath() string {
 func parseSessions(entries []sessionIndexEntry) []Session {
 	sessions := make([]Session, 0, len(entries))
 	for _, entry := range entries {
+		sessionID := strings.TrimSpace(entry.SessionID)
+		aliases := []string{}
+		if canonicalID := sessionIDFromFilePath(entry.FullPath); canonicalID != "" && canonicalID != sessionID {
+			if sessionID != "" {
+				aliases = append(aliases, sessionID)
+			}
+			sessionID = canonicalID
+		}
 		summary := entry.Summary
 		firstPrompt := entry.FirstPrompt
 		if entry.IsSidechain && strings.TrimSpace(summary) == "" && strings.TrimSpace(firstPrompt) == "" {
-			if strings.HasPrefix(entry.SessionID, "agent-") {
-				summary = entry.SessionID
+			if strings.HasPrefix(sessionID, "agent-") {
+				summary = sessionID
 			} else {
 				summary = "Subagent session"
 			}
 		}
 		created := parseTime(entry.Created)
 		modified := parseTime(entry.Modified)
-		sessions = append(sessions, Session{
-			SessionID:    entry.SessionID,
+		sessions = append(sessions, canonicalizeSessionIdentity(Session{
+			SessionID:    sessionID,
+			Aliases:      aliases,
 			Summary:      summary,
 			FirstPrompt:  firstPrompt,
 			MessageCount: entry.MessageCount,
@@ -121,7 +135,7 @@ func parseSessions(entries []sessionIndexEntry) []Session {
 			ModifiedAt:   modified,
 			ProjectPath:  entry.ProjectPath,
 			FilePath:     entry.FullPath,
-		})
+		}))
 	}
 	sort.Slice(sessions, func(i, j int) bool {
 		return sessions[i].ModifiedAt.After(sessions[j].ModifiedAt)
@@ -173,7 +187,12 @@ func scanSessionsFromFiles(dir string, history historyIndex, recursive bool) ([]
 			}
 			continue
 		}
-		if info, ok := history.lookup(sessionID); ok {
+		aliases := sessionAliasesFromMeta(meta, sessionID)
+		for _, lookupID := range append([]string{sessionID}, aliases...) {
+			info, ok := history.lookup(lookupID)
+			if !ok {
+				continue
+			}
 			if info.ProjectPath != "" {
 				meta.ProjectPath = info.ProjectPath
 			}
@@ -186,9 +205,11 @@ func scanSessionsFromFiles(dir string, history historyIndex, recursive bool) ([]
 			if meta.ModifiedAt.IsZero() && !info.FirstPromptTime.IsZero() {
 				meta.ModifiedAt = info.FirstPromptTime
 			}
+			break
 		}
-		session := Session{
+		session := canonicalizeSessionIdentity(Session{
 			SessionID:    sessionID,
+			Aliases:      aliases,
 			Summary:      "",
 			FirstPrompt:  meta.FirstPrompt,
 			MessageCount: meta.MessageCount,
@@ -196,11 +217,9 @@ func scanSessionsFromFiles(dir string, history historyIndex, recursive bool) ([]
 			ModifiedAt:   meta.ModifiedAt,
 			ProjectPath:  strings.TrimSpace(meta.ProjectPath),
 			FilePath:     filePath,
-		}
+		})
 		if existingIdx, ok := sessionIndex[sessionID]; ok {
-			if session.ModifiedAt.After(sessions[existingIdx].ModifiedAt) {
-				sessions[existingIdx] = session
-			}
+			sessions[existingIdx] = mergeSessionMetadata(sessions[existingIdx], session)
 			continue
 		}
 		sessionIndex[sessionID] = len(sessions)
@@ -222,6 +241,9 @@ func scanSessionsFromFiles(dir string, history historyIndex, recursive bool) ([]
 }
 
 func mergeSessionMetadata(base Session, other Session) Session {
+	base = canonicalizeSessionIdentity(base)
+	other = canonicalizeSessionIdentity(other)
+
 	basePath := strings.TrimSpace(base.FilePath)
 	otherPath := strings.TrimSpace(other.FilePath)
 	baseFileOK := isFile(basePath)
@@ -262,12 +284,20 @@ func mergeSessionMetadata(base Session, other Session) Session {
 		base.ProjectPath = other.ProjectPath
 	}
 
-	return base
+	if base.SessionID == "" && other.SessionID != "" {
+		base.SessionID = other.SessionID
+	}
+	if other.SessionID != "" && other.SessionID != base.SessionID {
+		base.Aliases = mergeSessionAliases(base.Aliases, other.SessionID)
+	}
+	base.Aliases = mergeSessionAliases(base.Aliases, other.Aliases...)
+	return canonicalizeSessionIdentity(base)
 }
 
 func mergeSessions(indexSessions []Session, scannedSessions []Session) []Session {
 	merged := make(map[string]Session, len(indexSessions)+len(scannedSessions))
 	for _, sess := range indexSessions {
+		sess = canonicalizeSessionIdentity(sess)
 		sessionID := strings.TrimSpace(sess.SessionID)
 		if sessionID == "" {
 			continue
@@ -275,6 +305,7 @@ func mergeSessions(indexSessions []Session, scannedSessions []Session) []Session
 		merged[sessionID] = sess
 	}
 	for _, sess := range scannedSessions {
+		sess = canonicalizeSessionIdentity(sess)
 		sessionID := strings.TrimSpace(sess.SessionID)
 		if sessionID == "" {
 			continue
@@ -283,10 +314,46 @@ func mergeSessions(indexSessions []Session, scannedSessions []Session) []Session
 			merged[sessionID] = mergeSessionMetadata(existing, sess)
 			continue
 		}
+		mergedIntoStaleEntry := false
+		for _, alias := range sess.Aliases {
+			alias = strings.TrimSpace(alias)
+			if alias == "" {
+				continue
+			}
+			existing, ok := merged[alias]
+			if !ok {
+				continue
+			}
+			// Alias-based merge is only safe when the index entry has no valid file backing.
+			if isFile(strings.TrimSpace(existing.FilePath)) {
+				continue
+			}
+			merged[alias] = mergeSessionMetadata(existing, sess)
+			mergedIntoStaleEntry = true
+			break
+		}
+		if mergedIntoStaleEntry {
+			continue
+		}
 		merged[sessionID] = sess
 	}
-	out := make([]Session, 0, len(merged))
+
+	deduped := make(map[string]Session, len(merged))
 	for _, sess := range merged {
+		sess = canonicalizeSessionIdentity(sess)
+		sessionID := strings.TrimSpace(sess.SessionID)
+		if sessionID == "" {
+			continue
+		}
+		if existing, ok := deduped[sessionID]; ok {
+			deduped[sessionID] = mergeSessionMetadata(existing, sess)
+			continue
+		}
+		deduped[sessionID] = sess
+	}
+
+	out := make([]Session, 0, len(deduped))
+	for _, sess := range deduped {
 		out = append(out, sess)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -336,7 +403,11 @@ func loadProject(projectsDir string, key string, history historyIndex) (Project,
 		if err := json.Unmarshal(data, &parsed); err == nil {
 			sessions := parseSessions(parsed.Entries)
 			for i := range sessions {
-				if info, ok := history.lookup(sessions[i].SessionID); ok {
+				for _, lookupID := range append([]string{sessions[i].SessionID}, sessions[i].Aliases...) {
+					info, ok := history.lookup(lookupID)
+					if !ok {
+						continue
+					}
 					if sessions[i].ProjectPath == "" && info.ProjectPath != "" {
 						sessions[i].ProjectPath = info.ProjectPath
 					}
@@ -346,6 +417,7 @@ func loadProject(projectsDir string, key string, history historyIndex) (Project,
 					if sessions[i].CreatedAt.IsZero() && !info.FirstPromptTime.IsZero() {
 						sessions[i].CreatedAt = info.FirstPromptTime
 					}
+					break
 				}
 			}
 			projectPath := strings.TrimSpace(parsed.OriginalPath)
@@ -418,26 +490,97 @@ func loadProjectFromSessionFilesWithOptions(dir string, key string, history hist
 	}, firstErr
 }
 
+func FindSessionByIDMatch(projects []Project, sessionID string) (Session, bool, bool) {
+	sess, _, ok, ambiguous := FindSessionWithProjectMatch(projects, sessionID)
+	return sess, ok, ambiguous
+}
+
 func FindSessionByID(projects []Project, sessionID string) (Session, bool) {
+	sess, ok, _ := FindSessionByIDMatch(projects, sessionID)
+	return sess, ok
+}
+
+func FindSessionWithProjectMatch(projects []Project, sessionID string) (Session, Project, bool, bool) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return Session{}, Project{}, false, false
+	}
+
+	// Canonical ID always wins over alias matches.
 	for _, project := range projects {
 		for _, sess := range project.Sessions {
-			if sess.SessionID == sessionID {
-				return sess, true
+			if strings.TrimSpace(sess.SessionID) == sessionID {
+				return sess, project, true, false
 			}
 		}
 	}
-	return Session{}, false
+
+	var matchedSession Session
+	var matchedProject Project
+	foundAliasMatch := false
+	for _, project := range projects {
+		for _, sess := range project.Sessions {
+			if !sessionHasAlias(sess, sessionID) {
+				continue
+			}
+			if foundAliasMatch {
+				return Session{}, Project{}, false, true
+			}
+			matchedSession = sess
+			matchedProject = project
+			foundAliasMatch = true
+		}
+	}
+	if foundAliasMatch {
+		return matchedSession, matchedProject, true, false
+	}
+	return Session{}, Project{}, false, false
 }
 
 func FindSessionWithProject(projects []Project, sessionID string) (Session, Project, bool) {
+	sess, project, ok, _ := FindSessionWithProjectMatch(projects, sessionID)
+	return sess, project, ok
+}
+
+func FindSessionAliasMatches(projects []Project, sessionID string) []SessionMatch {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	matches := make([]SessionMatch, 0)
+	seen := map[string]bool{}
 	for _, project := range projects {
 		for _, sess := range project.Sessions {
-			if sess.SessionID == sessionID {
-				return sess, project, true
+			if !sessionHasAlias(sess, sessionID) {
+				continue
 			}
+			key := strings.TrimSpace(sess.SessionID) + "|" + strings.TrimSpace(sess.FilePath) + "|" + strings.TrimSpace(project.Path)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			matches = append(matches, SessionMatch{
+				Session: sess,
+				Project: project,
+			})
 		}
 	}
-	return Session{}, Project{}, false
+	sort.Slice(matches, func(i, j int) bool {
+		aSession := strings.ToLower(strings.TrimSpace(matches[i].Session.SessionID))
+		bSession := strings.ToLower(strings.TrimSpace(matches[j].Session.SessionID))
+		if aSession != bSession {
+			return aSession < bSession
+		}
+		aProject := strings.ToLower(strings.TrimSpace(matches[i].Project.Path))
+		bProject := strings.ToLower(strings.TrimSpace(matches[j].Project.Path))
+		if aProject != bProject {
+			return aProject < bProject
+		}
+		aFile := strings.ToLower(strings.TrimSpace(matches[i].Session.FilePath))
+		bFile := strings.ToLower(strings.TrimSpace(matches[j].Session.FilePath))
+		return aFile < bFile
+	})
+	return matches
 }
 
 func SessionWorkingDir(session Session, project Project) string {

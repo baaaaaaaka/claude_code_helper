@@ -31,6 +31,7 @@ func (s SubagentSession) DisplayTitle() string {
 
 type Session struct {
 	SessionID    string
+	Aliases      []string `json:"-"`
 	Summary      string
 	FirstPrompt  string
 	MessageCount int

@@ -33,8 +33,8 @@ func TestSessionFileCacheReusesReads(t *testing.T) {
 	if metaReads != 1 {
 		t.Fatalf("expected 1 meta read, got %d", metaReads)
 	}
-	if sessionIDReads != 1 {
-		t.Fatalf("expected 1 session id read, got %d", sessionIDReads)
+	if sessionIDReads != 0 {
+		t.Fatalf("expected 0 session id reads, got %d", sessionIDReads)
 	}
 }
 
@@ -70,7 +70,7 @@ func TestSessionFileCacheInvalidatesOnMtimeChange(t *testing.T) {
 	if metaReads != 2 {
 		t.Fatalf("expected 2 meta reads, got %d", metaReads)
 	}
-	if sessionIDReads != 1 {
-		t.Fatalf("expected 1 session id read, got %d", sessionIDReads)
+	if sessionIDReads != 0 {
+		t.Fatalf("expected 0 session id reads, got %d", sessionIDReads)
 	}
 }

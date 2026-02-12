@@ -123,7 +123,7 @@ func TestSessionIndexHelpers(t *testing.T) {
 		}
 	})
 
-	t.Run("resolveSessionIDFromFile prefers embedded id", func(t *testing.T) {
+	t.Run("resolveSessionIDFromFile uses filename canonical id", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "fallback.jsonl")
 		content := `{"sessionId":"sess-embedded"}`
@@ -134,8 +134,8 @@ func TestSessionIndexHelpers(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveSessionIDFromFile error: %v", err)
 		}
-		if id != "sess-embedded" {
-			t.Fatalf("expected embedded session id, got %q", id)
+		if id != "fallback" {
+			t.Fatalf("expected filename session id, got %q", id)
 		}
 	})
 
@@ -152,6 +152,16 @@ func TestSessionIndexHelpers(t *testing.T) {
 		}
 		if id != "fallback-id" {
 			t.Fatalf("expected filename session id, got %q", id)
+		}
+	})
+
+	t.Run("sessionAliasesFromMeta excludes canonical and dedupes", func(t *testing.T) {
+		meta := sessionFileMeta{
+			SessionIDs: []string{"sess-main", "sess-main", "sess-old", "sess-old"},
+		}
+		aliases := sessionAliasesFromMeta(meta, "sess-main")
+		if len(aliases) != 1 || aliases[0] != "sess-old" {
+			t.Fatalf("unexpected aliases: %#v", aliases)
 		}
 	})
 

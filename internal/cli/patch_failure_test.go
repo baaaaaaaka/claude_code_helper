@@ -189,7 +189,13 @@ func TestIsPatchedBinaryStartupFailure(t *testing.T) {
 	if !isPatchedBinaryStartupFailure(&exec.Error{Name: "missing", Err: exec.ErrNotFound}, "") {
 		t.Fatalf("expected exec error to be treated as failure")
 	}
-	cmd := exec.Command("sh", "-c", "exit 1")
+	cmdName := "sh"
+	cmdArgs := []string{"-c", "exit 1"}
+	if runtime.GOOS == "windows" {
+		cmdName = "cmd"
+		cmdArgs = []string{"/C", "exit 1"}
+	}
+	cmd := exec.Command(cmdName, cmdArgs...)
 	err := cmd.Run()
 	if err == nil {
 		t.Fatalf("expected exit error")

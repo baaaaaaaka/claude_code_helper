@@ -25,7 +25,8 @@ type sessionEnvelope struct {
 
 type sessionEnvelopeMeta struct {
 	sessionEnvelope
-	Cwd string `json:"cwd"`
+	Cwd       string `json:"cwd"`
+	SessionID string `json:"sessionId"`
 }
 
 type sessionMessage struct {
