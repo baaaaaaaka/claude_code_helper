@@ -25,3 +25,4 @@ Rows are added automatically after tests pass for a Claude Code release.
 | 2.1.41 | v0.0.36 | pass | pass | pass | pass | pass |
 | 2.1.42 | v0.0.36 | pass | pass | pass | pass | pass |
 | 2.1.44 | v0.0.36 | pass | pass | pass | pass | pass |
+| 2.1.45 | v0.0.36 | pass | pass | pass | pass | pass |
