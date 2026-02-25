@@ -21,7 +21,7 @@ import (
 	"time"
 )
 
-const defaultClaudePatchVersion = "2.1.56"
+const defaultClaudePatchVersion = "2.1.58"
 const defaultClaudeGCSBucket = "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases"
 
 func TestClaudePatchIntegration(t *testing.T) {
