@@ -33,7 +33,32 @@ func TestClaudePatchIntegration(t *testing.T) {
 		wantVersion = defaultClaudePatchVersion
 	}
 	installURL := strings.TrimSpace(os.Getenv("CLAUDE_PATCH_INSTALL_URL"))
+	runClaudePatchIntegrationCase(t, wantVersion, installURL)
+}
 
+func TestClaudePatchRegressionMatrix(t *testing.T) {
+	if os.Getenv("CLAUDE_PATCH_TEST") != "1" {
+		t.Skip("set CLAUDE_PATCH_TEST=1 to run integration test")
+	}
+	versions := parsePatchVersionMatrix(os.Getenv("CLAUDE_PATCH_VERSION_MATRIX"))
+	if len(versions) == 0 {
+		t.Skip("set CLAUDE_PATCH_VERSION_MATRIX (comma-separated) to run regression matrix")
+	}
+	installURL := strings.TrimSpace(os.Getenv("CLAUDE_PATCH_INSTALL_URL"))
+	if installURL != "" && len(versions) > 1 {
+		t.Fatalf("CLAUDE_PATCH_INSTALL_URL supports only one version per run")
+	}
+
+	for _, wantVersion := range versions {
+		wantVersion := wantVersion
+		t.Run(wantVersion, func(t *testing.T) {
+			runClaudePatchIntegrationCase(t, wantVersion, installURL)
+		})
+	}
+}
+
+func runClaudePatchIntegrationCase(t *testing.T, wantVersion string, installURL string) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 
@@ -42,12 +67,30 @@ func TestClaudePatchIntegration(t *testing.T) {
 		t.Fatalf("resolveClaudeForPatchTest: %v", err)
 	}
 
-	out, err := runClaudeVersion(ctx, path)
+	beforeVersion, err := runClaudeVersion(ctx, path)
 	if err != nil {
 		t.Fatalf("claude --version (before): %v", err)
 	}
-	if !strings.Contains(out, wantVersion) {
-		t.Fatalf("expected claude %s, got %q", wantVersion, strings.TrimSpace(out))
+	if !strings.Contains(beforeVersion, wantVersion) {
+		t.Fatalf("expected claude %s, got %q", wantVersion, strings.TrimSpace(beforeVersion))
+	}
+
+	verifyRootGuard := false
+	if runtime.GOOS == "windows" {
+		t.Log("skip root bypass probe on windows")
+	} else if !supportsYoloFlag(path) {
+		t.Log("skip root bypass probe: --permission-mode unsupported")
+	} else if ok, reason := canRunAsRootWithoutPrompt(); !ok {
+		t.Logf("skip root bypass probe: %s", reason)
+	} else {
+		probeCtx, cancelProbe := context.WithTimeout(ctx, 20*time.Second)
+		beforeRoot, beforeRootErr := runClaudeAsRoot(probeCtx, path, "--permission-mode", "bypassPermissions", "--version")
+		cancelProbe()
+		if !strings.Contains(beforeRoot, rootBypassGuardErrorMessage) {
+			t.Logf("skip root bypass assert: guard message not observed before patch (err=%v, out=%q)", beforeRootErr, compactOutput(beforeRoot))
+		} else {
+			verifyRootGuard = true
+		}
 	}
 
 	tmpDir := t.TempDir()
@@ -65,12 +108,27 @@ func TestClaudePatchIntegration(t *testing.T) {
 		t.Fatalf("expected patch outcome, got none")
 	}
 
-	after, err := runClaudeVersion(ctx, path)
+	afterVersion, err := runClaudeVersion(ctx, path)
 	if err != nil {
 		t.Fatalf("claude --version (after): %v\n%s", err, log.String())
 	}
-	if !strings.Contains(after, wantVersion) {
-		t.Fatalf("expected claude %s after patch, got %q", wantVersion, strings.TrimSpace(after))
+	if !strings.Contains(afterVersion, wantVersion) {
+		t.Fatalf("expected claude %s after patch, got %q", wantVersion, strings.TrimSpace(afterVersion))
+	}
+
+	if verifyRootGuard {
+		probeCtx, cancelProbe := context.WithTimeout(ctx, 20*time.Second)
+		afterRoot, afterRootErr := runClaudeAsRoot(probeCtx, path, "--permission-mode", "bypassPermissions", "--version")
+		cancelProbe()
+		if afterRootErr != nil {
+			t.Fatalf("claude --version (after, root bypass): %v\n%s", afterRootErr, compactOutput(afterRoot))
+		}
+		if strings.Contains(afterRoot, rootBypassGuardErrorMessage) {
+			t.Fatalf("root bypass guard still present after patch: %q", compactOutput(afterRoot))
+		}
+		if !strings.Contains(afterRoot, wantVersion) {
+			t.Fatalf("expected root bypass probe to return claude %s, got %q", wantVersion, compactOutput(afterRoot))
+		}
 	}
 
 	if runtime.GOOS == "darwin" {
@@ -88,6 +146,68 @@ func TestClaudePatchIntegration(t *testing.T) {
 			t.Fatalf("restoreExecutableFromBackup: %v", restoreErr)
 		}
 	}
+}
+
+func parsePatchVersionMatrix(raw string) []string {
+	parts := strings.Split(raw, ",")
+	seen := make(map[string]struct{}, len(parts))
+	versions := make([]string, 0, len(parts))
+	for _, part := range parts {
+		version := strings.TrimSpace(part)
+		if version == "" {
+			continue
+		}
+		if _, ok := seen[version]; ok {
+			continue
+		}
+		seen[version] = struct{}{}
+		versions = append(versions, version)
+	}
+	return versions
+}
+
+func canRunAsRootWithoutPrompt() (bool, string) {
+	if isRootSession() {
+		return true, ""
+	}
+	if _, err := exec.LookPath("sudo"); err != nil {
+		return false, "sudo not found"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := exec.CommandContext(ctx, "sudo", "-n", "true").Run(); err != nil {
+		return false, "sudo -n unavailable"
+	}
+	return true, ""
+}
+
+func isRootSession() bool {
+	out, err := exec.Command("id", "-u").CombinedOutput()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "0"
+}
+
+func runClaudeAsRoot(ctx context.Context, path string, args ...string) (string, error) {
+	if isRootSession() {
+		cmd := exec.CommandContext(ctx, path, args...)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	cmdArgs := append([]string{"-n", path}, args...)
+	cmd := exec.CommandContext(ctx, "sudo", cmdArgs...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func compactOutput(s string) string {
+	trimmed := strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
+	const maxLen = 400
+	if len(trimmed) <= maxLen {
+		return trimmed
+	}
+	return trimmed[:maxLen] + "..."
 }
 
 func runClaudeVersion(ctx context.Context, path string) (string, error) {

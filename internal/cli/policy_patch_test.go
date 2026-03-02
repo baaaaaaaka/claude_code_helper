@@ -120,6 +120,67 @@ func TestRemoteSettingsDisablePatch_NoMatch(t *testing.T) {
 	}
 }
 
+func TestRootBypassGuardPatch_ReplacesCondition(t *testing.T) {
+	requireExePatchEnabled(t)
+	input := []byte("if(" + rootBypassGuardCond + "){console.error(\"" + rootBypassGuardErrorMessage + "\");process.exit(1)}")
+
+	out, stats, err := applyRootBypassGuardPatch(input, nil, false)
+	if err != nil {
+		t.Fatalf("applyRootBypassGuardPatch error: %v", err)
+	}
+	if len(out) != len(input) {
+		t.Fatalf("expected output length %d, got %d", len(input), len(out))
+	}
+	if bytes.Contains(out, []byte(rootBypassGuardCond)) {
+		t.Fatalf("expected root bypass guard condition to be replaced")
+	}
+	if !bytes.Contains(out, []byte(rootBypassGuardCondPatched)) {
+		t.Fatalf("expected patched root bypass guard condition")
+	}
+	if stats.Replacements != 1 || stats.Changed != 1 || stats.Segments != 1 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+}
+
+func TestRootBypassGuardPatch_NoMatch(t *testing.T) {
+	requireExePatchEnabled(t)
+	input := []byte("if(process.getuid()===0){process.exit(1)}")
+
+	out, stats, err := applyRootBypassGuardPatch(input, nil, false)
+	if err != nil {
+		t.Fatalf("applyRootBypassGuardPatch error: %v", err)
+	}
+	if !bytes.Equal(out, input) {
+		t.Fatalf("expected output to be unchanged")
+	}
+	if stats.Segments != 0 || stats.Eligible != 0 || stats.Changed != 0 || stats.Replacements != 0 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+}
+
+func TestRootBypassGuardPatch_ContextFilter(t *testing.T) {
+	requireExePatchEnabled(t)
+	input := []byte(
+		"if(" + rootBypassGuardCond + "){process.exit(1)}\n" +
+			"if(" + rootBypassGuardCond + "){console.error(\"" + rootBypassGuardErrorMessage + "\");process.exit(1)}",
+	)
+
+	out, stats, err := applyRootBypassGuardPatch(input, nil, false)
+	if err != nil {
+		t.Fatalf("applyRootBypassGuardPatch error: %v", err)
+	}
+	if stats.Segments != 2 || stats.Eligible != 1 || stats.Changed != 1 || stats.Replacements != 1 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+
+	if bytes.Count(out, []byte(rootBypassGuardCond)) != 1 {
+		t.Fatalf("expected exactly one original condition to remain")
+	}
+	if bytes.Count(out, []byte(rootBypassGuardCondPatched)) != 1 {
+		t.Fatalf("expected exactly one patched condition")
+	}
+}
+
 func TestPolicyPatchHelpers(t *testing.T) {
 	t.Run("findBlock handles nested braces", func(t *testing.T) {
 		data := []byte("function x(){if(true){return '{';}// comment { }\nreturn 1;}")

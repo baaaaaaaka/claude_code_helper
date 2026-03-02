@@ -13,6 +13,10 @@ const (
 	bypassPermissionsGateNamePatched = "tengu_disable_bypass_permissionX_mode"
 	bypassPermissionsSettingKey      = "disableBypassPermissionsMode"
 	bypassPermissionsSettingPatched  = "disableBypassPermissionsModE"
+	rootBypassGuardCond              = `process.getuid()===0&&process.env.IS_SANDBOX!=="1"&&process.env.CLAUDE_CODE_BUBBLEWRAP!=="1"`
+	rootBypassGuardCondPatched       = `process.getuid()===1&&process.env.IS_SANDBOX!=="1"&&process.env.CLAUDE_CODE_BUBBLEWRAP!=="1"`
+	rootBypassGuardErrorMessage      = `--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons`
+	rootBypassGuardContextBytes      = 512
 	remoteSettingsFileName           = "remote-settings.json"
 	remoteSettingsFilePatched        = "remote-settings.jsoN"
 	remoteSettingsAPIPath            = "/api/claude_code/settings"
@@ -156,6 +160,75 @@ func applyRemoteSettingsDisablePatch(data []byte, log io.Writer, preview bool) (
 	if !changed {
 		return data, stats, nil
 	}
+	return patched, stats, nil
+}
+
+func applyRootBypassGuardPatch(data []byte, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
+	stats := exePatchStats{Label: "root-bypass-guard"}
+	before := []byte(rootBypassGuardCond)
+	after := []byte(rootBypassGuardCondPatched)
+	msg := []byte(rootBypassGuardErrorMessage)
+
+	totalMatches := bytes.Count(data, before)
+	if totalMatches == 0 {
+		return data, stats, nil
+	}
+	stats.Segments = totalMatches
+
+	allIndices := make([]int, 0, totalMatches)
+	searchStart := 0
+	for {
+		rel := bytes.Index(data[searchStart:], before)
+		if rel < 0 {
+			break
+		}
+		idx := searchStart + rel
+		allIndices = append(allIndices, idx)
+		searchStart = idx + 1
+	}
+
+	indices := make([]int, 0, len(allIndices))
+	for i, idx := range allIndices {
+		segmentEnd := len(data)
+		if i+1 < len(allIndices) {
+			segmentEnd = allIndices[i+1]
+		}
+		windowStart := idx + len(before)
+		if windowStart >= segmentEnd {
+			continue
+		}
+		windowEnd := idx + len(before) + rootBypassGuardContextBytes
+		if windowEnd > segmentEnd {
+			windowEnd = segmentEnd
+		}
+		if windowEnd > len(data) {
+			windowEnd = len(data)
+		}
+		if windowEnd <= windowStart {
+			continue
+		}
+		if !bytes.Contains(data[windowStart:windowEnd], msg) {
+			continue
+		}
+		indices = append(indices, idx)
+	}
+
+	if len(indices) == 0 {
+		return data, stats, nil
+	}
+	if preview {
+		logPatchPreview(log, stats.Label, before, after)
+	}
+
+	patched := make([]byte, len(data))
+	copy(patched, data)
+	for _, idx := range indices {
+		copy(patched[idx:idx+len(before)], after)
+	}
+	stats.Eligible = len(indices)
+	stats.Patched = len(indices)
+	stats.Replacements = len(indices)
+	stats.Changed = len(indices)
 	return patched, stats, nil
 }
 

@@ -123,12 +123,16 @@ func policySettingsSpecs() ([]exePatchSpec, error) {
 	if err != nil {
 		return nil, err
 	}
+	rootSpec, err := rootBypassGuardPatchSpec()
+	if err != nil {
+		return nil, err
+	}
 	remoteSpec, err := remoteSettingsDisablePatchSpec()
 	if err != nil {
 		return nil, err
 	}
 
-	return []exePatchSpec{disableSpec, gateSpec, remoteSpec}, nil
+	return []exePatchSpec{disableSpec, gateSpec, rootSpec, remoteSpec}, nil
 }
 
 func policySettingsDisablePatchSpec() (exePatchSpec, error) {
@@ -164,6 +168,17 @@ func remoteSettingsDisablePatchSpec() (exePatchSpec, error) {
 		applyID: "remote-settings-disable-v1",
 		apply: func(data []byte, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
 			return applyRemoteSettingsDisablePatch(data, log, preview)
+		},
+		fixedLength: true,
+	}, nil
+}
+
+func rootBypassGuardPatchSpec() (exePatchSpec, error) {
+	return exePatchSpec{
+		label:   "root-bypass-guard",
+		applyID: "root-bypass-guard-v1",
+		apply: func(data []byte, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
+			return applyRootBypassGuardPatch(data, log, preview)
 		},
 		fixedLength: true,
 	}, nil
