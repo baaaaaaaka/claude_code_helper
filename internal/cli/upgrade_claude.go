@@ -89,7 +89,7 @@ func invalidateExePatchState(cmdName string, configPath string) {
 	}
 	_ = historyStore.Update(func(h *config.PatchHistory) error {
 		for i := 0; i < len(h.Entries); i++ {
-			if h.Entries[i].Path == resolved {
+			if config.PathsEqual(h.Entries[i].Path, resolved) {
 				h.Entries = append(h.Entries[:i], h.Entries[i+1:]...)
 				i--
 			}

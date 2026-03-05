@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -30,7 +31,7 @@ type PatchHistory struct {
 
 func (h PatchHistory) IsPatched(path, specsSHA256, patchedSHA256, proxyVersion string) bool {
 	for _, entry := range h.Entries {
-		if entry.Path != path || entry.SpecsSHA256 != specsSHA256 || entry.PatchedSHA256 != patchedSHA256 {
+		if !PathsEqual(entry.Path, path) || entry.SpecsSHA256 != specsSHA256 || entry.PatchedSHA256 != patchedSHA256 {
 			continue
 		}
 		if strings.TrimSpace(entry.ProxyVersion) != strings.TrimSpace(proxyVersion) {
@@ -43,7 +44,7 @@ func (h PatchHistory) IsPatched(path, specsSHA256, patchedSHA256, proxyVersion s
 
 func (h PatchHistory) Find(path, specsSHA256 string) (PatchHistoryEntry, bool) {
 	for _, entry := range h.Entries {
-		if entry.Path == path && entry.SpecsSHA256 == specsSHA256 {
+		if PathsEqual(entry.Path, path) && entry.SpecsSHA256 == specsSHA256 {
 			return entry, true
 		}
 	}
@@ -52,7 +53,7 @@ func (h PatchHistory) Find(path, specsSHA256 string) (PatchHistoryEntry, bool) {
 
 func (h *PatchHistory) Remove(path, specsSHA256 string) bool {
 	for i := 0; i < len(h.Entries); i++ {
-		if h.Entries[i].Path == path && h.Entries[i].SpecsSHA256 == specsSHA256 {
+		if PathsEqual(h.Entries[i].Path, path) && h.Entries[i].SpecsSHA256 == specsSHA256 {
 			h.Entries = append(h.Entries[:i], h.Entries[i+1:]...)
 			return true
 		}
@@ -62,12 +63,21 @@ func (h *PatchHistory) Remove(path, specsSHA256 string) bool {
 
 func (h *PatchHistory) Upsert(entry PatchHistoryEntry) {
 	for i := range h.Entries {
-		if h.Entries[i].Path == entry.Path && h.Entries[i].SpecsSHA256 == entry.SpecsSHA256 {
+		if PathsEqual(h.Entries[i].Path, entry.Path) && h.Entries[i].SpecsSHA256 == entry.SpecsSHA256 {
 			h.Entries[i] = entry
 			return
 		}
 	}
 	h.Entries = append(h.Entries, entry)
+}
+
+// PathsEqual compares paths case-insensitively on Windows (where the
+// filesystem is case-insensitive) and case-sensitively on other platforms.
+func PathsEqual(a, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 type PatchHistoryStore struct {
