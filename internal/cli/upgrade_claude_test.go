@@ -483,21 +483,27 @@ func TestInvalidateExePatchState(t *testing.T) {
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	// Create a stale backup file alongside the binary.
-	backupPath := fakeClaude + ".claude-proxy.bak"
+	// Resolve the path the same way invalidateExePatchState will (follows symlinks).
+	resolvedClaude, err := resolveExecutablePath(fakeClaude)
+	if err != nil {
+		t.Fatalf("resolve path: %v", err)
+	}
+
+	// Create a stale backup file alongside the binary (at resolved path).
+	backupPath := resolvedClaude + ".claude-proxy.bak"
 	if err := os.WriteFile(backupPath, []byte("old-backup"), 0o600); err != nil {
 		t.Fatalf("write backup: %v", err)
 	}
 
-	// Create a patch history with an entry for this binary.
+	// Create a patch history with an entry for this binary (at resolved path).
 	store := newTempStore(t)
-	historyStore, err := config.NewPatchHistoryStore(store.Path())
-	if err != nil {
-		t.Fatalf("new patch history store: %v", err)
+	historyStore, err2 := config.NewPatchHistoryStore(store.Path())
+	if err2 != nil {
+		t.Fatalf("new patch history store: %v", err2)
 	}
 	if err := historyStore.Update(func(h *config.PatchHistory) error {
 		h.Upsert(config.PatchHistoryEntry{
-			Path:          fakeClaude,
+			Path:          resolvedClaude,
 			SpecsSHA256:   "specs-hash",
 			PatchedSHA256: "patched-hash",
 			ProxyVersion:  "0.0.38",
@@ -521,7 +527,7 @@ func TestInvalidateExePatchState(t *testing.T) {
 		t.Fatalf("load history: %v", err)
 	}
 	for _, entry := range history.Entries {
-		if entry.Path == fakeClaude {
+		if entry.Path == resolvedClaude {
 			t.Fatalf("expected patch history entry to be removed, found: %+v", entry)
 		}
 	}
