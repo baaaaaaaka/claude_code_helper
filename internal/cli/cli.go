@@ -8,7 +8,7 @@ import (
 )
 
 var (
-	version = "0.0.37"
+	version = "0.0.38"
 	commit  = ""
 	date    = ""
 )
@@ -59,6 +59,7 @@ func newRootCmd() *cobra.Command {
 		newTuiCmd(opts),
 		newProxyCmd(opts),
 		newUpgradeCmd(opts),
+		newUpgradeClaudeCmd(opts),
 		newHistoryCmd(opts),
 	)
 
