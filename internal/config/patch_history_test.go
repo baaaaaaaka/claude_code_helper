@@ -171,6 +171,62 @@ func TestPatchHistoryStoreErrorPaths(t *testing.T) {
 	})
 }
 
+func TestPathsEqual(t *testing.T) {
+	// Same path should always match.
+	if !PathsEqual("/usr/bin/claude", "/usr/bin/claude") {
+		t.Fatal("expected identical paths to be equal")
+	}
+
+	if runtime.GOOS == "windows" {
+		// Case-insensitive on Windows.
+		if !PathsEqual(`C:\Users\FOO\bin\claude.exe`, `c:\users\foo\bin\claude.exe`) {
+			t.Fatal("expected case-insensitive match on Windows")
+		}
+	} else {
+		// Case-sensitive on other platforms.
+		if PathsEqual("/usr/bin/Claude", "/usr/bin/claude") {
+			t.Fatal("expected case-sensitive mismatch on non-Windows")
+		}
+	}
+
+	// Different paths should never match.
+	if PathsEqual("/usr/bin/claude", "/usr/local/bin/claude") {
+		t.Fatal("expected different paths to not be equal")
+	}
+}
+
+func TestPatchHistoryPathsEqualIntegration(t *testing.T) {
+	// Verify that IsPatched, Find, Remove, and Upsert all use PathsEqual
+	// by confirming behavior with mixed-case paths on non-Windows.
+	if runtime.GOOS == "windows" {
+		t.Skip("case-sensitivity test only meaningful on non-Windows")
+	}
+
+	h := PatchHistory{Version: 1}
+	h.Upsert(PatchHistoryEntry{
+		Path:          "/usr/bin/Claude",
+		SpecsSHA256:   "spec1",
+		PatchedSHA256: "hash1",
+		ProxyVersion:  "v1",
+	})
+
+	// Different case should NOT match on non-Windows.
+	if h.IsPatched("/usr/bin/claude", "spec1", "hash1", "v1") {
+		t.Fatal("should not match different case on non-Windows")
+	}
+	if _, ok := h.Find("/usr/bin/claude", "spec1"); ok {
+		t.Fatal("Find should not match different case on non-Windows")
+	}
+	if h.Remove("/usr/bin/claude", "spec1") {
+		t.Fatal("Remove should not match different case on non-Windows")
+	}
+
+	// Exact case should match.
+	if !h.IsPatched("/usr/bin/Claude", "spec1", "hash1", "v1") {
+		t.Fatal("should match exact case")
+	}
+}
+
 func TestPatchHistoryPathDefault(t *testing.T) {
 	dir := t.TempDir()
 	switch runtime.GOOS {

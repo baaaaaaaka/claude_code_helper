@@ -404,19 +404,49 @@ func patchExecutable(path string, specs []exePatchSpec, log io.Writer, preview b
 			logAlreadyPatched(log, path)
 			return outcome, nil
 		}
-		if entry, ok := history.Find(path, specsHash); ok && entry.PatchedSHA256 == currentHash {
-			prev := strings.TrimSpace(entry.ProxyVersion)
-			if prev != "" && prev != strings.TrimSpace(proxyVersion) {
-				_, _ = fmt.Fprintf(log, "exe-patch: proxy changed (%s -> %s); reapplying %s\n", prev, proxyVersion, path)
+		if entry, ok := history.Find(path, specsHash); ok {
+			if entry.PatchedSHA256 == currentHash {
+				prev := strings.TrimSpace(entry.ProxyVersion)
+				if prev != "" && prev != strings.TrimSpace(proxyVersion) {
+					_, _ = fmt.Fprintf(log, "exe-patch: proxy changed (%s -> %s); reapplying %s\n", prev, proxyVersion, path)
+				}
+			} else {
+				_, _ = fmt.Fprintf(log, "exe-patch: hash mismatch for %s (stored=%s current=%s)\n", path, truncHash(entry.PatchedSHA256), truncHash(currentHash))
 			}
+		} else if len(history.Entries) > 0 {
+			logPatchHistoryMiss(log, path, specsHash, history)
 		}
 	}
 
 	sourceData := data
 	backupPath := originalBackupPath(path)
 	if backupBytes, err := os.ReadFile(backupPath); err == nil {
-		sourceData = backupBytes
-		outcome.BackupPath = backupPath
+		// Check if the backup is stale. If the current binary matches
+		// neither the backup (original) nor the stored patched hash, it
+		// means the target was replaced externally (e.g. Claude Code
+		// auto-update). In that case the backup belongs to a previous
+		// version and must not be used as the patch source — doing so
+		// would overwrite the new binary with a patched copy of the old
+		// one, causing a version rollback.
+		backupHash := hashBytes(backupBytes)
+		storedPatchedHash := ""
+		if historyLoaded {
+			if entry, ok := history.Find(path, specsHash); ok {
+				storedPatchedHash = entry.PatchedSHA256
+			}
+		}
+		backupIsStale := currentHash != backupHash &&
+			storedPatchedHash != "" &&
+			currentHash != storedPatchedHash
+		if backupIsStale {
+			_, _ = fmt.Fprintf(log, "exe-patch: backup is stale (target updated externally); refreshing %s\n", backupPath)
+			if err := os.Remove(backupPath); err != nil && !os.IsNotExist(err) {
+				_, _ = fmt.Fprintf(log, "exe-patch: failed to remove stale backup: %v\n", err)
+			}
+		} else {
+			sourceData = backupBytes
+			outcome.BackupPath = backupPath
+		}
 	} else if err != nil && !os.IsNotExist(err) {
 		_, _ = fmt.Fprintf(log, "exe-patch: failed to read backup %s: %v (using current binary)\n", backupPath, err)
 	}
@@ -438,6 +468,9 @@ func patchExecutable(path string, specs []exePatchSpec, log io.Writer, preview b
 	}
 	if changed && bytes.Equal(patched, data) {
 		changed = false
+		for i := range stats {
+			stats[i].Changed = 0
+		}
 	}
 
 	var patchedHash string
@@ -771,6 +804,26 @@ func logDryRun(w io.Writer, path string, changed bool) {
 		return
 	}
 	_, _ = fmt.Fprintf(w, "exe-patch: dry-run enabled; no changes for %s\n", path)
+}
+
+func truncHash(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
+}
+
+func logPatchHistoryMiss(w io.Writer, path string, specsHash string, history config.PatchHistory) {
+	if w == nil {
+		return
+	}
+	for _, entry := range history.Entries {
+		if strings.EqualFold(entry.Path, path) {
+			_, _ = fmt.Fprintf(w, "exe-patch: path case mismatch: stored=%q current=%q\n", entry.Path, path)
+			return
+		}
+	}
+	_, _ = fmt.Fprintf(w, "exe-patch: no history entry for %s (specsHash=%s, entries=%d)\n", path, truncHash(specsHash), len(history.Entries))
 }
 
 func logAlreadyPatched(w io.Writer, path string) {

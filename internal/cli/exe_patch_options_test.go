@@ -294,18 +294,15 @@ func TestPatchExecutableProxyChangeUsesBackup(t *testing.T) {
 		t.Fatalf("expected patch to be applied")
 	}
 
-	if err := os.WriteFile(path, []byte("baz baz"), 0o700); err != nil {
-		t.Fatalf("corrupt executable: %v", err)
-	}
-
+	// Binary is now "bar bar" (patched). Proxy version changes but binary
+	// stays the same — backup is still valid and should be used as source.
 	log.Reset()
 	outcome2, err := patchExecutable(path, []exePatchSpec{spec}, log, false, false, store, "v2.0.0")
 	if err != nil {
 		t.Fatalf("patchExecutable proxy update error: %v", err)
 	}
-	if !outcome2.Applied {
-		t.Fatalf("expected patched binary to be rewritten from backup")
-	}
+	// The patched result from the backup equals the on-disk binary, so no
+	// write is needed. Applied should be false (binary already correct).
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read patched: %v", err)
@@ -326,6 +323,63 @@ func TestPatchExecutableProxyChangeUsesBackup(t *testing.T) {
 	}
 	if entry.ProxyVersion != "v2.0.0" {
 		t.Fatalf("expected proxy version to update, got %q", entry.ProxyVersion)
+	}
+	_ = outcome2
+}
+
+func TestPatchExecutableStaleBackupDiscarded(t *testing.T) {
+	requireExePatchEnabled(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bin")
+	if err := os.WriteFile(path, []byte("foo foo"), 0o700); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
+
+	store, err := config.NewPatchHistoryStore(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatalf("NewPatchHistoryStore error: %v", err)
+	}
+
+	spec := exePatchSpec{
+		match:   regexp.MustCompile("foo"),
+		guard:   nil,
+		patch:   regexp.MustCompile("foo"),
+		replace: []byte("bar"),
+		label:   "custom-1",
+	}
+	log := &bytes.Buffer{}
+	outcome, err := patchExecutable(path, []exePatchSpec{spec}, log, false, false, store, "v1.0.0")
+	if err != nil {
+		t.Fatalf("patchExecutable error: %v", err)
+	}
+	if !outcome.Applied {
+		t.Fatalf("expected patch to be applied")
+	}
+
+	// Simulate external update (e.g., Claude auto-update) — binary is
+	// replaced with new content that still contains patchable patterns.
+	if err := os.WriteFile(path, []byte("foo baz"), 0o700); err != nil {
+		t.Fatalf("replace executable: %v", err)
+	}
+
+	log.Reset()
+	outcome2, err := patchExecutable(path, []exePatchSpec{spec}, log, false, false, store, "v2.0.0")
+	if err != nil {
+		t.Fatalf("patchExecutable error: %v", err)
+	}
+	if !outcome2.Applied {
+		t.Fatalf("expected patch to be applied to new binary")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read patched: %v", err)
+	}
+	// Should patch the NEW binary, not restore from stale backup.
+	if string(data) != "bar baz" {
+		t.Fatalf("expected new binary to be patched, got %q", string(data))
+	}
+	if !strings.Contains(log.String(), "stale") {
+		t.Fatalf("expected stale backup log, got %q", log.String())
 	}
 }
 
@@ -517,4 +571,230 @@ func TestFormatPreviewSegment(t *testing.T) {
 	if got := formatPreviewSegment(long); !strings.Contains(got, "truncated 1 bytes") {
 		t.Fatalf("expected truncated preview, got %q", got)
 	}
+}
+
+func TestPatchExecutableStaleBackupNoHistory(t *testing.T) {
+	// When there is no history, the backup cannot be determined stale.
+	// The backup should be used as the patch source.
+	requireExePatchEnabled(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bin")
+	original := []byte("foo foo")
+	if err := os.WriteFile(path, original, 0o700); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	spec := exePatchSpec{
+		match:   regexp.MustCompile("foo"),
+		patch:   regexp.MustCompile("foo"),
+		replace: []byte("bar"),
+		label:   "test",
+	}
+
+	// Patch once without history store to create a backup.
+	log := &bytes.Buffer{}
+	outcome, err := patchExecutable(path, []exePatchSpec{spec}, log, false, false, nil, "v1")
+	if err != nil {
+		t.Fatalf("first patch: %v", err)
+	}
+	if !outcome.Applied {
+		t.Fatalf("expected first patch to be applied")
+	}
+
+	// Replace binary externally (simulating auto-update).
+	if err := os.WriteFile(path, []byte("qux qux"), 0o700); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+
+	// Patch again WITHOUT history store — cannot determine staleness.
+	log.Reset()
+	_, err = patchExecutable(path, []exePatchSpec{spec}, log, false, false, nil, "v2")
+	if err != nil {
+		t.Fatalf("second patch: %v", err)
+	}
+	// The backup is used (not discarded) because there's no history to
+	// compare against. The patched output from backup overwrites the binary.
+	data, _ := os.ReadFile(path)
+	if string(data) != "bar bar" {
+		t.Fatalf("expected backup-based patch result, got %q", data)
+	}
+}
+
+func TestPatchExecutableStaleBackupNoPatchableContent(t *testing.T) {
+	// Stale backup with a new binary that has no patchable content.
+	// The backup should be discarded; patching fails because the new
+	// binary has no matches (which is the correct behavior — we don't
+	// patch from a stale backup).
+	requireExePatchEnabled(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bin")
+	if err := os.WriteFile(path, []byte("foo foo"), 0o700); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	store, err := config.NewPatchHistoryStore(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+
+	spec := exePatchSpec{
+		match:   regexp.MustCompile("foo"),
+		patch:   regexp.MustCompile("foo"),
+		replace: []byte("bar"),
+		label:   "test",
+	}
+
+	// Patch once with history.
+	log := &bytes.Buffer{}
+	if _, err := patchExecutable(path, []exePatchSpec{spec}, log, false, false, store, "v1"); err != nil {
+		t.Fatalf("first patch: %v", err)
+	}
+
+	// Replace binary with content that doesn't match the pattern.
+	if err := os.WriteFile(path, []byte("qux qux"), 0o700); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+
+	log.Reset()
+	_, err = patchExecutable(path, []exePatchSpec{spec}, log, false, false, store, "v2")
+	// Patching returns an error because the new binary has no matches.
+	// This is correct — we must not fall back to the stale backup.
+	if err == nil {
+		t.Fatalf("expected error from patching (no matches in new binary)")
+	}
+	if !strings.Contains(err.Error(), "no matches") {
+		t.Fatalf("expected 'no matches' error, got: %v", err)
+	}
+	// Binary should remain unchanged (not overwritten from stale backup).
+	data, _ := os.ReadFile(path)
+	if string(data) != "qux qux" {
+		t.Fatalf("expected new binary to be untouched, got %q", data)
+	}
+	if !strings.Contains(log.String(), "stale") {
+		t.Fatalf("expected stale backup log, got %q", log.String())
+	}
+}
+
+func TestPatchExecutableAlreadyPatchedSkips(t *testing.T) {
+	// After patching, a second run with the same version should skip.
+	requireExePatchEnabled(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bin")
+	if err := os.WriteFile(path, []byte("foo foo"), 0o700); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	store, err := config.NewPatchHistoryStore(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+
+	spec := exePatchSpec{
+		match:   regexp.MustCompile("foo"),
+		patch:   regexp.MustCompile("foo"),
+		replace: []byte("bar"),
+		label:   "test",
+	}
+
+	log := &bytes.Buffer{}
+	if _, err := patchExecutable(path, []exePatchSpec{spec}, log, false, false, store, "v1"); err != nil {
+		t.Fatalf("first patch: %v", err)
+	}
+
+	log.Reset()
+	outcome, err := patchExecutable(path, []exePatchSpec{spec}, log, false, false, store, "v1")
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if !outcome.AlreadyPatched {
+		t.Fatalf("expected AlreadyPatched=true on second run")
+	}
+	if !strings.Contains(log.String(), "already patched") {
+		t.Fatalf("expected 'already patched' log, got %q", log.String())
+	}
+}
+
+func TestPatchExecutableNoRealChangeLogsCorrectly(t *testing.T) {
+	// When a backup exists and the binary is already patched (but
+	// IsPatched misses due to proxy version change), the log should
+	// report "no byte changes", not "updated".
+	requireExePatchEnabled(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bin")
+	if err := os.WriteFile(path, []byte("foo foo"), 0o700); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	store, err := config.NewPatchHistoryStore(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+
+	spec := exePatchSpec{
+		match:   regexp.MustCompile("foo"),
+		patch:   regexp.MustCompile("foo"),
+		replace: []byte("bar"),
+		label:   "test",
+	}
+
+	log := &bytes.Buffer{}
+	if _, err := patchExecutable(path, []exePatchSpec{spec}, log, false, false, store, "v1"); err != nil {
+		t.Fatalf("first patch: %v", err)
+	}
+
+	// Second run with different proxy version — IsPatched returns false,
+	// but the binary content is already correct.
+	log.Reset()
+	outcome, err := patchExecutable(path, []exePatchSpec{spec}, log, false, false, store, "v2")
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if outcome.Applied {
+		t.Fatalf("expected no write (binary already correct)")
+	}
+	if strings.Contains(log.String(), "updated") {
+		t.Fatalf("log should not say 'updated' when binary is unchanged: %q", log.String())
+	}
+	if !strings.Contains(log.String(), "no byte changes") {
+		t.Fatalf("expected 'no byte changes' log, got %q", log.String())
+	}
+}
+
+func TestTruncHash(t *testing.T) {
+	if got := truncHash("abcdef1234567890"); got != "abcdef123456" {
+		t.Fatalf("expected first 12 chars, got %q", got)
+	}
+	if got := truncHash("short"); got != "short" {
+		t.Fatalf("expected full string for short input, got %q", got)
+	}
+	if got := truncHash(""); got != "" {
+		t.Fatalf("expected empty string, got %q", got)
+	}
+}
+
+func TestLogPatchHistoryMiss(t *testing.T) {
+	log := &bytes.Buffer{}
+
+	// No entries — should log "no history entry".
+	history := config.PatchHistory{
+		Version: 1,
+		Entries: []config.PatchHistoryEntry{
+			{Path: "/other/path", SpecsSHA256: "other-spec", PatchedSHA256: "h1", ProxyVersion: "v1"},
+		},
+	}
+	logPatchHistoryMiss(log, "/usr/bin/claude", "abcdef123456abcdef", history)
+	if !strings.Contains(log.String(), "no history entry") {
+		t.Fatalf("expected 'no history entry', got %q", log.String())
+	}
+
+	// Case mismatch — should log "path case mismatch".
+	log.Reset()
+	history.Entries[0].Path = "/usr/bin/Claude"
+	logPatchHistoryMiss(log, "/usr/bin/claude", "abcdef123456abcdef", history)
+	if !strings.Contains(log.String(), "path case mismatch") {
+		t.Fatalf("expected 'path case mismatch', got %q", log.String())
+	}
+
+	// nil writer — should not panic.
+	logPatchHistoryMiss(nil, "/usr/bin/claude", "abcdef123456abcdef", history)
 }
