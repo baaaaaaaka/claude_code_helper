@@ -469,3 +469,60 @@ func TestRunUpgradeClaudeWithProfileFlag(t *testing.T) {
 		t.Fatalf("expected proxy env %q, got %q", proxyURL, strings.Join(lines, ","))
 	}
 }
+
+func TestInvalidateExePatchState(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip on windows")
+	}
+
+	// Create a fake "claude" binary.
+	binDir := t.TempDir()
+	fakeClaude := filepath.Join(binDir, "claude")
+	if err := os.WriteFile(fakeClaude, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// Create a stale backup file alongside the binary.
+	backupPath := fakeClaude + ".claude-proxy.bak"
+	if err := os.WriteFile(backupPath, []byte("old-backup"), 0o600); err != nil {
+		t.Fatalf("write backup: %v", err)
+	}
+
+	// Create a patch history with an entry for this binary.
+	store := newTempStore(t)
+	historyStore, err := config.NewPatchHistoryStore(store.Path())
+	if err != nil {
+		t.Fatalf("new patch history store: %v", err)
+	}
+	if err := historyStore.Update(func(h *config.PatchHistory) error {
+		h.Upsert(config.PatchHistoryEntry{
+			Path:          fakeClaude,
+			SpecsSHA256:   "specs-hash",
+			PatchedSHA256: "patched-hash",
+			ProxyVersion:  "0.0.38",
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("update history: %v", err)
+	}
+
+	// Run invalidation.
+	invalidateExePatchState("claude", store.Path())
+
+	// Backup should be removed.
+	if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
+		t.Fatalf("expected backup to be removed, got err=%v", err)
+	}
+
+	// Patch history entry should be removed.
+	history, err := historyStore.Load()
+	if err != nil {
+		t.Fatalf("load history: %v", err)
+	}
+	for _, entry := range history.Entries {
+		if entry.Path == fakeClaude {
+			t.Fatalf("expected patch history entry to be removed, found: %+v", entry)
+		}
+	}
+}
