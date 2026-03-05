@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"os/exec"
 
 	"github.com/spf13/cobra"
 
@@ -56,8 +57,45 @@ func runUpgradeClaude(cmd *cobra.Command, root *rootOptions, profileRef string) 
 		return err
 	}
 
+	// Remove stale exe-patch backup and history so the patch system treats
+	// the freshly-installed binary as new rather than re-patching the old
+	// backup over the top.
+	invalidateExePatchState("claude", root.configPath)
+
 	_, _ = fmt.Fprintln(out, "Claude Code upgrade complete.")
 	return nil
+}
+
+// invalidateExePatchState removes the exe-patch backup file and patch history
+// entry for the given command so the next run re-patches from the new binary.
+func invalidateExePatchState(cmdName string, configPath string) {
+	exePath, err := exec.LookPath(cmdName)
+	if err != nil {
+		return
+	}
+	resolved, err := resolveExecutablePath(exePath)
+	if err != nil {
+		return
+	}
+
+	backup := originalBackupPath(resolved)
+	if err := os.Remove(backup); err != nil && !os.IsNotExist(err) {
+		return
+	}
+
+	historyStore, err := config.NewPatchHistoryStore(configPath)
+	if err != nil {
+		return
+	}
+	_ = historyStore.Update(func(h *config.PatchHistory) error {
+		for i := 0; i < len(h.Entries); i++ {
+			if h.Entries[i].Path == resolved {
+				h.Entries = append(h.Entries[:i], h.Entries[i+1:]...)
+				i--
+			}
+		}
+		return nil
+	})
 }
 
 func upgradeClaudeInstallOpts(cfg config.Config, profileRef string) (installProxyOptions, error) {
