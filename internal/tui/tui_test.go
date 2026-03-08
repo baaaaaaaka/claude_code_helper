@@ -30,6 +30,8 @@ func newTestScreen(t *testing.T, w, h int) tcell.Screen {
 
 type sizedScreen struct {
 	tcell.Screen
+	initDone chan struct{}
+	initOnce sync.Once
 }
 
 func (s *sizedScreen) Init() error {
@@ -37,6 +39,11 @@ func (s *sizedScreen) Init() error {
 		return err
 	}
 	s.Screen.SetSize(80, 24)
+	if s.initDone != nil {
+		s.initOnce.Do(func() {
+			close(s.initDone)
+		})
+	}
 	return nil
 }
 
@@ -276,7 +283,7 @@ func TestFilterProjectsMatchesFullPath(t *testing.T) {
 
 func TestCompactProjectPathKeepsTailAnchor(t *testing.T) {
 	got := compactProjectPath("/alice/bob/cherry/donut-eclipse-fundation-garlic", 32)
-	if !strings.HasPrefix(got, "..rry/") {
+	if !strings.HasPrefix(got, "..rry"+string(filepath.Separator)) {
 		t.Fatalf("expected parent tail anchor, got %q", got)
 	}
 	if !strings.Contains(got, "...") {
@@ -292,7 +299,7 @@ func TestCompactProjectPathKeepsTailAnchor(t *testing.T) {
 
 func TestCompactProjectPathReturnsFullPathWhenItFits(t *testing.T) {
 	path := "/tmp/example"
-	if got := compactProjectPath(path, displayWidth(path)); got != path {
+	if got := compactProjectPath(path, displayWidth(filepath.Clean(path))); got != filepath.Clean(path) {
 		t.Fatalf("expected full path when width fits, got %q", got)
 	}
 }
@@ -815,9 +822,10 @@ func TestEnsurePreview(t *testing.T) {
 
 func TestSelectSessionReturnsSelectionOnEnter(t *testing.T) {
 	screen := tcell.NewSimulationScreen("UTF-8")
+	initDone := make(chan struct{})
 	prevNewScreen := newScreen
 	newScreen = func() (tcell.Screen, error) {
-		return &sizedScreen{Screen: screen}, nil
+		return &sizedScreen{Screen: screen, initDone: initDone}, nil
 	}
 	t.Cleanup(func() { newScreen = prevNewScreen })
 
@@ -835,7 +843,7 @@ func TestSelectSessionReturnsSelectionOnEnter(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	go func() {
-		time.Sleep(50 * time.Millisecond)
+		<-initDone
 		screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'l', 0))
 		screen.PostEvent(tcell.NewEventKey(tcell.KeyDown, 0, 0))
 		screen.PostEvent(tcell.NewEventKey(tcell.KeyEnter, 0, 0))
@@ -856,16 +864,17 @@ func TestSelectSessionReturnsSelectionOnEnter(t *testing.T) {
 
 func TestSelectSessionQuit(t *testing.T) {
 	screen := tcell.NewSimulationScreen("UTF-8")
+	initDone := make(chan struct{})
 	prevNewScreen := newScreen
 	newScreen = func() (tcell.Screen, error) {
-		return &sizedScreen{Screen: screen}, nil
+		return &sizedScreen{Screen: screen, initDone: initDone}, nil
 	}
 	t.Cleanup(func() { newScreen = prevNewScreen })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	go func() {
-		time.Sleep(50 * time.Millisecond)
+		<-initDone
 		screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'q', 0))
 	}()
 
@@ -884,9 +893,10 @@ func TestSelectSessionQuit(t *testing.T) {
 
 func TestSelectSessionRefreshInterval(t *testing.T) {
 	screen := tcell.NewSimulationScreen("UTF-8")
+	initDone := make(chan struct{})
 	prevNewScreen := newScreen
 	newScreen = func() (tcell.Screen, error) {
-		return &sizedScreen{Screen: screen}, nil
+		return &sizedScreen{Screen: screen, initDone: initDone}, nil
 	}
 	t.Cleanup(func() { newScreen = prevNewScreen })
 
@@ -921,6 +931,7 @@ func TestSelectSessionRefreshInterval(t *testing.T) {
 		t.Fatalf("timeout waiting for refresh")
 	}
 
+	<-initDone
 	screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'q', 0))
 
 	select {
@@ -941,9 +952,10 @@ func TestSelectSessionRefreshInterval(t *testing.T) {
 
 func TestSelectSessionAutoRefreshPreservesSelection(t *testing.T) {
 	screen := tcell.NewSimulationScreen("UTF-8")
+	initDone := make(chan struct{})
 	prevNewScreen := newScreen
 	newScreen = func() (tcell.Screen, error) {
-		return &sizedScreen{Screen: screen}, nil
+		return &sizedScreen{Screen: screen, initDone: initDone}, nil
 	}
 	t.Cleanup(func() { newScreen = prevNewScreen })
 
@@ -979,7 +991,7 @@ func TestSelectSessionAutoRefreshPreservesSelection(t *testing.T) {
 	defer cancel()
 
 	go func() {
-		time.Sleep(20 * time.Millisecond)
+		<-initDone
 		screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'j', 0))
 		screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'l', 0))
 		screen.PostEvent(tcell.NewEventKey(tcell.KeyDown, 0, 0))
