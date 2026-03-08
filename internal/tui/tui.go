@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -95,8 +96,8 @@ type previewState struct {
 }
 
 type projectItem struct {
-	label         string
 	project       claudehistory.Project
+	filterText    string
 	isCurrent     bool
 	alwaysVisible bool
 }
@@ -808,7 +809,7 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 		drawList(
 			screen,
 			layoutMode.projects,
-			renderProjectRows(filteredProjects, listFocus == "projects", state.projectState, layoutMode.projects.h-2),
+			renderProjectRows(filteredProjects, listFocus == "projects", state.projectState, layoutMode.projects.h-2, layoutMode.projects.w-2),
 		)
 		if listFocus == "sessions" {
 			drawList(
@@ -822,7 +823,7 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 		drawList(
 			screen,
 			layoutMode.projects,
-			renderProjectRows(filteredProjects, state.focus == "projects", state.projectState, layoutMode.projects.h-2),
+			renderProjectRows(filteredProjects, state.focus == "projects", state.projectState, layoutMode.projects.h-2, layoutMode.projects.w-2),
 		)
 
 		drawBox(screen, layoutMode.sessions, "Sessions", state.focus == "sessions", sessionFilter)
@@ -914,29 +915,31 @@ func ensurePreview(
 }
 
 func buildProjectItems(projects []claudehistory.Project, defaultCwd string) []projectItem {
-	items := make([]projectItem, 0, len(projects)+1)
 	currentPath := strings.TrimSpace(defaultCwd)
 	currentResolved := normalizePathForCompare(currentPath)
+	sortedProjects := append([]claudehistory.Project(nil), projects...)
+	sort.SliceStable(sortedProjects, func(i, j int) bool {
+		leftModified := projectLastModified(sortedProjects[i])
+		rightModified := projectLastModified(sortedProjects[j])
+		leftZero := leftModified.IsZero()
+		rightZero := rightModified.IsZero()
+		if leftZero != rightZero {
+			return !leftZero
+		}
+		if !leftModified.Equal(rightModified) {
+			return leftModified.After(rightModified)
+		}
+		return projectSortKey(sortedProjects[i]) < projectSortKey(sortedProjects[j])
+	})
+
+	items := make([]projectItem, 0, len(sortedProjects)+1)
 	currentIdx := -1
 
-	for _, project := range projects {
-		label := project.Path
-		if label == "" {
-			label = project.Key
-		}
-		if label == "" {
-			label = "Unknown project"
-		}
-		if len(project.Sessions) > 0 {
-			label = fmt.Sprintf("%s  (%d)", label, len(project.Sessions))
-		}
+	for _, project := range sortedProjects {
 		isCurrent := currentResolved != "" && isSamePath(project.Path, currentResolved)
-		if isCurrent {
-			label = "[current] " + label
-		}
 		items = append(items, projectItem{
-			label:         label,
 			project:       project,
+			filterText:    projectFilterText(project),
 			isCurrent:     isCurrent,
 			alwaysVisible: isCurrent,
 		})
@@ -948,10 +951,9 @@ func buildProjectItems(projects []claudehistory.Project, defaultCwd string) []pr
 	if currentResolved != "" {
 		if currentIdx == -1 {
 			project := claudehistory.Project{Path: currentPath}
-			label := "[current] " + currentPath
 			items = append([]projectItem{{
-				label:         label,
 				project:       project,
+				filterText:    projectFilterText(project),
 				isCurrent:     true,
 				alwaysVisible: true,
 			}}, items...)
@@ -962,6 +964,45 @@ func buildProjectItems(projects []claudehistory.Project, defaultCwd string) []pr
 	}
 
 	return items
+}
+
+func projectLastModified(project claudehistory.Project) time.Time {
+	var last time.Time
+	for _, session := range project.Sessions {
+		if session.ModifiedAt.After(last) {
+			last = session.ModifiedAt
+		}
+		for _, subagent := range session.Subagents {
+			if subagent.ModifiedAt.After(last) {
+				last = subagent.ModifiedAt
+			}
+		}
+	}
+	return last
+}
+
+func projectSortKey(project claudehistory.Project) string {
+	if path := strings.TrimSpace(project.Path); path != "" {
+		return strings.ToLower(path)
+	}
+	if key := strings.TrimSpace(project.Key); key != "" {
+		return strings.ToLower(key)
+	}
+	return ""
+}
+
+func projectFilterText(project claudehistory.Project) string {
+	parts := make([]string, 0, 2)
+	if path := strings.TrimSpace(project.Path); path != "" {
+		parts = append(parts, path)
+	}
+	if key := strings.TrimSpace(project.Key); key != "" {
+		parts = append(parts, key)
+	}
+	if len(parts) == 0 {
+		return "Unknown project"
+	}
+	return strings.Join(parts, " ")
 }
 
 func buildSessionItems(project claudehistory.Project, expanded map[string]bool) []sessionItem {
@@ -1193,14 +1234,197 @@ func buildPreviewLines(
 	return lines
 }
 
-func renderProjectRows(items []projectItem, focused bool, state listState, viewH int) []row {
+func renderProjectRows(items []projectItem, focused bool, state listState, viewH int, innerW int) []row {
 	rows := make([]row, 0, min(len(items), viewH))
 	start := clamp(state.scroll, 0, max(0, len(items)))
 	end := min(len(items), start+max(0, viewH))
 	for i := start; i < end; i++ {
-		rows = append(rows, row{label: items[i].label, bold: items[i].isCurrent})
+		rows = append(rows, row{
+			label: formatProjectRow(items[i], innerW),
+			bold:  items[i].isCurrent,
+		})
 	}
 	return applySelection(rows, focused, listState{selected: state.selected - start})
+}
+
+func formatProjectRow(item projectItem, width int) string {
+	if width <= 0 {
+		return ""
+	}
+
+	prefix := ""
+	if item.isCurrent {
+		prefix = "[current] "
+	}
+	suffix := ""
+	if count := len(item.project.Sessions); count > 0 {
+		suffix = fmt.Sprintf("  (%d)", count)
+	}
+
+	bodyWidth := max(0, width-displayWidth(prefix)-displayWidth(suffix))
+	body := projectDisplayBody(item.project, bodyWidth)
+	label := prefix + body + suffix
+	if displayWidth(label) <= width {
+		return label
+	}
+	return truncate(label, width)
+}
+
+func projectDisplayBody(project claudehistory.Project, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if path := strings.TrimSpace(project.Path); path != "" {
+		return compactProjectPath(path, width)
+	}
+	name := projectDisplayName(project)
+	if displayWidth(name) <= width {
+		return name
+	}
+	return middleEllipsisASCII(name, width)
+}
+
+func projectDisplayName(project claudehistory.Project) string {
+	if path := strings.TrimSpace(project.Path); path != "" {
+		return path
+	}
+	if key := strings.TrimSpace(project.Key); key != "" {
+		return key
+	}
+	return "Unknown project"
+}
+
+func compactProjectPath(path string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	cleaned := filepath.Clean(strings.TrimSpace(path))
+	if cleaned == "." || cleaned == "" {
+		return ""
+	}
+	if displayWidth(cleaned) <= width {
+		return cleaned
+	}
+
+	base := filepath.Base(cleaned)
+	if base == "." || base == string(filepath.Separator) || (base == cleaned && !strings.Contains(cleaned, string(filepath.Separator))) {
+		return middleEllipsisASCII(cleaned, width)
+	}
+
+	dir := filepath.Dir(cleaned)
+	parent := ""
+	if dir != "." && dir != cleaned {
+		parent = filepath.Base(dir)
+		if parent == "." || parent == string(filepath.Separator) {
+			parent = ""
+		}
+	}
+
+	baseOnly := middleEllipsisASCII(base, width)
+	if parent == "" {
+		return baseOnly
+	}
+
+	parentHint := ".." + takeSuffixByWidth(parent, 3)
+	prefixCandidates := []string{
+		parentHint + string(filepath.Separator),
+		"..." + string(filepath.Separator),
+		string(filepath.Separator),
+		"",
+	}
+	for _, prefix := range prefixCandidates {
+		if displayWidth(prefix) >= width {
+			continue
+		}
+		bodyWidth := width - displayWidth(prefix)
+		if bodyWidth <= 0 {
+			continue
+		}
+		body := base
+		if displayWidth(body) > bodyWidth {
+			body = middleEllipsisASCII(body, bodyWidth)
+		}
+		if body == "" {
+			continue
+		}
+		return prefix + body
+	}
+	return baseOnly
+}
+
+func middleEllipsisASCII(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if displayWidth(s) <= width {
+		return s
+	}
+	const ellipsis = "..."
+	if width <= len(ellipsis) {
+		return truncate(s, width)
+	}
+	avail := width - len(ellipsis)
+	leftWidth := max(1, avail/2)
+	rightWidth := max(1, avail-leftWidth)
+	left := takePrefixByWidth(s, leftWidth)
+	right := takeSuffixByWidth(s, rightWidth)
+	for displayWidth(left)+len(ellipsis)+displayWidth(right) > width {
+		if displayWidth(left) >= displayWidth(right) && left != "" {
+			left = takePrefixByWidth(left, max(0, displayWidth(left)-1))
+			continue
+		}
+		if right == "" {
+			break
+		}
+		right = takeSuffixByWidth(right, max(0, displayWidth(right)-1))
+	}
+	if left == "" || right == "" {
+		return truncate(s, width)
+	}
+	return left + ellipsis + right
+}
+
+func takePrefixByWidth(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	var buf strings.Builder
+	curWidth := 0
+	for _, ch := range s {
+		chWidth := runewidth.RuneWidth(ch)
+		if chWidth == 0 {
+			buf.WriteRune(ch)
+			continue
+		}
+		if curWidth+chWidth > width {
+			break
+		}
+		buf.WriteRune(ch)
+		curWidth += chWidth
+	}
+	return buf.String()
+}
+
+func takeSuffixByWidth(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	curWidth := 0
+	start := len(runes)
+	for start > 0 {
+		chWidth := runewidth.RuneWidth(runes[start-1])
+		if chWidth == 0 {
+			start--
+			continue
+		}
+		if curWidth+chWidth > width {
+			break
+		}
+		curWidth += chWidth
+		start--
+	}
+	return string(runes[start:])
 }
 
 func renderSessionRows(items []sessionItem, focused bool, state listState, viewH int) []row {
@@ -1295,7 +1519,7 @@ func filterProjects(items []projectItem, needle string) []projectItem {
 			out = append(out, it)
 			continue
 		}
-		if strings.Contains(strings.ToLower(it.label), n) {
+		if strings.Contains(strings.ToLower(it.filterText), n) {
 			out = append(out, it)
 		}
 	}

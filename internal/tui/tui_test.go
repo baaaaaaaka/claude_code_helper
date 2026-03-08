@@ -170,8 +170,9 @@ func TestBuildProjectItemsPinsCurrent(t *testing.T) {
 	if items[0].project.Path != cwd {
 		t.Fatalf("expected current path %s, got %s", cwd, items[0].project.Path)
 	}
-	if !strings.Contains(items[0].label, "[current]") {
-		t.Fatalf("expected current label, got %q", items[0].label)
+	rows := renderProjectRows(items, true, listState{}, 1, 80)
+	if len(rows) == 0 || !strings.Contains(rows[0].label, "[current]") {
+		t.Fatalf("expected current label, got %#v", rows)
 	}
 }
 
@@ -196,6 +197,103 @@ func TestFilterProjectsKeepsCurrentVisible(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected current project to remain visible")
+	}
+}
+
+func TestBuildProjectItemsSortsByLatestActivity(t *testing.T) {
+	base := time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
+	projects := []claudehistory.Project{
+		{
+			Path: "/tmp/older",
+			Sessions: []claudehistory.Session{{
+				ModifiedAt: base,
+			}},
+		},
+		{
+			Path: "/tmp/newer",
+			Sessions: []claudehistory.Session{{
+				ModifiedAt: base.Add(2 * time.Hour),
+			}},
+		},
+		{
+			Path: "/tmp/subagent",
+			Sessions: []claudehistory.Session{{
+				ModifiedAt: base.Add(time.Hour),
+				Subagents: []claudehistory.SubagentSession{{
+					ModifiedAt: base.Add(3 * time.Hour),
+				}},
+			}},
+		},
+		{Path: "/tmp/unknown"},
+	}
+
+	items := buildProjectItems(projects, "")
+	got := []string{
+		items[0].project.Path,
+		items[1].project.Path,
+		items[2].project.Path,
+		items[3].project.Path,
+	}
+	want := []string{"/tmp/subagent", "/tmp/newer", "/tmp/older", "/tmp/unknown"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected project order: got %#v want %#v", got, want)
+	}
+}
+
+func TestBuildProjectItemsUsesAlphabeticalTieBreak(t *testing.T) {
+	modified := time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
+	items := buildProjectItems([]claudehistory.Project{
+		{
+			Path: "/tmp/z-last",
+			Sessions: []claudehistory.Session{{
+				ModifiedAt: modified,
+			}},
+		},
+		{
+			Path: "/tmp/a-first",
+			Sessions: []claudehistory.Session{{
+				ModifiedAt: modified,
+			}},
+		},
+	}, "")
+	if len(items) < 2 {
+		t.Fatalf("expected 2 items, got %#v", items)
+	}
+	if items[0].project.Path != "/tmp/a-first" || items[1].project.Path != "/tmp/z-last" {
+		t.Fatalf("unexpected alphabetical fallback order: %#v", items)
+	}
+}
+
+func TestFilterProjectsMatchesFullPath(t *testing.T) {
+	items := buildProjectItems([]claudehistory.Project{{
+		Path: "/alice/bob/cherry/donut-eclipse-fundation-garlic",
+	}}, "")
+	filtered := filterProjects(items, "alice")
+	if len(filtered) != 1 {
+		t.Fatalf("expected full path filter match, got %#v", filtered)
+	}
+}
+
+func TestCompactProjectPathKeepsTailAnchor(t *testing.T) {
+	got := compactProjectPath("/alice/bob/cherry/donut-eclipse-fundation-garlic", 32)
+	if !strings.HasPrefix(got, "..rry/") {
+		t.Fatalf("expected parent tail anchor, got %q", got)
+	}
+	if !strings.Contains(got, "...") {
+		t.Fatalf("expected compact basename ellipsis, got %q", got)
+	}
+	if !strings.HasSuffix(got, "garlic") {
+		t.Fatalf("expected basename suffix preserved, got %q", got)
+	}
+	if displayWidth(got) > 32 {
+		t.Fatalf("expected compact path width <= 32, got %d for %q", displayWidth(got), got)
+	}
+}
+
+func TestCompactProjectPathReturnsFullPathWhenItFits(t *testing.T) {
+	path := "/tmp/example"
+	if got := compactProjectPath(path, displayWidth(path)); got != path {
+		t.Fatalf("expected full path when width fits, got %q", got)
 	}
 }
 
