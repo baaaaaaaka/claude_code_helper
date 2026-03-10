@@ -102,8 +102,10 @@ func runClaudePatchIntegrationCase(t *testing.T, wantVersion string, installURL 
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.json")
 	opts := exePatchOptions{
-		enabledFlag:    true,
-		policySettings: true,
+		enabledFlag:     true,
+		policySettings:  true,
+		glibcCompat:     exePatchGlibcCompatDefault(),
+		glibcCompatRoot: exePatchGlibcCompatRootDefault(),
 	}
 	var log bytes.Buffer
 	outcome, err := maybePatchExecutable([]string{path}, opts, configPath, &log)
