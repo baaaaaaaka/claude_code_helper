@@ -23,6 +23,7 @@ import (
 
 const defaultClaudePatchVersion = "2.1.72"
 const defaultClaudeGCSBucket = "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases"
+const claudePatchSkipPrecheckEnv = "CLAUDE_PATCH_SKIP_PRECHECK"
 
 func TestClaudePatchIntegration(t *testing.T) {
 	if os.Getenv("CLAUDE_PATCH_TEST") != "1" {
@@ -61,35 +62,40 @@ func runClaudePatchIntegrationCase(t *testing.T, wantVersion string, installURL 
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+	skipPrecheck := os.Getenv(claudePatchSkipPrecheckEnv) == "1"
 
 	path, err := resolveClaudeForPatchTest(t, ctx, installURL, wantVersion)
 	if err != nil {
 		t.Fatalf("resolveClaudeForPatchTest: %v", err)
 	}
 
-	beforeVersion, err := runClaudeVersion(ctx, path)
-	if err != nil {
-		t.Fatalf("claude --version (before): %v", err)
-	}
-	if !strings.Contains(beforeVersion, wantVersion) {
-		t.Fatalf("expected claude %s, got %q", wantVersion, strings.TrimSpace(beforeVersion))
-	}
-
 	verifyRootGuard := false
-	if runtime.GOOS == "windows" {
-		t.Log("skip root bypass probe on windows")
-	} else if !supportsYoloFlag(path) {
-		t.Log("skip root bypass probe: --permission-mode unsupported")
-	} else if ok, reason := canRunAsRootWithoutPrompt(); !ok {
-		t.Logf("skip root bypass probe: %s", reason)
+	if skipPrecheck {
+		t.Logf("skip pre-patch startup checks because %s=1", claudePatchSkipPrecheckEnv)
 	} else {
-		probeCtx, cancelProbe := context.WithTimeout(ctx, 20*time.Second)
-		beforeRoot, beforeRootErr := runClaudeAsRoot(probeCtx, path, "--permission-mode", "bypassPermissions", "--version")
-		cancelProbe()
-		if !strings.Contains(beforeRoot, rootBypassGuardErrorMessage) {
-			t.Logf("skip root bypass assert: guard message not observed before patch (err=%v, out=%q)", beforeRootErr, compactOutput(beforeRoot))
+		beforeVersion, err := runClaudeVersion(ctx, path)
+		if err != nil {
+			t.Fatalf("claude --version (before): %v", err)
+		}
+		if !strings.Contains(beforeVersion, wantVersion) {
+			t.Fatalf("expected claude %s, got %q", wantVersion, strings.TrimSpace(beforeVersion))
+		}
+
+		if runtime.GOOS == "windows" {
+			t.Log("skip root bypass probe on windows")
+		} else if !supportsYoloFlag(path) {
+			t.Log("skip root bypass probe: --permission-mode unsupported")
+		} else if ok, reason := canRunAsRootWithoutPrompt(); !ok {
+			t.Logf("skip root bypass probe: %s", reason)
 		} else {
-			verifyRootGuard = true
+			probeCtx, cancelProbe := context.WithTimeout(ctx, 20*time.Second)
+			beforeRoot, beforeRootErr := runClaudeAsRoot(probeCtx, path, "--permission-mode", "bypassPermissions", "--version")
+			cancelProbe()
+			if !strings.Contains(beforeRoot, rootBypassGuardErrorMessage) {
+				t.Logf("skip root bypass assert: guard message not observed before patch (err=%v, out=%q)", beforeRootErr, compactOutput(beforeRoot))
+			} else {
+				verifyRootGuard = true
+			}
 		}
 	}
 
