@@ -73,13 +73,6 @@ func patchOptionsForVersionReplacement(replace string) exePatchOptions {
 	}
 }
 
-func failingVersionReplacement() string {
-	if runtime.GOOS == "windows" {
-		return "exit /b 42"
-	}
-	return "exit 42"
-}
-
 func TestMaybePatchExecutableSkipsKnownFailure(t *testing.T) {
 	requireExePatchEnabled(t)
 	withExePatchTestHooks(t)
@@ -134,8 +127,11 @@ func TestMaybePatchExecutableRestoresAfterProbeFailure(t *testing.T) {
 	}
 
 	configPath := filepath.Join(dir, "config.json")
+	runClaudeProbeFn = func(path string, arg string) (string, error) {
+		return "synthetic startup failure", os.ErrInvalid
+	}
 	var log bytes.Buffer
-	outcome, err := maybePatchExecutable([]string{"claude"}, patchOptionsForVersionReplacement(failingVersionReplacement()), configPath, &log)
+	outcome, err := maybePatchExecutable([]string{"claude"}, patchOptionsForVersionReplacement(`echo "Claude Code 9.9.9"`), configPath, &log)
 	if err != nil {
 		t.Fatalf("maybePatchExecutable error: %v", err)
 	}
