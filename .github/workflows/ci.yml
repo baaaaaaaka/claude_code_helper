@@ -217,6 +217,29 @@ jobs:
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test ./internal/cli -c -o dist/claude_cli_test
           chmod +x dist/claude_cli_test
 
+      - name: Resolve Claude release bucket
+        shell: bash
+        run: |
+          set -euo pipefail
+          info="$(scripts/claude_release_info.sh)"
+          bucket="$(printf "%s\n" "$info" | awk -F= '/^gcs_bucket=/{print $2}')"
+          if [ -z "$bucket" ]; then
+            echo "Failed to resolve Claude release bucket" >&2
+            exit 1
+          fi
+          echo "CLAUDE_PATCH_BUCKET=$bucket" >> "$GITHUB_ENV"
+
+      - name: Load Claude patch version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(cat scripts/claude_patch_version.txt | tr -d '\r\n')"
+          if [ -z "$version" ]; then
+            echo "Missing Claude patch version in scripts/claude_patch_version.txt" >&2
+            exit 1
+          fi
+          echo "CLAUDE_PATCH_VERSION=$version" >> "$GITHUB_ENV"
+
       - name: Smoke test in containers (doctor)
         shell: bash
         run: |
@@ -240,6 +263,23 @@ jobs:
               "$img" bash /ci/container_claude_install_launch_smoke.sh
           done
 
+      - name: Smoke test in containers (Claude patch+TUI)
+        shell: bash
+        env:
+          CLAUDE_PATCH_TEST: "1"
+        run: |
+          set -euo pipefail
+          for img in rockylinux:8 ubuntu:20.04; do
+            echo "==> $img"
+            docker run --rm \
+              -v "$PWD/dist:/dist:ro" \
+              -v "$PWD/scripts/ci:/ci:ro" \
+              -e CLAUDE_PATCH_TEST \
+              -e CLAUDE_PATCH_VERSION \
+              -e CLAUDE_PATCH_BUCKET \
+              "$img" bash /ci/container_claude_patch_smoke.sh
+          done
+
       - name: Smoke test in CentOS7 (Claude startup via auto glibc download+patch)
         shell: bash
         timeout-minutes: 15
@@ -254,4 +294,3 @@ jobs:
             -e GLIBC_COMPAT_REPO \
             -e GLIBC_COMPAT_TAG \
             centos:7 bash /scripts/test_centos7_clp_autopatch.sh
-

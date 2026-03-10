@@ -5,6 +5,8 @@ go 1.24.0
 toolchain go1.24.12
 
 require (
+	github.com/UserExistsError/conpty v0.1.4
+	github.com/creack/pty v1.1.24
 	github.com/gdamore/tcell/v2 v2.13.7
 	github.com/gofrs/flock v0.13.0
 	github.com/mattn/go-runewidth v0.0.19
@@ -15,7 +17,6 @@ require (
 
 require (
 	github.com/clipperhouse/uax29/v2 v2.2.0 // indirect
-	github.com/creack/pty v1.1.24 // indirect
 	github.com/gdamore/encoding v1.0.1 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect
