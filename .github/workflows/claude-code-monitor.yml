@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 concurrency:
   group: claude-code-monitor
@@ -414,3 +415,117 @@ jobs:
           fi
           git commit -m "chore: sync Claude Code versions"
           git push
+
+  report-failures:
+    name: Open issue for monitor failures
+    runs-on: ubuntu-latest
+    needs: [detect, test, test-linux-distros]
+    if: ${{ always() && github.event_name == 'schedule' && needs.detect.result == 'success' && needs.detect.outputs.missing_versions != '[]' && needs.detect.outputs.missing_versions != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download patch test results
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: claude-code-results-*
+          path: results
+          merge-multiple: true
+
+      - name: Build issue payload
+        id: payload
+        shell: bash
+        env:
+          MISSING_VERSIONS_JSON: ${{ needs.detect.outputs.missing_versions }}
+          PROXY_TAG: ${{ needs.detect.outputs.proxy_tag }}
+          WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TEST_RESULT: ${{ needs.test.result }}
+          TEST_LINUX_DISTROS_RESULT: ${{ needs.test-linux-distros.result }}
+        run: |
+          set -euo pipefail
+          python3 scripts/claude_monitor_issue.py \
+            --missing-json "$MISSING_VERSIONS_JSON" \
+            --proxy-tag "$PROXY_TAG" \
+            --results-dir results \
+            --workflow-run-url "$WORKFLOW_RUN_URL" \
+            --job-status "test=$TEST_RESULT" \
+            --job-status "test-linux-distros=$TEST_LINUX_DISTROS_RESULT" \
+            --output-json monitor-issue.json \
+            --output-body monitor-issue.md
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open("monitor-issue.json", encoding="utf-8") as handle:
+              data = json.load(handle)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(
+                  f"should_create={'true' if data.get('should_create') else 'false'}\n"
+              )
+              if data.get("should_create"):
+                  output.write("title<<EOF\n")
+                  output.write(data["title"] + "\n")
+                  output.write("EOF\n")
+                  output.write(f"body_path={data.get('body_path', 'monitor-issue.md')}\n")
+          PY
+
+      - name: Create issue
+        if: steps.payload.outputs.should_create == 'true'
+        uses: actions/github-script@v7
+        env:
+          ISSUE_TITLE: ${{ steps.payload.outputs.title }}
+          ISSUE_BODY_PATH: ${{ steps.payload.outputs.body_path }}
+        with:
+          script: |
+            const fs = require('fs');
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const title = process.env.ISSUE_TITLE;
+            const body = fs.readFileSync(process.env.ISSUE_BODY_PATH, 'utf8');
+            const labelName = 'claude-code-monitor';
+
+            try {
+              await github.rest.issues.getLabel({owner, repo, name: labelName});
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+              try {
+                await github.rest.issues.createLabel({
+                  owner,
+                  repo,
+                  name: labelName,
+                  color: 'B60205',
+                  description: 'Automated Claude Code monitor failures',
+                });
+              } catch (createError) {
+                if (createError.status !== 422) {
+                  throw createError;
+                }
+              }
+            }
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: 'open',
+              labels: labelName,
+              per_page: 100,
+            });
+            const existing = issues.find((issue) => !issue.pull_request && issue.title === title);
+            if (existing) {
+              core.notice(`Existing issue #${existing.number} already open for ${title}`);
+              return;
+            }
+
+            const created = await github.rest.issues.create({
+              owner,
+              repo,
+              title,
+              body,
+              labels: [labelName],
+            });
+            core.notice(`Created issue #${created.data.number}`);
