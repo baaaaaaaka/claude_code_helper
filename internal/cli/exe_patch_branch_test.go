@@ -242,10 +242,14 @@ func TestMaybePatchExecutableAppliesGlibcCompatAfterProbeFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("maybePatchExecutable error: %v", err)
 	}
+	resolvedPath, err := resolveExecutablePath(path)
+	if err != nil {
+		t.Fatalf("resolveExecutablePath error: %v", err)
+	}
 	if !applied {
 		t.Fatalf("expected glibc compat patch to be attempted")
 	}
-	if outcome == nil || !outcome.Applied || outcome.TargetPath != path {
+	if outcome == nil || !outcome.Applied || outcome.TargetPath != resolvedPath {
 		t.Fatalf("unexpected outcome: %#v", outcome)
 	}
 	if probeCalls != 2 {
