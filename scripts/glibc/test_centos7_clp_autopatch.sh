@@ -5,6 +5,7 @@ set -euo pipefail
 # - starts local sshd
 # - runs claude-proxy run ... claude --version
 # - verifies claude-proxy auto-downloads and applies glibc compat patch via patchelf
+# - confirms the patched Claude process can enter its TUI over a pseudo-terminal
 
 CLAUDE_PROXY_BIN="${CLAUDE_PROXY_BIN:-/dist/claude-proxy}"
 CLAUDE_VERSION="${CLAUDE_VERSION:-2.1.38}"
@@ -187,6 +188,48 @@ EOF
   fi
   if ! grep -q "${glibc_lib_dir}" <<<"$rpath"; then
     echo "patched rpath missing glibc lib dir ${glibc_lib_dir}: $rpath" >&2
+    exit 1
+  fi
+
+  if ! command -v script >/dev/null 2>&1; then
+    echo "missing script(1) for TUI smoke" >&2
+    exit 1
+  fi
+
+  local tui_log="/tmp/claude_tui.log"
+  rm -f "$tui_log"
+  set +e
+  env "${run_env[@]}" \
+    timeout 45s script -q -c "\"$CLAUDE_PROXY_BIN\" --config /tmp/config.json run p1 -- /tmp/claude/claude" "$tui_log" >/tmp/claude_tui_stdout 2>&1
+  tui_ec=$?
+  set -e
+
+  tui_out="$(cat "$tui_log" 2>/dev/null || true)"
+  echo "[clp tui exit=${tui_ec}]"
+  echo "$tui_out"
+
+  if [[ "$tui_ec" -ne 0 && "$tui_ec" -ne 124 ]]; then
+    echo "claude-proxy interactive TUI run failed" >&2
+    exit 1
+  fi
+
+  normalized_tui="$(
+    printf "%s" "$tui_out" \
+      | tr '\r' ' ' \
+      | sed -r $'s/\x1B\\[[0-?]*[ -/]*[@-~]/ /g' \
+      | tr '\n' ' ' \
+      | tr -s ' '
+  )"
+
+  if [[ "$normalized_tui" != *"Claude Code"* ]]; then
+    echo "interactive TUI output missing Claude Code marker: $normalized_tui" >&2
+    exit 1
+  fi
+  if [[ "$normalized_tui" != *"Welcome to Claude Code"* \
+     && "$normalized_tui" != *"Let's get started."* \
+     && "$normalized_tui" != *"Choose the text style"* \
+     && "$normalized_tui" != *"Syntax theme:"* ]]; then
+    echo "interactive TUI output missing onboarding markers: $normalized_tui" >&2
     exit 1
   fi
 

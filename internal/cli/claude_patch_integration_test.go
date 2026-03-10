@@ -59,7 +59,7 @@ func TestClaudePatchRegressionMatrix(t *testing.T) {
 
 func runClaudePatchIntegrationCase(t *testing.T, wantVersion string, installURL string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
 	path, err := resolveClaudeForPatchTest(t, ctx, installURL, wantVersion)
@@ -107,6 +107,13 @@ func runClaudePatchIntegrationCase(t *testing.T, wantVersion string, installURL 
 	if outcome == nil || (!outcome.Applied && !outcome.AlreadyPatched) {
 		t.Fatalf("expected patch outcome, got none")
 	}
+	if outcome.Applied && outcome.BackupPath != "" {
+		t.Cleanup(func() {
+			if restoreErr := restoreExecutableFromBackup(outcome); restoreErr != nil {
+				t.Errorf("restoreExecutableFromBackup: %v", restoreErr)
+			}
+		})
+	}
 
 	afterVersion, err := runClaudeVersion(ctx, path)
 	if err != nil {
@@ -141,11 +148,7 @@ func runClaudePatchIntegrationCase(t *testing.T, wantVersion string, installURL 
 		}
 	}
 
-	if outcome != nil && outcome.Applied && outcome.BackupPath != "" {
-		if restoreErr := restoreExecutableFromBackup(outcome); restoreErr != nil {
-			t.Fatalf("restoreExecutableFromBackup: %v", restoreErr)
-		}
-	}
+	assertClaudeTUIStarts(t, path)
 }
 
 func parsePatchVersionMatrix(raw string) []string {
