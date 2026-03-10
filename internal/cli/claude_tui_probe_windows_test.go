@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"syscall"
 	"time"
 
@@ -27,7 +28,13 @@ func runClaudeTUIProbe(path string, cwd string, env []string, timeout time.Durat
 	if err != nil {
 		return "", fmt.Errorf("start ConPTY: %w", err)
 	}
-	defer func() { _ = cpty.Close() }()
+	var closeOnce sync.Once
+	closePty := func() {
+		closeOnce.Do(func() {
+			_ = cpty.Close()
+		})
+	}
+	defer closePty()
 
 	output := &synchronizedBuffer{}
 	go func() {
@@ -63,7 +70,7 @@ func runClaudeTUIProbe(path string, cwd string, env []string, timeout time.Durat
 		case <-ticker.C:
 			out := output.Snapshot()
 			if looksLikeClaudeTUI(out) {
-				_ = cpty.Close()
+				closePty()
 				select {
 				case <-waitDone:
 				case <-time.After(2 * time.Second):
@@ -72,7 +79,7 @@ func runClaudeTUIProbe(path string, cwd string, env []string, timeout time.Durat
 			}
 		case <-timeoutTimer.C:
 			out := output.Snapshot()
-			_ = cpty.Close()
+			closePty()
 			select {
 			case <-waitDone:
 			case <-time.After(2 * time.Second):
