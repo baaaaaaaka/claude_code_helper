@@ -24,6 +24,28 @@ import (
 	"github.com/baaaaaaaka/claude_code_helper/internal/stack"
 )
 
+type proxyTicker interface {
+	Chan() <-chan time.Time
+	Stop()
+}
+
+type timeTicker struct {
+	*time.Ticker
+}
+
+func (t timeTicker) Chan() <-chan time.Time { return t.C }
+
+var (
+	newProxyStore          = config.NewStore
+	newProxyInstanceID     = ids.New
+	proxyExecutable        = os.Executable
+	proxyDaemonLauncher    = launchProxyDaemonProcess
+	recordProxyInstance    = manager.RecordInstance
+	removeProxyInstance    = manager.RemoveInstance
+	heartbeatProxyInstance = manager.Heartbeat
+	newProxyTicker         = func(d time.Duration) proxyTicker { return timeTicker{Ticker: time.NewTicker(d)} }
+)
+
 func newProxyCmd(root *rootOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "proxy",
@@ -50,7 +72,7 @@ func newProxyStartCmd(root *rootOptions) *cobra.Command {
 		Short: "Start a long-lived proxy instance (daemon)",
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			store, err := config.NewStore(root.configPath)
+			store, err := newProxyStore(root.configPath)
 			if err != nil {
 				return err
 			}
@@ -68,7 +90,7 @@ func newProxyStartCmd(root *rootOptions) *cobra.Command {
 				return err
 			}
 
-			instanceID, err := ids.New()
+			instanceID, err := newProxyInstanceID()
 			if err != nil {
 				return err
 			}
@@ -83,7 +105,7 @@ func newProxyStartCmd(root *rootOptions) *cobra.Command {
 				StartedAt:  now,
 				LastSeenAt: now,
 			}
-			if err := manager.RecordInstance(store, inst); err != nil {
+			if err := recordProxyInstance(store, inst); err != nil {
 				return err
 			}
 
@@ -91,7 +113,7 @@ func newProxyStartCmd(root *rootOptions) *cobra.Command {
 				return runProxyDaemon(cmd.Context(), store, instanceID)
 			}
 
-			exe, err := os.Executable()
+			exe, err := proxyExecutable()
 			if err != nil {
 				return err
 			}
@@ -102,26 +124,11 @@ func newProxyStartCmd(root *rootOptions) *cobra.Command {
 			}
 			args = append(args, "proxy", "daemon", "--instance-id", instanceID)
 
-			c := exec.Command(exe, args...)
-			c.Stdin = nil
-
 			logPath := filepath.Join(filepath.Dir(store.Path()), "instances", instanceID+".log")
-			if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
-				return err
-			}
-			logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+			pid, err := proxyDaemonLauncher(exe, args, logPath)
 			if err != nil {
 				return err
 			}
-			defer logFile.Close()
-			c.Stdout = logFile
-			c.Stderr = logFile
-
-			if err := c.Start(); err != nil {
-				return err
-			}
-
-			pid := c.Process.Pid
 			_ = store.Update(func(cfg *config.Config) error {
 				for i := range cfg.Instances {
 					if cfg.Instances[i].ID == instanceID {
@@ -152,7 +159,7 @@ func newProxyDaemonCmd(root *rootOptions) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			store, err := config.NewStore(root.configPath)
+			store, err := newProxyStore(root.configPath)
 			if err != nil {
 				return err
 			}
@@ -207,7 +214,7 @@ func runProxyDaemon(parentCtx context.Context, store *config.Store, instanceID s
 		opts.HTTPListenAddr = fmt.Sprintf("127.0.0.1:%d", inst.HTTPPort)
 	}
 
-	st, err := stack.Start(prof, instanceID, opts)
+	st, err := stackStart(prof, instanceID, opts)
 	if err != nil {
 		return err
 	}
@@ -221,23 +228,44 @@ func runProxyDaemon(parentCtx context.Context, store *config.Store, instanceID s
 		inst.StartedAt = now
 	}
 	inst.LastSeenAt = now
-	_ = manager.RecordInstance(store, inst)
+	_ = recordProxyInstance(store, inst)
 
-	t := time.NewTicker(10 * time.Second)
+	t := newProxyTicker(10 * time.Second)
 	defer t.Stop()
 
 	for {
 		select {
 		case err := <-st.Fatal():
-			_ = manager.RemoveInstance(store, instanceID)
+			_ = removeProxyInstance(store, instanceID)
 			return err
 		case <-ctx.Done():
-			_ = manager.RemoveInstance(store, instanceID)
+			_ = removeProxyInstance(store, instanceID)
 			return nil
-		case <-t.C:
-			_ = manager.Heartbeat(store, instanceID, time.Now())
+		case <-t.Chan():
+			_ = heartbeatProxyInstance(store, instanceID, time.Now())
 		}
 	}
+}
+
+func launchProxyDaemonProcess(exe string, args []string, logPath string) (int, error) {
+	c := exec.Command(exe, args...)
+	c.Stdin = nil
+
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		return 0, err
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return 0, err
+	}
+	defer logFile.Close()
+	c.Stdout = logFile
+	c.Stderr = logFile
+
+	if err := c.Start(); err != nil {
+		return 0, err
+	}
+	return c.Process.Pid, nil
 }
 
 func newProxyListCmd(root *rootOptions) *cobra.Command {

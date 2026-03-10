@@ -9,3 +9,16 @@ func NewStackForTest(httpPort, socksPort int) *Stack {
 		stopCh:    make(chan struct{}),
 	}
 }
+
+// NewStackWithFatalForTest returns a minimal Stack with a caller-provided fatal channel.
+func NewStackWithFatalForTest(httpPort, socksPort int, fatalCh chan error) *Stack {
+	if fatalCh == nil {
+		fatalCh = make(chan error)
+	}
+	return &Stack{
+		HTTPPort:  httpPort,
+		SocksPort: socksPort,
+		fatalCh:   fatalCh,
+		stopCh:    make(chan struct{}),
+	}
+}

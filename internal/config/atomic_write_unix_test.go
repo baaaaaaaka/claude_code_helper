@@ -44,3 +44,35 @@ func TestAtomicWriteFileReadOnlyDir(t *testing.T) {
 		t.Fatalf("expected error for read-only dir")
 	}
 }
+
+func TestAtomicWriteFileOverwritesExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatalf("write original file: %v", err)
+	}
+
+	if err := atomicWriteFile(path, []byte("new"), 0o644); err != nil {
+		t.Fatalf("atomicWriteFile overwrite error: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read overwritten file: %v", err)
+	}
+	if string(got) != "new" {
+		t.Fatalf("expected overwritten content, got %q", got)
+	}
+}
+
+func TestAtomicWriteFileRenameError(t *testing.T) {
+	dir := t.TempDir()
+	targetDir := filepath.Join(dir, "config-dir")
+	if err := os.MkdirAll(targetDir, 0o700); err != nil {
+		t.Fatalf("mkdir target dir: %v", err)
+	}
+
+	if err := atomicWriteFile(targetDir, []byte("data"), 0o600); err == nil {
+		t.Fatalf("expected rename error when target path is a directory")
+	}
+}

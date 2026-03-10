@@ -47,6 +47,21 @@ func TestResolveInstallPath(t *testing.T) {
 			t.Fatalf("expected %q, got %q", want, got)
 		}
 	})
+
+	t.Run("falls back to current executable", func(t *testing.T) {
+		t.Setenv(EnvInstallDir, "")
+		got, err := ResolveInstallPath("")
+		if err != nil {
+			t.Fatalf("ResolveInstallPath error: %v", err)
+		}
+		exe, err := os.Executable()
+		if err != nil {
+			t.Fatalf("os.Executable error: %v", err)
+		}
+		if got != filepath.Clean(exe) {
+			t.Fatalf("expected executable path %q, got %q", filepath.Clean(exe), got)
+		}
+	})
 }
 
 func TestBinaryName(t *testing.T) {
@@ -95,4 +110,45 @@ func TestResolveRepoAndVersion(t *testing.T) {
 			t.Fatalf("expected latest, got %q", got)
 		}
 	})
+}
+
+func TestLatestTagFromPath(t *testing.T) {
+	cases := []struct {
+		path string
+		want string
+	}{
+		{"/owner/repo/releases/tag/v1.2.3", "v1.2.3"},
+		{"/owner/repo/releases/latest", "latest"},
+		{"/v2.0.0", "v2.0.0"},
+		{"", ""},
+	}
+
+	for _, tc := range cases {
+		if got := latestTagFromPath(tc.path); got != tc.want {
+			t.Fatalf("latestTagFromPath(%q) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestIsVersionNewer(t *testing.T) {
+	cases := []struct {
+		remote  string
+		local   string
+		wantNew bool
+		wantOK  bool
+	}{
+		{"1.2.4", "1.2.3", true, true},
+		{"1.2.3", "1.2.3", false, true},
+		{"1.2.3", "1.2.4", false, true},
+		{"v2.0.0-beta.1", "1.9.9", true, true},
+		{"bad", "1.0.0", false, false},
+		{"1.0.0", "bad", false, false},
+	}
+
+	for _, tc := range cases {
+		gotNew, gotOK := isVersionNewer(tc.remote, tc.local)
+		if gotNew != tc.wantNew || gotOK != tc.wantOK {
+			t.Fatalf("isVersionNewer(%q, %q) = (%v, %v), want (%v, %v)", tc.remote, tc.local, gotNew, gotOK, tc.wantNew, tc.wantOK)
+		}
+	}
 }
