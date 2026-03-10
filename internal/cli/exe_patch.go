@@ -16,6 +16,23 @@ import (
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
 )
 
+var (
+	execLookPathFn                = exec.LookPath
+	resolveExecutablePathFn       = resolveExecutablePath
+	currentProxyVersionFn         = currentProxyVersion
+	resolveClaudeVersionFn        = resolveClaudeVersion
+	hashFileSHA256Fn              = hashFileSHA256
+	shouldSkipPatchFailureFn      = shouldSkipPatchFailure
+	newPatchHistoryStoreFn        = config.NewPatchHistoryStore
+	patchExecutableFn             = patchExecutable
+	adhocCodesignFn               = adhocCodesign
+	runClaudeProbeFn              = runClaudeProbe
+	applyClaudeGlibcCompatPatchFn = applyClaudeGlibcCompatPatch
+	restoreExecutableFromBackupFn = restoreExecutableFromBackup
+	cleanupPatchHistoryFn         = cleanupPatchHistory
+	recordPatchFailureFn          = recordPatchFailure
+)
+
 type exePatchOptions struct {
 	enabledFlag     bool
 	regex1          string
@@ -248,28 +265,28 @@ func maybePatchExecutable(cmdArgs []string, opts exePatchOptions, configPath str
 		log = io.Discard
 	}
 
-	exePath, err := exec.LookPath(cmdArgs[0])
+	exePath, err := execLookPathFn(cmdArgs[0])
 	if err != nil {
 		return nil, fmt.Errorf("resolve target executable %q: %w", cmdArgs[0], err)
 	}
 
-	resolvedPath, err := resolveExecutablePath(exePath)
+	resolvedPath, err := resolveExecutablePathFn(exePath)
 	if err != nil {
 		return nil, err
 	}
 
 	isClaude := isClaudeExecutable(cmdArgs[0], resolvedPath)
-	proxyVersion := currentProxyVersion()
+	proxyVersion := currentProxyVersionFn()
 	targetVersion := ""
 	targetSHA := ""
 	if isClaude {
-		targetVersion = resolveClaudeVersion(resolvedPath)
+		targetVersion = resolveClaudeVersionFn(resolvedPath)
 		if targetVersion == "" {
-			if sha, err := hashFileSHA256(resolvedPath); err == nil {
+			if sha, err := hashFileSHA256Fn(resolvedPath); err == nil {
 				targetSHA = sha
 			}
 		}
-		if skip, skipErr := shouldSkipPatchFailure(configPath, proxyVersion, targetVersion, targetSHA); skipErr == nil && skip {
+		if skip, skipErr := shouldSkipPatchFailureFn(configPath, proxyVersion, targetVersion, targetSHA); skipErr == nil && skip {
 			if targetVersion != "" {
 				_, _ = fmt.Fprintf(log, "exe-patch: skip (previous failure) for claude %s with proxy %s\n", targetVersion, proxyVersion)
 			} else {
@@ -287,7 +304,7 @@ func maybePatchExecutable(cmdArgs []string, opts exePatchOptions, configPath str
 		}
 	}
 
-	historyStore, err := config.NewPatchHistoryStore(configPath)
+	historyStore, err := newPatchHistoryStoreFn(configPath)
 	if err != nil {
 		_, _ = fmt.Fprintf(log, "exe-patch: failed to init patch history: %v\n", err)
 		historyStore = nil
@@ -295,7 +312,7 @@ func maybePatchExecutable(cmdArgs []string, opts exePatchOptions, configPath str
 
 	var outcome *patchOutcome
 	if len(specs) > 0 {
-		outcome, err = patchExecutable(resolvedPath, specs, log, opts.preview, opts.dryRun, historyStore, proxyVersion)
+		outcome, err = patchExecutableFn(resolvedPath, specs, log, opts.preview, opts.dryRun, historyStore, proxyVersion)
 		if err != nil {
 			return nil, err
 		}
@@ -316,15 +333,15 @@ func maybePatchExecutable(cmdArgs []string, opts exePatchOptions, configPath str
 
 	bytePatchApplied := outcome.Applied
 	if bytePatchApplied && outcome.IsClaude {
-		if signErr := adhocCodesign(resolvedPath, log); signErr != nil {
+		if signErr := adhocCodesignFn(resolvedPath, log); signErr != nil {
 			_, _ = fmt.Fprintln(log, "exe-patch: codesign failed; restoring backup")
-			if restoreErr := restoreExecutableFromBackup(outcome); restoreErr != nil {
+			if restoreErr := restoreExecutableFromBackupFn(outcome); restoreErr != nil {
 				return nil, fmt.Errorf("restore patched executable: %w", restoreErr)
 			}
-			if historyErr := cleanupPatchHistory(outcome); historyErr != nil {
+			if historyErr := cleanupPatchHistoryFn(outcome); historyErr != nil {
 				return nil, fmt.Errorf("cleanup patch history: %w", historyErr)
 			}
-			if recordErr := recordPatchFailure(configPath, outcome, formatFailureReason(signErr, "")); recordErr != nil {
+			if recordErr := recordPatchFailureFn(configPath, outcome, formatFailureReason(signErr, "")); recordErr != nil {
 				_, _ = fmt.Fprintf(log, "exe-patch: failed to record patch failure: %v\n", recordErr)
 			}
 			return nil, nil
@@ -333,25 +350,25 @@ func maybePatchExecutable(cmdArgs []string, opts exePatchOptions, configPath str
 
 	needProbe := outcome.IsClaude && (bytePatchApplied || glibcCompat)
 	if needProbe {
-		out, probeErr := runClaudeProbe(resolvedPath, "--version")
+		out, probeErr := runClaudeProbeFn(resolvedPath, "--version")
 		if probeErr != nil && glibcCompat && isMissingGlibcSymbolError(out) {
-			patchedOutcome, compatApplied, compatErr := applyClaudeGlibcCompatPatch(resolvedPath, opts, log, opts.dryRun, outcome)
+			patchedOutcome, compatApplied, compatErr := applyClaudeGlibcCompatPatchFn(resolvedPath, opts, log, opts.dryRun, outcome)
 			outcome = patchedOutcome
 			if compatErr != nil {
 				_, _ = fmt.Fprintf(log, "exe-patch: glibc compat patch failed: %v\n", compatErr)
 			} else if compatApplied {
-				out, probeErr = runClaudeProbe(resolvedPath, "--version")
+				out, probeErr = runClaudeProbeFn(resolvedPath, "--version")
 			}
 		}
 		if probeErr != nil && outcome.Applied {
 			_, _ = fmt.Fprintln(log, "exe-patch: detected startup failure; restoring backup")
-			if restoreErr := restoreExecutableFromBackup(outcome); restoreErr != nil {
+			if restoreErr := restoreExecutableFromBackupFn(outcome); restoreErr != nil {
 				return nil, fmt.Errorf("restore patched executable: %w", restoreErr)
 			}
-			if historyErr := cleanupPatchHistory(outcome); historyErr != nil {
+			if historyErr := cleanupPatchHistoryFn(outcome); historyErr != nil {
 				return nil, fmt.Errorf("cleanup patch history: %w", historyErr)
 			}
-			if recordErr := recordPatchFailure(configPath, outcome, formatFailureReason(probeErr, out)); recordErr != nil {
+			if recordErr := recordPatchFailureFn(configPath, outcome, formatFailureReason(probeErr, out)); recordErr != nil {
 				_, _ = fmt.Fprintf(log, "exe-patch: failed to record patch failure: %v\n", recordErr)
 			}
 			return nil, nil

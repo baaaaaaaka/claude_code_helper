@@ -6,11 +6,32 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
 	"github.com/baaaaaaaka/claude_code_helper/internal/localproxy"
 	"github.com/baaaaaaaka/claude_code_helper/internal/ssh"
+)
+
+type httpProxy interface {
+	Start(listenAddr string) (string, error)
+	Close(ctx context.Context) error
+}
+
+type tunnel interface {
+	Start() error
+	Stop(grace time.Duration) error
+	Wait() error
+	Done() <-chan struct{}
+}
+
+var (
+	newSOCKS5Dialer    = localproxy.NewSOCKS5Dialer
+	newHTTPProxy       = func(d localproxy.Dialer, opts localproxy.Options) httpProxy { return localproxy.NewHTTPProxy(d, opts) }
+	newTunnelForStack  = func(profile config.Profile, socksPort int) (tunnel, error) { return newTunnel(profile, socksPort) }
+	waitForTunnelReady = waitForTCPTunnel
+	sleepForRestart    = time.Sleep
 )
 
 type Options struct {
@@ -32,8 +53,10 @@ type Stack struct {
 	HTTPAddr  string
 	HTTPPort  int
 
-	proxy  *localproxy.HTTPProxy
-	tunnel *ssh.Tunnel
+	mu     sync.Mutex
+	proxy  httpProxy
+	tunnel tunnel
+	closed bool
 
 	fatalCh chan error
 	stopCh  chan struct{}
@@ -79,12 +102,12 @@ func Start(profile config.Profile, instanceID string, opts Options) (*Stack, err
 	}
 
 	socksAddr := fmt.Sprintf("127.0.0.1:%d", socksPort)
-	dialer, err := localproxy.NewSOCKS5Dialer(socksAddr, 10*time.Second)
+	dialer, err := newSOCKS5Dialer(socksAddr, 10*time.Second)
 	if err != nil {
 		return nil, err
 	}
 
-	hp := localproxy.NewHTTPProxy(dialer, localproxy.Options{InstanceID: instanceID})
+	hp := newHTTPProxy(dialer, localproxy.Options{InstanceID: instanceID})
 	httpAddr, err := hp.Start(opts.HTTPListenAddr)
 	if err != nil {
 		return nil, err
@@ -100,7 +123,7 @@ func Start(profile config.Profile, instanceID string, opts Options) (*Stack, err
 		return nil, err
 	}
 
-	tun, err := newTunnel(profile, socksPort)
+	tun, err := newTunnelForStack(profile, socksPort)
 	if err != nil {
 		_ = hp.Close(context.Background())
 		return nil, err
@@ -109,7 +132,7 @@ func Start(profile config.Profile, instanceID string, opts Options) (*Stack, err
 		_ = hp.Close(context.Background())
 		return nil, err
 	}
-	if err := waitForTCPTunnel(socksAddr, opts.SocksReadyTimeout, tun); err != nil {
+	if err := waitForTunnelReady(socksAddr, opts.SocksReadyTimeout, tun); err != nil {
 		_ = tun.Stop(opts.TunnelStopGrace)
 		_ = hp.Close(context.Background())
 		return nil, err
@@ -145,14 +168,22 @@ func (s *Stack) Close(ctx context.Context) error {
 		close(s.stopCh)
 	}
 
+	s.mu.Lock()
+	s.closed = true
+	tun := s.tunnel
+	proxy := s.proxy
+	s.tunnel = nil
+	s.proxy = nil
+	s.mu.Unlock()
+
 	var firstErr error
-	if s.tunnel != nil {
-		if err := s.tunnel.Stop(2 * time.Second); err != nil && firstErr == nil {
+	if tun != nil {
+		if err := tun.Stop(2 * time.Second); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
-	if s.proxy != nil {
-		if err := s.proxy.Close(ctx); err != nil && firstErr == nil {
+	if proxy != nil {
+		if err := proxy.Close(ctx); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -162,12 +193,14 @@ func (s *Stack) Close(ctx context.Context) error {
 func (s *Stack) monitor(opts Options) {
 	restarts := 0
 	for {
-		err := s.tunnel.Wait()
-
-		select {
-		case <-s.stopCh:
+		current := s.currentTunnel()
+		if current == nil {
 			return
-		default:
+		}
+		err := current.Wait()
+
+		if s.stopRequested() {
+			return
 		}
 
 		restarts++
@@ -176,25 +209,57 @@ func (s *Stack) monitor(opts Options) {
 			return
 		}
 
-		time.Sleep(opts.RestartBackoff)
+		sleepForRestart(opts.RestartBackoff)
+		if s.stopRequested() {
+			return
+		}
 
-		tun, terr := newTunnel(s.Profile, s.SocksPort)
+		tun, terr := newTunnelForStack(s.Profile, s.SocksPort)
 		if terr != nil {
 			s.fatalCh <- terr
+			return
+		}
+		if s.stopRequested() {
 			return
 		}
 		if terr := tun.Start(); terr != nil {
 			s.fatalCh <- terr
 			return
 		}
-		if terr := waitForTCPTunnel(fmt.Sprintf("127.0.0.1:%d", s.SocksPort), opts.SocksReadyTimeout, tun); terr != nil {
+		if s.stopRequested() {
+			_ = tun.Stop(opts.TunnelStopGrace)
+			return
+		}
+		if terr := waitForTunnelReady(fmt.Sprintf("127.0.0.1:%d", s.SocksPort), opts.SocksReadyTimeout, tun); terr != nil {
 			_ = tun.Stop(opts.TunnelStopGrace)
 			s.fatalCh <- terr
 			return
 		}
 
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			_ = tun.Stop(opts.TunnelStopGrace)
+			return
+		}
 		s.tunnel = tun
+		s.mu.Unlock()
 		restarts = 0
+	}
+}
+
+func (s *Stack) currentTunnel() tunnel {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tunnel
+}
+
+func (s *Stack) stopRequested() bool {
+	select {
+	case <-s.stopCh:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -229,7 +294,7 @@ func waitForTCP(addr string, timeout time.Duration) error {
 	return fmt.Errorf("timeout waiting for %s", addr)
 }
 
-func waitForTCPTunnel(addr string, timeout time.Duration, tun *ssh.Tunnel) error {
+func waitForTCPTunnel(addr string, timeout time.Duration, tun tunnel) error {
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
