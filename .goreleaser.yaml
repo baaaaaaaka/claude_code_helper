@@ -42,6 +42,7 @@ checksum:
   name_template: checksums.txt
 
 release:
+  prerelease: auto
   extra_files:
     - glob: install.sh
     - glob: install.ps1

@@ -61,7 +61,7 @@ func runLike(cmd *cobra.Command, root *rootOptions, autoInit bool) error {
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	patchOutcome, err := maybePatchExecutable(after, root.exePatch, root.configPath, cmd.ErrOrStderr())
+	patchOutcome, err := maybePatchExecutableCtxFn(ctx, after, root.exePatch, root.configPath, cmd.ErrOrStderr())
 	if err != nil {
 		return err
 	}
@@ -314,6 +314,9 @@ func runTargetWithFallbackWithOptions(
 	fatalCh <-chan error,
 	opts runTargetOptions,
 ) error {
+	if err := waitPatchedExecutableReadyFn(ctx, patchOutcome); err != nil {
+		return err
+	}
 	attempt := 0
 	yoloRetried := false
 	patchChecked := false
@@ -335,7 +338,7 @@ func runTargetWithFallbackWithOptions(
 			opts.YoloEnabled = false
 			continue
 		}
-		if patchOutcome != nil && patchOutcome.Applied && !patchChecked {
+		if patchOutcome != nil && patchOutcome.RollbackOnStartupFailure && !patchChecked {
 			patchChecked = true
 			if isPatchedBinaryStartupFailure(err, out) {
 				_, _ = fmt.Fprintln(os.Stderr, "exe-patch: detected startup failure; restoring backup")

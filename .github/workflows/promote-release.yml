@@ -1,0 +1,81 @@
+name: Promote pre-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      rc_tag:
+        description: "Pre-release tag to promote (e.g. v0.0.43-rc.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    name: Validate pre-release
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.parse.outputs.release_tag }}
+    steps:
+      - name: Parse and validate tag
+        id: parse
+        shell: bash
+        run: |
+          set -euo pipefail
+          rc_tag="${{ inputs.rc_tag }}"
+
+          # Ensure it's a valid pre-release tag.
+          if ! echo "$rc_tag" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+-'; then
+            echo "::error::Tag '$rc_tag' is not a valid pre-release tag (expected vX.Y.Z-rc.N or similar)"
+            exit 1
+          fi
+
+          # Extract base version (strip pre-release suffix).
+          release_tag="$(echo "$rc_tag" | sed 's/-.*//')"
+          echo "Promoting $rc_tag -> $release_tag"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Verify pre-release exists on GitHub
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          rc_tag="${{ inputs.rc_tag }}"
+          release_json="$(gh api "repos/${{ github.repository }}/releases/tags/$rc_tag" 2>/dev/null || true)"
+          if [ -z "$release_json" ]; then
+            echo "::error::Release for tag '$rc_tag' not found. Run the release workflow first."
+            exit 1
+          fi
+          is_prerelease="$(echo "$release_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("prerelease", False))')"
+          if [ "$is_prerelease" != "True" ]; then
+            echo "::error::Release '$rc_tag' is not marked as a pre-release."
+            exit 1
+          fi
+          echo "Pre-release '$rc_tag' confirmed."
+
+  promote:
+    name: Tag and release
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.rc_tag }}
+          fetch-depth: 0
+
+      - name: Create release tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if git rev-parse "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "::error::Tag '$RELEASE_TAG' already exists."
+            exit 1
+          fi
+          git tag "$RELEASE_TAG"
+          git push origin "$RELEASE_TAG"
+          echo "Pushed tag $RELEASE_TAG — release workflow will run automatically."

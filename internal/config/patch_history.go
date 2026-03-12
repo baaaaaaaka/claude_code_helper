@@ -14,7 +14,7 @@ import (
 	"github.com/gofrs/flock"
 )
 
-const PatchHistoryVersion = 1
+const PatchHistoryVersion = 2
 
 type PatchHistoryEntry struct {
 	Path          string    `json:"path"`
@@ -22,6 +22,7 @@ type PatchHistoryEntry struct {
 	PatchedSHA256 string    `json:"patchedSha256"`
 	ProxyVersion  string    `json:"proxyVersion,omitempty"`
 	PatchedAt     time.Time `json:"patchedAt"`
+	VerifiedAt    time.Time `json:"verifiedAt,omitempty"`
 }
 
 type PatchHistory struct {
@@ -38,6 +39,19 @@ func (h PatchHistory) IsPatched(path, specsSHA256, patchedSHA256, proxyVersion s
 			continue
 		}
 		return true
+	}
+	return false
+}
+
+func (h PatchHistory) IsVerified(path, specsSHA256, patchedSHA256, proxyVersion string) bool {
+	for _, entry := range h.Entries {
+		if !PathsEqual(entry.Path, path) || entry.SpecsSHA256 != specsSHA256 || entry.PatchedSHA256 != patchedSHA256 {
+			continue
+		}
+		if strings.TrimSpace(entry.ProxyVersion) != strings.TrimSpace(proxyVersion) {
+			continue
+		}
+		return !entry.VerifiedAt.IsZero()
 	}
 	return false
 }
@@ -69,6 +83,16 @@ func (h *PatchHistory) Upsert(entry PatchHistoryEntry) {
 		}
 	}
 	h.Entries = append(h.Entries, entry)
+}
+
+func (h *PatchHistory) MarkVerified(path, specsSHA256 string, verifiedAt time.Time) bool {
+	for i := range h.Entries {
+		if PathsEqual(h.Entries[i].Path, path) && h.Entries[i].SpecsSHA256 == specsSHA256 {
+			h.Entries[i].VerifiedAt = verifiedAt
+			return true
+		}
+	}
+	return false
 }
 
 // PathsEqual compares paths case-insensitively on Windows (where the
@@ -159,10 +183,18 @@ func (s *PatchHistoryStore) loadUnlocked() (PatchHistory, error) {
 	if err := json.Unmarshal(b, &history); err != nil {
 		return PatchHistory{}, fmt.Errorf("parse patch history: %w", err)
 	}
-	if history.Version == 0 {
+	switch history.Version {
+	case 0:
 		history.Version = PatchHistoryVersion
-	}
-	if history.Version != PatchHistoryVersion {
+	case 1:
+		for i := range history.Entries {
+			if history.Entries[i].VerifiedAt.IsZero() {
+				history.Entries[i].VerifiedAt = history.Entries[i].PatchedAt
+			}
+		}
+		history.Version = PatchHistoryVersion
+	case PatchHistoryVersion:
+	default:
 		return PatchHistory{}, fmt.Errorf("unsupported patch history version %d (expected %d)", history.Version, PatchHistoryVersion)
 	}
 	return history, nil

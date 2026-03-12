@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -47,16 +48,21 @@ type exePatchOptions struct {
 }
 
 type patchOutcome struct {
-	Applied        bool
-	TargetPath     string
-	BackupPath     string
-	SpecsHash      string
-	HistoryStore   *config.PatchHistoryStore
-	TargetSHA256   string
-	TargetVersion  string
-	IsClaude       bool
-	AlreadyPatched bool
-	ConfigPath     string
+	Applied                  bool
+	TargetPath               string
+	BackupPath               string
+	SpecsHash                string
+	HistoryStore             *config.PatchHistoryStore
+	TargetSHA256             string
+	TargetVersion            string
+	IsClaude                 bool
+	AlreadyPatched           bool
+	Verified                 bool
+	NeedsVerification        bool
+	RollbackOnStartupFailure bool
+	ConfigPath               string
+	LogWriter                io.Writer
+	readiness                *patchReadiness
 }
 
 func (o exePatchOptions) enabled() bool {
@@ -250,6 +256,10 @@ func (o exePatchOptions) compile() ([]exePatchSpec, error) {
 }
 
 func maybePatchExecutable(cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+	return maybePatchExecutableWithContext(context.Background(), cmdArgs, opts, configPath, log)
+}
+
+func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
 	specs, err := opts.compile()
 	if err != nil {
 		return nil, err
@@ -330,6 +340,7 @@ func maybePatchExecutable(cmdArgs []string, opts exePatchOptions, configPath str
 	}
 	outcome.IsClaude = isClaude
 	outcome.ConfigPath = configPath
+	outcome.LogWriter = log
 
 	bytePatchApplied := outcome.Applied
 	if bytePatchApplied && outcome.IsClaude {
@@ -348,7 +359,15 @@ func maybePatchExecutable(cmdArgs []string, opts exePatchOptions, configPath str
 		}
 	}
 
-	needProbe := outcome.IsClaude && (bytePatchApplied || glibcCompat)
+	windowsHistoricalVerification := runtimeGOOS == "windows" && outcome.AlreadyPatched && !outcome.Verified && outcome.BackupPath != ""
+	outcome.NeedsVerification = outcome.IsClaude && (bytePatchApplied || windowsHistoricalVerification)
+	outcome.RollbackOnStartupFailure = bytePatchApplied || windowsHistoricalVerification
+
+	needProbe := outcome.IsClaude && (bytePatchApplied || glibcCompat || outcome.NeedsVerification)
+	if needProbe && runtimeGOOS == "windows" && !glibcCompat {
+		startPatchedExecutableReadiness(ctx, outcome, opts)
+		return outcome, nil
+	}
 	if needProbe {
 		out, probeErr := runClaudeProbeFn(resolvedPath, "--version")
 		if probeErr != nil && glibcCompat && isMissingGlibcSymbolError(out) {
@@ -357,21 +376,24 @@ func maybePatchExecutable(cmdArgs []string, opts exePatchOptions, configPath str
 			if compatErr != nil {
 				_, _ = fmt.Fprintf(log, "exe-patch: glibc compat patch failed: %v\n", compatErr)
 			} else if compatApplied {
+				outcome.NeedsVerification = outcome.IsClaude && outcome.Applied
+				outcome.RollbackOnStartupFailure = outcome.RollbackOnStartupFailure || outcome.Applied
 				out, probeErr = runClaudeProbeFn(resolvedPath, "--version")
 			}
 		}
-		if probeErr != nil && outcome.Applied {
-			_, _ = fmt.Fprintln(log, "exe-patch: detected startup failure; restoring backup")
-			if restoreErr := restoreExecutableFromBackupFn(outcome); restoreErr != nil {
-				return nil, fmt.Errorf("restore patched executable: %w", restoreErr)
+		if probeErr != nil {
+			if outcome.Applied || outcome.NeedsVerification {
+				if failureErr := handlePatchedExecutableFailure(outcome, probeErr, out); failureErr != nil {
+					return nil, failureErr
+				}
+				return nil, nil
 			}
-			if historyErr := cleanupPatchHistoryFn(outcome); historyErr != nil {
-				return nil, fmt.Errorf("cleanup patch history: %w", historyErr)
+			return outcome, nil
+		}
+		if outcome.NeedsVerification {
+			if markErr := markPatchedExecutableVerified(outcome, time.Now()); markErr != nil {
+				_, _ = fmt.Fprintf(log, "exe-patch: failed to persist patch verification: %v\n", markErr)
 			}
-			if recordErr := recordPatchFailureFn(configPath, outcome, formatFailureReason(probeErr, out)); recordErr != nil {
-				_, _ = fmt.Fprintf(log, "exe-patch: failed to record patch failure: %v\n", recordErr)
-			}
-			return nil, nil
 		}
 	}
 
@@ -418,6 +440,14 @@ func patchExecutable(path string, specs []exePatchSpec, log io.Writer, preview b
 	if historyLoaded {
 		if history.IsPatched(path, specsHash, currentHash, proxyVersion) {
 			outcome.AlreadyPatched = true
+			outcome.Verified = history.IsVerified(path, specsHash, currentHash, proxyVersion)
+			if runtimeGOOS != "windows" && !outcome.Verified {
+				outcome.Verified = true
+			}
+			backupPath := originalBackupPath(path)
+			if info, statErr := os.Stat(backupPath); statErr == nil && info.Mode().IsRegular() {
+				outcome.BackupPath = backupPath
+			}
 			logAlreadyPatched(log, path)
 			return outcome, nil
 		}
@@ -496,7 +526,7 @@ func patchExecutable(path string, specs []exePatchSpec, log io.Writer, preview b
 	}
 
 	backupReady := outcome.BackupPath != ""
-	if touched && !dryRun && !backupReady {
+	if changed && !dryRun && !backupReady {
 		backupPath, err := backupExecutable(path, info.Mode().Perm())
 		if err != nil {
 			if changed {
@@ -519,6 +549,9 @@ func patchExecutable(path string, specs []exePatchSpec, log io.Writer, preview b
 			return nil, fmt.Errorf("write patched executable %q: %w", path, err)
 		}
 	}
+	if touched && !changed {
+		outcome.AlreadyPatched = true
+	}
 
 	if dryRun {
 		logDryRun(log, path, changed)
@@ -529,12 +562,29 @@ func patchExecutable(path string, specs []exePatchSpec, log io.Writer, preview b
 		if changed {
 			entryHash = patchedHash
 		}
+		verifiedAt := time.Time{}
+		if historyLoaded {
+			if entry, ok := history.Find(path, specsHash); ok && entry.PatchedSHA256 == entryHash {
+				verifiedAt = entry.VerifiedAt
+			}
+		}
+		if changed {
+			if runtimeGOOS == "windows" {
+				verifiedAt = time.Time{}
+			} else {
+				verifiedAt = time.Now()
+			}
+		} else if runtimeGOOS != "windows" && verifiedAt.IsZero() {
+			verifiedAt = time.Now()
+		}
+		outcome.Verified = !verifiedAt.IsZero()
 		entry := config.PatchHistoryEntry{
 			Path:          path,
 			SpecsSHA256:   specsHash,
 			PatchedSHA256: entryHash,
 			ProxyVersion:  proxyVersion,
 			PatchedAt:     time.Now(),
+			VerifiedAt:    verifiedAt,
 		}
 		if err := historyStore.Update(func(h *config.PatchHistory) error {
 			h.Upsert(entry)

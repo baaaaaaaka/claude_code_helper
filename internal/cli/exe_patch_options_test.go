@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
 )
@@ -383,7 +384,7 @@ func TestPatchExecutableStaleBackupDiscarded(t *testing.T) {
 	}
 }
 
-func TestPatchExecutableProxyChangeWithoutBackup(t *testing.T) {
+func TestPatchExecutableProxyChangeWithoutBackupDoesNotCreatePatchedBackup(t *testing.T) {
 	requireExePatchEnabled(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bin")
@@ -425,8 +426,8 @@ func TestPatchExecutableProxyChangeWithoutBackup(t *testing.T) {
 	if outcome.Applied {
 		t.Fatalf("expected no rewrite when already patched")
 	}
-	if _, err := os.Stat(originalBackupPath(path)); err != nil {
-		t.Fatalf("expected backup to be created: %v", err)
+	if _, err := os.Stat(originalBackupPath(path)); !os.IsNotExist(err) {
+		t.Fatalf("expected no backup to be created from already-patched bytes, got err=%v", err)
 	}
 	history, err := store.Load()
 	if err != nil {
@@ -709,8 +710,54 @@ func TestPatchExecutableAlreadyPatchedSkips(t *testing.T) {
 	if !outcome.AlreadyPatched {
 		t.Fatalf("expected AlreadyPatched=true on second run")
 	}
+	if runtimeGOOS != "windows" && !outcome.Verified {
+		t.Fatalf("expected non-Windows already-patched binary to remain verified")
+	}
 	if !strings.Contains(log.String(), "already patched") {
 		t.Fatalf("expected 'already patched' log, got %q", log.String())
+	}
+}
+
+func TestPatchExecutableAlreadyPatchedWithoutHistoryDoesNotCreateBackupOnWindows(t *testing.T) {
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	runtimeGOOS = "windows"
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bin")
+	if err := os.WriteFile(path, []byte("bar bar"), 0o700); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	store, err := config.NewPatchHistoryStore(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+
+	spec := exePatchSpec{
+		match:   regexp.MustCompile("bar"),
+		patch:   regexp.MustCompile("bar"),
+		replace: []byte("bar"),
+		label:   "already-patched",
+	}
+
+	log := &bytes.Buffer{}
+	outcome, err := patchExecutable(path, []exePatchSpec{spec}, log, false, false, store, "v1")
+	if err != nil {
+		t.Fatalf("patchExecutable: %v", err)
+	}
+	if !outcome.AlreadyPatched {
+		t.Fatalf("expected AlreadyPatched=true, got %#v", outcome)
+	}
+	if outcome.BackupPath != "" {
+		t.Fatalf("expected no backup path for already-patched binary, got %q", outcome.BackupPath)
+	}
+	if outcome.NeedsVerification {
+		t.Fatalf("expected no readiness requirement without original backup, got %#v", outcome)
+	}
+	if _, err := os.Stat(originalBackupPath(path)); !os.IsNotExist(err) {
+		t.Fatalf("expected no backup file, got err=%v", err)
 	}
 }
 
@@ -757,6 +804,121 @@ func TestPatchExecutableNoRealChangeLogsCorrectly(t *testing.T) {
 	}
 	if !strings.Contains(log.String(), "no byte changes") {
 		t.Fatalf("expected 'no byte changes' log, got %q", log.String())
+	}
+	if !outcome.AlreadyPatched {
+		t.Fatalf("expected AlreadyPatched=true when touched but not changed")
+	}
+}
+
+func TestPatchExecutableAlreadyPatchedWindowsRemainsUnverified(t *testing.T) {
+	// On Windows, an already-patched binary from history that was never
+	// verified should remain unverified so the outer function can trigger
+	// the readiness check.
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	runtimeGOOS = "windows"
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bin")
+	if err := os.WriteFile(path, []byte("bar bar"), 0o700); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	store, err := config.NewPatchHistoryStore(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+
+	spec := exePatchSpec{
+		match:   regexp.MustCompile("foo"),
+		patch:   regexp.MustCompile("foo"),
+		replace: []byte("bar"),
+		label:   "test",
+	}
+
+	// Seed history with a matching entry but no VerifiedAt.
+	patchedHash := hashBytes([]byte("bar bar"))
+	specsHash := patchSpecsHash([]exePatchSpec{spec})
+	if err := store.Update(func(h *config.PatchHistory) error {
+		h.Upsert(config.PatchHistoryEntry{
+			Path:          path,
+			SpecsSHA256:   specsHash,
+			PatchedSHA256: patchedHash,
+			ProxyVersion:  "v1",
+			PatchedAt:     time.Now(),
+			VerifiedAt:    time.Time{}, // explicitly unverified
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("seed history: %v", err)
+	}
+
+	log := &bytes.Buffer{}
+	outcome, err := patchExecutable(path, []exePatchSpec{spec}, log, false, false, store, "v1")
+	if err != nil {
+		t.Fatalf("patchExecutable: %v", err)
+	}
+	if !outcome.AlreadyPatched {
+		t.Fatalf("expected AlreadyPatched=true")
+	}
+	if outcome.Verified {
+		t.Fatalf("expected Verified=false on Windows for unverified history entry")
+	}
+}
+
+func TestPatchExecutableAlreadyPatchedNonWindowsAutoVerifies(t *testing.T) {
+	// On non-Windows, an already-patched binary that has no VerifiedAt
+	// should be auto-promoted to verified.
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	runtimeGOOS = "linux"
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bin")
+	if err := os.WriteFile(path, []byte("bar bar"), 0o700); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	store, err := config.NewPatchHistoryStore(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+
+	spec := exePatchSpec{
+		match:   regexp.MustCompile("foo"),
+		patch:   regexp.MustCompile("foo"),
+		replace: []byte("bar"),
+		label:   "test",
+	}
+
+	patchedHash := hashBytes([]byte("bar bar"))
+	specsHash := patchSpecsHash([]exePatchSpec{spec})
+	if err := store.Update(func(h *config.PatchHistory) error {
+		h.Upsert(config.PatchHistoryEntry{
+			Path:          path,
+			SpecsSHA256:   specsHash,
+			PatchedSHA256: patchedHash,
+			ProxyVersion:  "v1",
+			PatchedAt:     time.Now(),
+			VerifiedAt:    time.Time{}, // explicitly unverified
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("seed history: %v", err)
+	}
+
+	log := &bytes.Buffer{}
+	outcome, err := patchExecutable(path, []exePatchSpec{spec}, log, false, false, store, "v1")
+	if err != nil {
+		t.Fatalf("patchExecutable: %v", err)
+	}
+	if !outcome.AlreadyPatched {
+		t.Fatalf("expected AlreadyPatched=true")
+	}
+	if !outcome.Verified {
+		t.Fatalf("expected Verified=true on non-Windows (auto-promoted)")
 	}
 }
 

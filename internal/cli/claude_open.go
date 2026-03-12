@@ -99,7 +99,7 @@ func runClaudeSession(
 	}
 
 	cmdArgs := append([]string{path}, args...)
-	patchOutcome, err := maybePatchExecutable(cmdArgs, root.exePatch, root.configPath, log)
+	patchOutcome, err := maybePatchExecutableCtxFn(ctx, cmdArgs, root.exePatch, root.configPath, log)
 	if err != nil {
 		return err
 	}
@@ -167,7 +167,7 @@ func runClaudeNewSession(
 		cmdArgs = append(cmdArgs, "--permission-mode", "bypassPermissions")
 	}
 
-	patchOutcome, err := maybePatchExecutable(cmdArgs, root.exePatch, root.configPath, log)
+	patchOutcome, err := maybePatchExecutableCtxFn(ctx, cmdArgs, root.exePatch, root.configPath, log)
 	if err != nil {
 		return err
 	}
