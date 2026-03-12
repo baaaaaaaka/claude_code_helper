@@ -211,6 +211,63 @@ func TestRunUpgradeClaudeNoProxyDirect(t *testing.T) {
 	}
 }
 
+func TestRunUpgradeClaudePrewarmsPatchedClaude(t *testing.T) {
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	store := newTempStore(t)
+	disabled := false
+	if err := store.Save(config.Config{
+		Version:      config.CurrentVersion,
+		ProxyEnabled: &disabled,
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	prepareCalled := false
+	waitCalled := false
+	prevInstaller := runClaudeInstallerFn
+	runClaudeInstallerFn = func(ctx context.Context, out io.Writer, opts installProxyOptions) error {
+		return nil
+	}
+	t.Cleanup(func() {
+		runClaudeInstallerFn = prevInstaller
+	})
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		prepareCalled = true
+		if len(cmdArgs) != 1 || cmdArgs[0] != "claude" {
+			t.Fatalf("unexpected patch prep args: %v", cmdArgs)
+		}
+		return &patchOutcome{}, nil
+	}
+	waitPatchedExecutableReadyFn = func(ctx context.Context, outcome *patchOutcome) error {
+		waitCalled = true
+		return nil
+	}
+
+	root := &rootOptions{
+		configPath: store.Path(),
+		exePatch: exePatchOptions{
+			enabledFlag:    true,
+			policySettings: true,
+		},
+	}
+	cmd := newUpgradeClaudeCmd(root)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetContext(context.Background())
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("upgrade-claude error: %v", err)
+	}
+	if !prepareCalled {
+		t.Fatalf("expected upgrade-claude to prewarm patched claude")
+	}
+	if !waitCalled {
+		t.Fatalf("expected upgrade-claude to wait for readiness")
+	}
+}
+
 func TestRunUpgradeClaudeWithProxyUsesProxyEnv(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skip shell script test on windows")

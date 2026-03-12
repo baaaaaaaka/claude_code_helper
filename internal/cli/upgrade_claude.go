@@ -10,6 +10,8 @@ import (
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
 )
 
+var runClaudeInstallerFn = runClaudeInstaller
+
 func newUpgradeClaudeCmd(root *rootOptions) *cobra.Command {
 	var profile string
 
@@ -53,7 +55,7 @@ func runUpgradeClaude(cmd *cobra.Command, root *rootOptions, profileRef string) 
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
-	if err := runClaudeInstaller(ctx, out, opts); err != nil {
+	if err := runClaudeInstallerFn(ctx, out, opts); err != nil {
 		return err
 	}
 
@@ -61,6 +63,16 @@ func runUpgradeClaude(cmd *cobra.Command, root *rootOptions, profileRef string) 
 	// the freshly-installed binary as new rather than re-patching the old
 	// backup over the top.
 	invalidateExePatchState("claude", root.configPath)
+
+	if root.exePatch.enabled() {
+		patchOutcome, patchErr := maybePatchExecutableCtxFn(ctx, []string{"claude"}, root.exePatch, root.configPath, out)
+		if patchErr != nil {
+			return patchErr
+		}
+		if waitErr := waitPatchedExecutableReadyFn(ctx, patchOutcome); waitErr != nil {
+			return waitErr
+		}
+	}
 
 	_, _ = fmt.Fprintln(out, "Claude Code upgrade complete.")
 	return nil

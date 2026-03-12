@@ -24,10 +24,15 @@ func withExePatchTestHooks(t *testing.T) {
 	prevPatch := patchExecutableFn
 	prevCodesign := adhocCodesignFn
 	prevProbe := runClaudeProbeFn
+	prevTimedProbe := runClaudeTimedProbeFn
 	prevGlibcPatch := applyClaudeGlibcCompatPatchFn
 	prevRestore := restoreExecutableFromBackupFn
 	prevCleanup := cleanupPatchHistoryFn
 	prevRecordFailure := recordPatchFailureFn
+	prevGOOS := runtimeGOOS
+	prevReadinessPolicy := patchReadinessPolicyFn
+	prevMaybePatchCtx := maybePatchExecutableCtxFn
+	prevWaitReady := waitPatchedExecutableReadyFn
 	t.Cleanup(func() {
 		execLookPathFn = prevLookPath
 		resolveExecutablePathFn = prevResolvePath
@@ -39,10 +44,15 @@ func withExePatchTestHooks(t *testing.T) {
 		patchExecutableFn = prevPatch
 		adhocCodesignFn = prevCodesign
 		runClaudeProbeFn = prevProbe
+		runClaudeTimedProbeFn = prevTimedProbe
 		applyClaudeGlibcCompatPatchFn = prevGlibcPatch
 		restoreExecutableFromBackupFn = prevRestore
 		cleanupPatchHistoryFn = prevCleanup
 		recordPatchFailureFn = prevRecordFailure
+		runtimeGOOS = prevGOOS
+		patchReadinessPolicyFn = prevReadinessPolicy
+		maybePatchExecutableCtxFn = prevMaybePatchCtx
+		waitPatchedExecutableReadyFn = prevWaitReady
 	})
 }
 

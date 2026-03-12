@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
 
 func TestPatchHistoryPath(t *testing.T) {
@@ -36,6 +37,7 @@ func TestPatchHistoryStoreLoadSave(t *testing.T) {
 		SpecsSHA256:   "spec",
 		PatchedSHA256: "patched",
 		ProxyVersion:  "v1",
+		VerifiedAt:    time.Unix(1700000000, 0).UTC(),
 	}
 	if err := store.Update(func(h *PatchHistory) error {
 		h.Upsert(entry)
@@ -44,6 +46,7 @@ func TestPatchHistoryStoreLoadSave(t *testing.T) {
 			SpecsSHA256:   entry.SpecsSHA256,
 			PatchedSHA256: "patched-2",
 			ProxyVersion:  "v2",
+			VerifiedAt:    time.Time{},
 		})
 		return nil
 	}); err != nil {
@@ -69,10 +72,22 @@ func TestPatchHistoryStoreLoadSave(t *testing.T) {
 	if history.IsPatched(entry.Path, entry.SpecsSHA256, "patched-2", "") {
 		t.Fatalf("expected IsPatched to be false for empty proxy version")
 	}
+	if history.IsVerified(entry.Path, entry.SpecsSHA256, "patched-2", "v2") {
+		t.Fatalf("expected IsVerified to be false for unverified entry")
+	}
 	if found, ok := history.Find(entry.Path, entry.SpecsSHA256); !ok {
 		t.Fatalf("expected Find to return entry")
 	} else if found.ProxyVersion != "v2" {
 		t.Fatalf("expected Find to return latest proxy version, got %q", found.ProxyVersion)
+	}
+	if !history.MarkVerified(entry.Path, entry.SpecsSHA256, time.Unix(1700000010, 0).UTC()) {
+		t.Fatalf("expected MarkVerified to succeed")
+	}
+	if !history.IsVerified(entry.Path, entry.SpecsSHA256, "patched-2", "v2") {
+		t.Fatalf("expected IsVerified to be true after MarkVerified")
+	}
+	if history.MarkVerified("missing", "missing", time.Now()) {
+		t.Fatalf("expected MarkVerified to be false for missing entry")
 	}
 
 	if removed := history.Remove(entry.Path, entry.SpecsSHA256); !removed {
@@ -154,6 +169,32 @@ func TestPatchHistoryStoreErrorPaths(t *testing.T) {
 		}
 		if history.Version != PatchHistoryVersion {
 			t.Fatalf("expected version upgrade, got %d", history.Version)
+		}
+	})
+
+	t.Run("Load migrates version one entries to verified", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "patch_history.json")
+		payload := `{"version":1,"entries":[{"path":"/tmp/claude","specsSha256":"spec","patchedSha256":"hash","proxyVersion":"v1","patchedAt":"2024-01-02T03:04:05Z"}]}`
+		if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+			t.Fatalf("write patch history: %v", err)
+		}
+		store := &PatchHistoryStore{path: path}
+		history, err := store.loadUnlocked()
+		if err != nil {
+			t.Fatalf("loadUnlocked error: %v", err)
+		}
+		if history.Version != PatchHistoryVersion {
+			t.Fatalf("expected version upgrade, got %d", history.Version)
+		}
+		if len(history.Entries) != 1 {
+			t.Fatalf("expected 1 history entry, got %d", len(history.Entries))
+		}
+		if history.Entries[0].VerifiedAt.IsZero() {
+			t.Fatalf("expected version one entry to be migrated as verified")
+		}
+		if !history.IsVerified("/tmp/claude", "spec", "hash", "v1") {
+			t.Fatalf("expected migrated entry to be verified")
 		}
 	})
 
