@@ -145,31 +145,48 @@ func TestMaybePatchExecutableRestoresAfterProbeFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("maybePatchExecutable error: %v", err)
 	}
-	if outcome != nil {
-		t.Fatalf("expected probe failure path to return nil outcome, got %#v", outcome)
-	}
-	if !strings.Contains(log.String(), "detected startup failure; restoring backup") {
-		t.Fatalf("expected restore log, got %q", log.String())
-	}
 
-	restored, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read restored stub: %v", err)
-	}
-	if string(restored) != string(original) {
-		t.Fatalf("expected executable to be restored")
-	}
+	if runtime.GOOS == "windows" {
+		// On Windows, probe failures are deferred to async readiness
+		// verification — the synchronous probe is skipped entirely and
+		// maybePatchExecutable returns a non-nil outcome with
+		// NeedsVerification + RollbackOnStartupFailure set.
+		if outcome == nil {
+			t.Fatalf("expected non-nil outcome on Windows (async verification path)")
+		}
+		if !outcome.NeedsVerification {
+			t.Fatalf("expected NeedsVerification=true on Windows")
+		}
+		if !outcome.RollbackOnStartupFailure {
+			t.Fatalf("expected RollbackOnStartupFailure=true on Windows")
+		}
+	} else {
+		if outcome != nil {
+			t.Fatalf("expected probe failure path to return nil outcome, got %#v", outcome)
+		}
+		if !strings.Contains(log.String(), "detected startup failure; restoring backup") {
+			t.Fatalf("expected restore log, got %q", log.String())
+		}
 
-	store, err := config.NewStore(configPath)
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	cfg, err := store.Load()
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	if len(cfg.PatchFailures) != 1 {
-		t.Fatalf("expected one recorded patch failure, got %d", len(cfg.PatchFailures))
+		restored, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read restored stub: %v", err)
+		}
+		if string(restored) != string(original) {
+			t.Fatalf("expected executable to be restored")
+		}
+
+		store, err := config.NewStore(configPath)
+		if err != nil {
+			t.Fatalf("new store: %v", err)
+		}
+		cfg, err := store.Load()
+		if err != nil {
+			t.Fatalf("load config: %v", err)
+		}
+		if len(cfg.PatchFailures) != 1 {
+			t.Fatalf("expected one recorded patch failure, got %d", len(cfg.PatchFailures))
+		}
 	}
 }
 
