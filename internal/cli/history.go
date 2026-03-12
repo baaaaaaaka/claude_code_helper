@@ -164,10 +164,11 @@ func newHistoryOpenCmd(root *rootOptions, claudeDir *string, claudePath *string,
 				return err
 			}
 
-			useProxy, cfg, err := ensureProxyPreference(cmd.Context(), store, *profileRef, cmd.ErrOrStderr())
+			pref, err := ensureProxyPreference(cmd.Context(), store, *profileRef, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
+			useProxy, cfg := pref.Enabled, pref.Cfg
 
 			var profile *config.Profile
 			if useProxy {
@@ -177,6 +178,11 @@ func newHistoryOpenCmd(root *rootOptions, claudeDir *string, claudePath *string,
 				}
 				cfg = cfgWithProfile
 				profile = &p
+			}
+			if pref.NeedsPersist {
+				if err := persistProxyPreference(store, useProxy); err != nil {
+					return err
+				}
 			}
 			useYolo := resolveYoloEnabled(cfg)
 
@@ -219,10 +225,11 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 	}
 
 	for {
-		useProxy, cfg, err := ensureProxyPreference(ctx, store, profileRef, cmd.ErrOrStderr())
+		pref, err := ensureProxyPreference(ctx, store, profileRef, cmd.ErrOrStderr())
 		if err != nil {
 			return err
 		}
+		useProxy, cfg := pref.Enabled, pref.Cfg
 		useYolo := resolveYoloEnabled(cfg)
 
 		var profile *config.Profile
@@ -233,6 +240,11 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 			}
 			cfg = cfgWithProfile
 			profile = &p
+		}
+		if pref.NeedsPersist {
+			if err := persistProxyPreference(store, useProxy); err != nil {
+				return err
+			}
 		}
 
 		resolvedClaudePath, err := ensureClaudeInstalled(ctx, claudePath, cmd.ErrOrStderr(), installProxyOptions{
@@ -273,13 +285,13 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 			}
 			var toggle tui.ProxyToggleRequested
 			if errors.As(err, &toggle) {
-				if err := persistProxyPreference(store, toggle.Enable); err != nil {
-					return err
-				}
 				if toggle.Enable && toggle.RequireConfig {
 					if _, err := initProfileInteractive(ctx, store); err != nil {
 						return err
 					}
+				}
+				if err := persistProxyPreference(store, toggle.Enable); err != nil {
+					return err
 				}
 				continue
 			}
