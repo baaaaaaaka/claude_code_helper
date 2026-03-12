@@ -10,7 +10,17 @@ import (
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
 )
 
-func ensureProxyPreference(ctx context.Context, store *config.Store, profileRef string, out io.Writer) (bool, config.Config, error) {
+// proxyPreferenceResult holds the outcome of ensureProxyPreference.
+// NeedsPersist is true when the preference was determined fresh (not read from
+// disk) and the caller should call persistProxyPreference after the full
+// configuration flow succeeds.
+type proxyPreferenceResult struct {
+	Enabled      bool
+	Cfg          config.Config
+	NeedsPersist bool
+}
+
+func ensureProxyPreference(ctx context.Context, store *config.Store, profileRef string, out io.Writer) (proxyPreferenceResult, error) {
 	return ensureProxyPreferenceWithReader(ctx, store, profileRef, out, bufio.NewReader(os.Stdin))
 }
 
@@ -20,23 +30,20 @@ func ensureProxyPreferenceWithReader(
 	profileRef string,
 	out io.Writer,
 	reader *bufio.Reader,
-) (bool, config.Config, error) {
+) (proxyPreferenceResult, error) {
 	cfg, err := store.Load()
 	if err != nil {
-		return false, cfg, err
+		return proxyPreferenceResult{Cfg: cfg}, err
 	}
 
 	if cfg.ProxyEnabled != nil {
-		return *cfg.ProxyEnabled, cfg, nil
+		return proxyPreferenceResult{Enabled: *cfg.ProxyEnabled, Cfg: cfg}, nil
 	}
 
 	if len(cfg.Profiles) > 0 {
 		enabled := true
-		if err := persistProxyPreference(store, enabled); err != nil {
-			return false, cfg, err
-		}
 		cfg.ProxyEnabled = &enabled
-		return enabled, cfg, nil
+		return proxyPreferenceResult{Enabled: true, Cfg: cfg, NeedsPersist: true}, nil
 	}
 
 	if out != nil {
@@ -45,11 +52,8 @@ func ensureProxyPreferenceWithReader(
 	}
 	defaultYes := profileRef != ""
 	enabled := promptYesNo(reader, "Use SSH proxy for Claude?", defaultYes)
-	if err := persistProxyPreference(store, enabled); err != nil {
-		return false, cfg, err
-	}
 	cfg.ProxyEnabled = &enabled
-	return enabled, cfg, nil
+	return proxyPreferenceResult{Enabled: enabled, Cfg: cfg, NeedsPersist: true}, nil
 }
 
 func persistProxyPreference(store *config.Store, enabled bool) error {
