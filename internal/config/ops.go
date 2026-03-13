@@ -87,6 +87,32 @@ func (c *Config) UpsertPatchFailure(entry PatchFailure) {
 	c.PatchFailures = append(c.PatchFailures, entry)
 }
 
+// PurgeStalePatchFailures removes failure entries whose ProxyVersion
+// does not match currentVersion.  This ensures that upgrading the proxy
+// automatically gives patches a fresh chance to succeed.
+func (c *Config) PurgeStalePatchFailures(currentVersion string) bool {
+	currentVersion = strings.TrimSpace(currentVersion)
+	if currentVersion == "" {
+		return false
+	}
+	n := 0
+	for _, entry := range c.PatchFailures {
+		if strings.TrimSpace(entry.ProxyVersion) == currentVersion {
+			c.PatchFailures[n] = entry
+			n++
+		}
+	}
+	if n == len(c.PatchFailures) {
+		return false
+	}
+	// Clear trailing references for GC.
+	for i := n; i < len(c.PatchFailures); i++ {
+		c.PatchFailures[i] = PatchFailure{}
+	}
+	c.PatchFailures = c.PatchFailures[:n]
+	return true
+}
+
 func samePatchFailureKey(a, b PatchFailure) bool {
 	if strings.TrimSpace(a.ProxyVersion) != strings.TrimSpace(b.ProxyVersion) {
 		return false

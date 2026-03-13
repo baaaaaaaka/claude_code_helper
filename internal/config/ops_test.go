@@ -119,6 +119,47 @@ func TestConfigProfileAndPatchFailureEdges(t *testing.T) {
 		}
 	})
 
+	t.Run("PurgeStalePatchFailures removes old proxy versions", func(t *testing.T) {
+		cfg := Config{PatchFailures: []PatchFailure{
+			{ProxyVersion: "v0.0.41", ClaudeVersion: "2.0"},
+			{ProxyVersion: "v0.0.42", ClaudeVersion: "2.0"},
+			{ProxyVersion: "v0.0.42", ClaudeVersion: "2.1"},
+		}}
+		changed := cfg.PurgeStalePatchFailures("v0.0.42")
+		if !changed {
+			t.Fatalf("expected purge to report changes")
+		}
+		if len(cfg.PatchFailures) != 2 {
+			t.Fatalf("expected 2 remaining, got %d", len(cfg.PatchFailures))
+		}
+		for _, f := range cfg.PatchFailures {
+			if f.ProxyVersion != "v0.0.42" {
+				t.Fatalf("unexpected entry: %#v", f)
+			}
+		}
+	})
+
+	t.Run("PurgeStalePatchFailures no-op when all current", func(t *testing.T) {
+		cfg := Config{PatchFailures: []PatchFailure{
+			{ProxyVersion: "v1", ClaudeVersion: "2.0"},
+		}}
+		if cfg.PurgeStalePatchFailures("v1") {
+			t.Fatalf("expected no change")
+		}
+		if len(cfg.PatchFailures) != 1 {
+			t.Fatalf("expected 1 remaining, got %d", len(cfg.PatchFailures))
+		}
+	})
+
+	t.Run("PurgeStalePatchFailures empty version is no-op", func(t *testing.T) {
+		cfg := Config{PatchFailures: []PatchFailure{
+			{ProxyVersion: "v1", ClaudeVersion: "2.0"},
+		}}
+		if cfg.PurgeStalePatchFailures("") {
+			t.Fatalf("expected no change for empty version")
+		}
+	})
+
 	t.Run("samePatchFailureKey matches sha and path", func(t *testing.T) {
 		a := PatchFailure{ProxyVersion: "v1", ClaudeSHA256: "ABC"}
 		b := PatchFailure{ProxyVersion: "v1", ClaudeSHA256: "abc"}
