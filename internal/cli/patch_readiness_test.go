@@ -422,6 +422,100 @@ func TestStartPatchedExecutableReadinessTimeoutReturnsStillPending(t *testing.T)
 	}
 }
 
+func TestWaitPatchedExecutableReadyPrintsCountdown(t *testing.T) {
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	runtimeGOOS = "windows"
+
+	probeReady := make(chan struct{})
+	patchReadinessPolicyFn = func() patchReadinessPolicy {
+		return patchReadinessPolicy{
+			InitialProbeTimeout: 5 * time.Second, // long enough that wait() runs first
+			RetryProbeTimeout:   5 * time.Second,
+			RetryInterval:       time.Millisecond,
+			TotalBudget:         10 * time.Second,
+			QuietDelay:          0, // no quiet delay — print immediately
+		}
+	}
+
+	runClaudeTimedProbeFn = func(ctx context.Context, path string, arg string, timeout time.Duration) (string, error) {
+		select {
+		case <-probeReady:
+			return "Claude Code 1.2.3", nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+
+	var buf bytes.Buffer
+	outcome := &patchOutcome{
+		Applied:           true,
+		IsClaude:          true,
+		NeedsVerification: true,
+		TargetPath:        "/fake/claude",
+		BackupPath:        "/fake/claude.bak",
+		LogWriter:         &buf,
+	}
+
+	startPatchedExecutableReadiness(context.Background(), outcome, exePatchOptions{})
+
+	// Start wait() in a goroutine so the ticker can fire while the
+	// probe is still blocked.
+	waitErr := make(chan error, 1)
+	go func() {
+		waitErr <- waitPatchedExecutableReady(context.Background(), outcome)
+	}()
+
+	// Let the ticker fire at least once to print a progress message,
+	// then unblock the probe so it succeeds.
+	time.Sleep(1500 * time.Millisecond)
+	close(probeReady)
+
+	if err := <-waitErr; err != nil {
+		t.Fatalf("waitPatchedExecutableReady error: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "Windows is finishing a security check") {
+		t.Fatalf("expected countdown message in output, got %q", output)
+	}
+	if !strings.Contains(output, "seconds remaining") {
+		t.Fatalf("expected 'seconds remaining' in output, got %q", output)
+	}
+}
+
+func TestWaitPatchedExecutableReadyNoOutputOnNonWindows(t *testing.T) {
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	runtimeGOOS = "linux"
+
+	var buf bytes.Buffer
+	outcome := &patchOutcome{
+		Applied:           true,
+		IsClaude:          true,
+		NeedsVerification: true,
+		TargetPath:        "/fake/claude",
+		BackupPath:        "/fake/claude.bak",
+		LogWriter:         &buf,
+	}
+
+	startPatchedExecutableReadiness(context.Background(), outcome, exePatchOptions{})
+
+	if outcome.readiness != nil {
+		t.Fatalf("expected readiness to be nil on non-Windows")
+	}
+
+	if err := waitPatchedExecutableReady(context.Background(), outcome); err != nil {
+		t.Fatalf("waitPatchedExecutableReady error: %v", err)
+	}
+
+	if buf.Len() != 0 {
+		t.Fatalf("expected no output on non-Windows, got %q", buf.String())
+	}
+}
+
 func TestHasPatchedBinary(t *testing.T) {
 	requireExePatchEnabled(t)
 

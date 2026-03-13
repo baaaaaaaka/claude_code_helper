@@ -97,12 +97,15 @@ func shouldSkipPatchFailure(configPath string, proxyVersion string, claudeVersio
 	if err != nil {
 		return false, err
 	}
-	// Purge failure entries left by older proxy versions so that an
-	// upgrade automatically gives patches a fresh chance to succeed.
-	if cfg.PurgeStalePatchFailures(proxyVersion) {
-		if writeErr := store.Save(cfg); writeErr != nil {
-			// Non-fatal: the purge is best-effort.
-			_ = writeErr
+	// On Windows, probe timeouts caused by Defender scans may record
+	// false-positive failures.  When the proxy is upgraded the stale
+	// entries should be discarded so patches get a fresh chance.
+	if runtimeGOOS == "windows" {
+		if cfg.PurgeStalePatchFailures(proxyVersion) {
+			if writeErr := store.Save(cfg); writeErr != nil {
+				// Non-fatal: the purge is best-effort.
+				_ = writeErr
+			}
 		}
 	}
 	return cfg.HasPatchFailure(proxyVersion, claudeVersion, claudeSHA), nil
