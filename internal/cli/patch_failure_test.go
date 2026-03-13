@@ -255,45 +255,81 @@ func TestPatchFailureHelpers(t *testing.T) {
 	})
 }
 
-func TestShouldSkipPatchFailurePurgesStaleEntries(t *testing.T) {
+func TestShouldSkipPatchFailurePurgesStaleEntriesOnWindows(t *testing.T) {
 	requireExePatchEnabled(t)
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
 
-	// Seed a failure from an older proxy version.
-	store, err := config.NewStore(configPath)
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	if err := store.Update(func(cfg *config.Config) error {
-		cfg.UpsertPatchFailure(config.PatchFailure{
-			ProxyVersion:  "v0.0.40",
-			ClaudeVersion: "2.1.19",
-			ClaudeSHA256:  "abc",
-		})
-		return nil
-	}); err != nil {
-		t.Fatalf("seed failure: %v", err)
-	}
-
-	// Query with a newer proxy version — the old entry should be purged
-	// and the check should return false.
-	skip, err := shouldSkipPatchFailure(configPath, "v0.0.42", "2.1.19", "")
-	if err != nil {
-		t.Fatalf("shouldSkipPatchFailure error: %v", err)
-	}
-	if skip {
-		t.Fatalf("expected stale failure to be purged, not skipped")
+	seedStaleFailure := func(t *testing.T) (string, *config.Store) {
+		t.Helper()
+		dir := t.TempDir()
+		configPath := filepath.Join(dir, "config.json")
+		store, err := config.NewStore(configPath)
+		if err != nil {
+			t.Fatalf("new store: %v", err)
+		}
+		if err := store.Update(func(cfg *config.Config) error {
+			cfg.UpsertPatchFailure(config.PatchFailure{
+				ProxyVersion:  "v0.0.40",
+				ClaudeVersion: "2.1.19",
+				ClaudeSHA256:  "abc",
+			})
+			return nil
+		}); err != nil {
+			t.Fatalf("seed failure: %v", err)
+		}
+		return configPath, store
 	}
 
-	// Verify the old entry was removed from disk.
-	cfg, err := store.Load()
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	if len(cfg.PatchFailures) != 0 {
-		t.Fatalf("expected 0 failures after purge, got %d", len(cfg.PatchFailures))
-	}
+	t.Run("Windows purges stale failures on upgrade", func(t *testing.T) {
+		prev := runtimeGOOS
+		runtimeGOOS = "windows"
+		t.Cleanup(func() { runtimeGOOS = prev })
+
+		configPath, store := seedStaleFailure(t)
+
+		skip, err := shouldSkipPatchFailure(configPath, "v0.0.42", "2.1.19", "")
+		if err != nil {
+			t.Fatalf("shouldSkipPatchFailure error: %v", err)
+		}
+		if skip {
+			t.Fatalf("expected stale failure to be purged, not skipped")
+		}
+
+		cfg, err := store.Load()
+		if err != nil {
+			t.Fatalf("load config: %v", err)
+		}
+		if len(cfg.PatchFailures) != 0 {
+			t.Fatalf("expected 0 failures after purge, got %d", len(cfg.PatchFailures))
+		}
+	})
+
+	t.Run("non-Windows does not purge stale failures", func(t *testing.T) {
+		prev := runtimeGOOS
+		runtimeGOOS = "linux"
+		t.Cleanup(func() { runtimeGOOS = prev })
+
+		configPath, store := seedStaleFailure(t)
+
+		// Different proxy version, but same claude version — on non-Windows
+		// the old entry is NOT purged, so the lookup simply misses (different
+		// proxy version) and returns false.
+		skip, err := shouldSkipPatchFailure(configPath, "v0.0.42", "2.1.19", "")
+		if err != nil {
+			t.Fatalf("shouldSkipPatchFailure error: %v", err)
+		}
+		if skip {
+			t.Fatalf("expected no skip for different proxy version")
+		}
+
+		// The stale entry should still be on disk.
+		cfg, err := store.Load()
+		if err != nil {
+			t.Fatalf("load config: %v", err)
+		}
+		if len(cfg.PatchFailures) != 1 {
+			t.Fatalf("expected stale entry preserved on non-Windows, got %d", len(cfg.PatchFailures))
+		}
+	})
 }
 
 func writeProbeScript(t *testing.T, dir, name, content string) string {
