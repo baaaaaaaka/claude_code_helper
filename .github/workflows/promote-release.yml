@@ -9,6 +9,7 @@ on:
         type: string
 
 permissions:
+  actions: write
   contents: write
 
 jobs:
@@ -78,4 +79,14 @@ jobs:
           fi
           git tag "$RELEASE_TAG"
           git push origin "$RELEASE_TAG"
-          echo "Pushed tag $RELEASE_TAG — release workflow will run automatically."
+          echo "Pushed tag $RELEASE_TAG."
+
+      - name: Dispatch release workflow
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml --ref main -f release_tag="$RELEASE_TAG"
+          echo "Dispatched release workflow for $RELEASE_TAG."
