@@ -510,20 +510,38 @@ func TestFindInstalledClaudePathFallsBackToWindowsDefaultLocation(t *testing.T) 
 	}
 }
 
+func hideWindowsGitBashDiscovery(t *testing.T) {
+	t.Helper()
+	t.Setenv("CLAUDE_CODE_GIT_BASH_PATH", "")
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ProgramFiles", t.TempDir())
+	t.Setenv("ProgramFiles(x86)", t.TempDir())
+}
+
+func setIsolatedStubPath(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("PATH", dir)
+	if runtime.GOOS == "windows" {
+		t.Setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+	}
+}
+
 func TestEnsureWindowsGitBashUsesExistingPath(t *testing.T) {
 	prevGOOS := claudeInstallGOOS
 	t.Cleanup(func() { claudeInstallGOOS = prevGOOS })
 	claudeInstallGOOS = "windows"
 
-	localAppData := t.TempDir()
-	t.Setenv("LOCALAPPDATA", localAppData)
-	bashPath := filepath.Join(localAppData, "claude-proxy", "git", "current", "bin", "bash.exe")
+	hideWindowsGitBashDiscovery(t)
+	bashPath := filepath.Join(t.TempDir(), "portable", "bash.exe")
 	if err := os.MkdirAll(filepath.Dir(bashPath), 0o755); err != nil {
 		t.Fatalf("mkdir bash dir: %v", err)
 	}
 	if err := os.WriteFile(bashPath, []byte("x"), 0o600); err != nil {
 		t.Fatalf("write bash.exe: %v", err)
 	}
+	t.Setenv("CLAUDE_CODE_GIT_BASH_PATH", bashPath)
 
 	got, err := ensureWindowsGitBash(context.Background(), io.Discard, installProxyOptions{})
 	if err != nil {
@@ -545,6 +563,7 @@ func TestEnsureWindowsGitBashFallsBackToNextCandidate(t *testing.T) {
 	claudeInstallLookPathFn = exec.LookPath
 
 	dir := t.TempDir()
+	hideWindowsGitBashDiscovery(t)
 	bashPath := filepath.Join(t.TempDir(), "portable", "bash.exe")
 	if err := os.MkdirAll(filepath.Dir(bashPath), 0o755); err != nil {
 		t.Fatalf("mkdir bash dir: %v", err)
@@ -555,7 +574,7 @@ func TestEnsureWindowsGitBashFallsBackToNextCandidate(t *testing.T) {
 	t.Setenv("TARGET_BASH_PATH", bashPath)
 	writeStub(t, dir, "powershell", "#!/bin/sh\nexit 1\n", "@echo off\r\nexit /b 1\r\n")
 	writeStub(t, dir, "pwsh", "#!/bin/sh\nprintf '%s\\n' \"$TARGET_BASH_PATH\"\nexit 0\n", "@echo off\r\necho %TARGET_BASH_PATH%\r\nexit /b 0\r\n")
-	setStubPath(t, dir)
+	setIsolatedStubPath(t, dir)
 
 	got, err := ensureWindowsGitBash(context.Background(), io.Discard, installProxyOptions{})
 	if err != nil {
@@ -577,9 +596,10 @@ func TestEnsureWindowsGitBashFailsWhenBootstrapDoesNotProduceBash(t *testing.T) 
 	claudeInstallLookPathFn = exec.LookPath
 
 	dir := t.TempDir()
+	hideWindowsGitBashDiscovery(t)
 	writeStub(t, dir, "powershell", "#!/bin/sh\necho not-a-bash-path\nexit 0\n", "@echo off\r\necho not-a-bash-path\r\nexit /b 0\r\n")
 	writeStub(t, dir, "pwsh", "#!/bin/sh\necho still-not-a-bash-path\nexit 0\n", "@echo off\r\necho still-not-a-bash-path\r\nexit /b 0\r\n")
-	setStubPath(t, dir)
+	setIsolatedStubPath(t, dir)
 
 	errOut := &strings.Builder{}
 	_, err := ensureWindowsGitBash(context.Background(), errOut, installProxyOptions{})
@@ -603,6 +623,7 @@ func TestRunClaudeInstallerWithEnvInjectsWindowsGitBashPath(t *testing.T) {
 
 	dir := t.TempDir()
 	outFile := filepath.Join(dir, "env.txt")
+	setIsolatedStubPath(t, dir)
 	bashPath := filepath.Join(t.TempDir(), "portable", "bash.exe")
 	if err := os.MkdirAll(filepath.Dir(bashPath), 0o755); err != nil {
 		t.Fatalf("mkdir bash dir: %v", err)
@@ -612,8 +633,11 @@ func TestRunClaudeInstallerWithEnvInjectsWindowsGitBashPath(t *testing.T) {
 	}
 	t.Setenv("CLAUDE_CODE_GIT_BASH_PATH", bashPath)
 	t.Setenv("OUT_FILE", outFile)
-	writeStub(t, dir, "bash", "#!/bin/sh\nprintf \"%s\\n%s\\n\" \"$CLAUDE_CODE_GIT_BASH_PATH\" \"$TEST_EXTRA\" > \"$OUT_FILE\"\nexit 0\n", "@echo off\r\n")
-	setStubPath(t, dir)
+	if runtime.GOOS == "windows" {
+		writeStub(t, dir, "powershell", "#!/bin/sh\nexit 0\n", "@echo off\r\n(\r\n  echo %CLAUDE_CODE_GIT_BASH_PATH%\r\n  echo %TEST_EXTRA%\r\n) > \"%OUT_FILE%\"\r\nexit /b 0\r\n")
+	} else {
+		writeStub(t, dir, "bash", "#!/bin/sh\nprintf \"%s\\n%s\\n\" \"$CLAUDE_CODE_GIT_BASH_PATH\" \"$TEST_EXTRA\" > \"$OUT_FILE\"\nexit 0\n", "@echo off\r\n")
+	}
 
 	if err := runClaudeInstallerWithEnv(context.Background(), io.Discard, installProxyOptions{}, []string{"TEST_EXTRA=ok", "MALFORMED"}); err != nil {
 		t.Fatalf("runClaudeInstallerWithEnv error: %v", err)
@@ -622,7 +646,8 @@ func TestRunClaudeInstallerWithEnvInjectsWindowsGitBashPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read env file: %v", err)
 	}
-	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	normalized := strings.ReplaceAll(strings.TrimSpace(string(content)), "\r\n", "\n")
+	lines := strings.Split(normalized, "\n")
 	if len(lines) != 2 {
 		t.Fatalf("expected 2 lines, got %d", len(lines))
 	}
