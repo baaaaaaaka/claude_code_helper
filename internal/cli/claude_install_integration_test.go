@@ -114,6 +114,7 @@ func configureClaudeInstallTestEnv(t *testing.T, homeDir string) (string, bool) 
 			t.Setenv("ProgramFiles", filepath.Join(homeDir, "ProgramFiles"))
 			t.Setenv("ProgramW6432", filepath.Join(homeDir, "ProgramFiles"))
 			t.Setenv("ProgramFiles(x86)", filepath.Join(homeDir, "Program Files (x86)"))
+			t.Setenv("PATH", pathValue)
 			expectWindowsGitBashBootstrap = os.Getenv("CLAUDE_INSTALL_TEST_REQUIRE_WINDOWS_GIT_BASH_BOOTSTRAP") == "1"
 			if path := findWindowsGitBashPath(os.Getenv); path != "" {
 				t.Fatalf("expected Git Bash to be hidden for install test, found %q", path)
