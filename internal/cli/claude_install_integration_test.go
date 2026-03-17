@@ -23,15 +23,10 @@ func TestClaudeInstallLaunchIntegration(t *testing.T) {
 	}
 
 	homeDir := t.TempDir()
-	localBinDir := filepath.Join(homeDir, ".local", "bin")
+	localBinDir, expectWindowsGitBashBootstrap := configureClaudeInstallTestEnv(t, homeDir)
 	if err := os.MkdirAll(localBinDir, 0o755); err != nil {
 		t.Fatalf("mkdir local bin: %v", err)
 	}
-
-	t.Setenv("HOME", homeDir)
-	t.Setenv("USERPROFILE", homeDir)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(homeDir, ".config"))
-	t.Setenv("PATH", filteredPathWithoutClaude(os.Getenv("PATH"), localBinDir))
 	applyInstallProxyEnv(t)
 
 	startupMarkerPath := ""
@@ -69,6 +64,9 @@ func TestClaudeInstallLaunchIntegration(t *testing.T) {
 	if got := extractVersion(out); got == "" {
 		t.Fatalf("failed to parse claude version from output %q", strings.TrimSpace(out))
 	}
+	if expectWindowsGitBashBootstrap && !strings.Contains(installLog.String(), "installing a private Git for Windows runtime") {
+		t.Fatalf("expected installer log to show Git Bash bootstrap on Windows\ninstaller output:\n%s", installLog.String())
+	}
 
 	if startupMarkerPath != "" {
 		data, err := os.ReadFile(startupMarkerPath)
@@ -82,10 +80,67 @@ func TestClaudeInstallLaunchIntegration(t *testing.T) {
 	}
 }
 
-func filteredPathWithoutClaude(currentPath string, localBinDir string) string {
+func configureClaudeInstallTestEnv(t *testing.T, homeDir string) (string, bool) {
+	t.Helper()
+
+	localBinDir := filepath.Join(homeDir, ".local", "bin")
+	configHome := filepath.Join(homeDir, ".config")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+
+	expectWindowsGitBashBootstrap := false
+	pathValue := buildClaudeInstallTestPath(os.Getenv("PATH"), localBinDir, installTestPathOptions{
+		PreseedLocalBin: os.Getenv("CLAUDE_INSTALL_TEST_NO_PATH_PRESEED") != "1",
+	})
+
+	if runtime.GOOS == "windows" {
+		appData := filepath.Join(homeDir, "AppData", "Roaming")
+		localAppData := filepath.Join(homeDir, "AppData", "Local")
+		for _, dir := range []string{configHome, appData, localAppData, localBinDir} {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatalf("mkdir %s: %v", dir, err)
+			}
+		}
+		t.Setenv("APPDATA", appData)
+		t.Setenv("LOCALAPPDATA", localAppData)
+
+		if os.Getenv("CLAUDE_INSTALL_TEST_HIDE_WINDOWS_GIT_BASH") == "1" {
+			pathValue = buildClaudeInstallTestPath(pathValue, localBinDir, installTestPathOptions{
+				PreseedLocalBin: false,
+				StripWindowsGit: true,
+			})
+			t.Setenv("CLAUDE_CODE_GIT_BASH_PATH", filepath.Join(homeDir, "missing-git", "bash.exe"))
+			t.Setenv("ProgramFiles", filepath.Join(homeDir, "ProgramFiles"))
+			t.Setenv("ProgramW6432", filepath.Join(homeDir, "ProgramFiles"))
+			t.Setenv("ProgramFiles(x86)", filepath.Join(homeDir, "Program Files (x86)"))
+			expectWindowsGitBashBootstrap = os.Getenv("CLAUDE_INSTALL_TEST_REQUIRE_WINDOWS_GIT_BASH_BOOTSTRAP") == "1"
+			if path := findWindowsGitBashPath(os.Getenv); path != "" {
+				t.Fatalf("expected Git Bash to be hidden for install test, found %q", path)
+			}
+			if os.Getenv("CLAUDE_INSTALL_TEST_NO_PATH_PRESEED") != "1" {
+				pathValue = prependPathEntry(localBinDir, pathValue)
+			}
+		}
+	} else if err := os.MkdirAll(localBinDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", localBinDir, err)
+	}
+
+	t.Setenv("PATH", pathValue)
+	return localBinDir, expectWindowsGitBashBootstrap
+}
+
+type installTestPathOptions struct {
+	PreseedLocalBin bool
+	StripWindowsGit bool
+}
+
+func buildClaudeInstallTestPath(currentPath string, localBinDir string, opts installTestPathOptions) string {
 	parts := filepath.SplitList(currentPath)
 	filtered := make([]string, 0, len(parts)+1)
-	filtered = append(filtered, localBinDir)
+	if opts.PreseedLocalBin {
+		filtered = append(filtered, localBinDir)
+	}
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part == "" {
@@ -97,9 +152,19 @@ func filteredPathWithoutClaude(currentPath string, localBinDir string) string {
 		if hasClaudeBinary(part) {
 			continue
 		}
+		if opts.StripWindowsGit && isWindowsGitPath(part) {
+			continue
+		}
 		filtered = append(filtered, part)
 	}
 	return strings.Join(filtered, string(os.PathListSeparator))
+}
+
+func prependPathEntry(entry string, currentPath string) string {
+	if strings.TrimSpace(currentPath) == "" {
+		return entry
+	}
+	return entry + string(os.PathListSeparator) + currentPath
 }
 
 func hasClaudeBinary(dir string) bool {
@@ -115,6 +180,26 @@ func hasClaudeBinary(dir string) bool {
 		}
 	}
 	return false
+}
+
+func isWindowsGitPath(dir string) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	clean := strings.ToLower(filepath.Clean(dir))
+	if strings.Contains(clean, `\git\`) || strings.HasSuffix(clean, `\git`) {
+		return true
+	}
+	base := strings.ToLower(filepath.Base(clean))
+	switch base {
+	case "git", "mingw64", "usr":
+		return true
+	case "bin", "cmd":
+		parent := strings.ToLower(filepath.Base(filepath.Dir(clean)))
+		return parent == "git" || parent == "usr"
+	default:
+		return false
+	}
 }
 
 func samePath(a string, b string) bool {

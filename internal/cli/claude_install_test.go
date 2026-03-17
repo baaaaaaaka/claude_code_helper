@@ -3,11 +3,13 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -71,6 +73,24 @@ func TestInstallerCandidatesWindows(t *testing.T) {
 		if !strings.Contains(bootstrap, "Invoke-Expression $content") {
 			t.Fatalf("candidate %d missing script execution step", i)
 		}
+	}
+}
+
+func TestWindowsGitBashBootstrapUsesOfficialDownloadPage(t *testing.T) {
+	if strings.Contains(windowsGitBashBootstrap, "api.github.com/repos/git-for-windows/git/releases/latest") {
+		t.Fatalf("expected Git Bash bootstrap to avoid GitHub releases API")
+	}
+	if !strings.Contains(windowsGitBashBootstrap, "https://git-scm.com/install/windows.html") {
+		t.Fatalf("expected Git Bash bootstrap to use official Git for Windows download page")
+	}
+	if !strings.Contains(windowsGitBashBootstrap, "PortableGit-") {
+		t.Fatalf("expected Git Bash bootstrap to resolve PortableGit assets")
+	}
+}
+
+func TestInstallerAttemptLabelWithoutArgs(t *testing.T) {
+	if got := installerAttemptLabel(installCmd{path: "powershell"}); got != "powershell" {
+		t.Fatalf("expected plain path label, got %q", got)
 	}
 }
 
@@ -312,5 +332,566 @@ func TestEnsureClaudeInstalledUsesProvidedPath(t *testing.T) {
 	}
 	if got != path {
 		t.Fatalf("expected path %q, got %q", path, got)
+	}
+}
+
+func TestParseInstalledClaudeLocation(t *testing.T) {
+	output := `
+Setting up Claude Code...
+Claude Code successfully installed! Location: C:\Users\local-jawei\.local\bin\claude.exe
+`
+
+	got := parseInstalledClaudeLocation(output)
+	want := `C:\Users\local-jawei\.local\bin\claude.exe`
+	if got != want {
+		t.Fatalf("expected location %q, got %q", want, got)
+	}
+}
+
+func TestNeedsWindowsGitBash(t *testing.T) {
+	if !needsWindowsGitBash("windows", "Claude Code on Windows requires git-bash") {
+		t.Fatalf("expected git-bash message to match")
+	}
+	if !needsWindowsGitBash("windows", "Set CLAUDE_CODE_GIT_BASH_PATH=C:\\Program Files\\Git\\bin\\bash.exe") {
+		t.Fatalf("expected env var hint to match")
+	}
+	if needsWindowsGitBash("linux", "requires git-bash") {
+		t.Fatalf("did not expect non-windows match")
+	}
+}
+
+func TestParseInstalledGitBashLocation(t *testing.T) {
+	output := "Bootstrapping...\nC:\\Users\\local-jawei\\AppData\\Local\\claude-proxy\\git\\current\\bin\\bash.exe\n"
+	got := parseInstalledGitBashLocation(output)
+	want := `C:\Users\local-jawei\AppData\Local\claude-proxy\git\current\bin\bash.exe`
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestResolveInstalledClaudeLocationAddsWindowsExtensions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "claude.cmd")
+	if err := os.WriteFile(path, []byte("@echo off\r\n"), 0o600); err != nil {
+		t.Fatalf("write claude.cmd: %v", err)
+	}
+
+	got := resolveInstalledClaudeLocation("windows", filepath.Join(dir, "claude"))
+	if got != path {
+		t.Fatalf("expected resolved path %q, got %q", path, got)
+	}
+}
+
+func TestDefaultClaudeInstallCandidatesWindows(t *testing.T) {
+	getenv := func(key string) string {
+		switch key {
+		case "USERPROFILE":
+			return `C:\Users\local-jawei`
+		default:
+			return ""
+		}
+	}
+
+	candidates := defaultClaudeInstallCandidates("windows", getenv)
+	if len(candidates) == 0 {
+		t.Fatalf("expected default windows candidates")
+	}
+	want := filepath.Join(`C:\Users\local-jawei`, ".local", "bin", "claude.exe")
+	found := false
+	for _, candidate := range candidates {
+		if strings.EqualFold(candidate, want) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected %q in candidates, got %v", want, candidates)
+	}
+}
+
+func TestFindWindowsGitBashPathUsesPortableDefault(t *testing.T) {
+	localAppData := t.TempDir()
+	bashPath := filepath.Join(localAppData, "claude-proxy", "git", "current", "bin", "bash.exe")
+	if err := os.MkdirAll(filepath.Dir(bashPath), 0o755); err != nil {
+		t.Fatalf("mkdir bash dir: %v", err)
+	}
+	if err := os.WriteFile(bashPath, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write bash.exe: %v", err)
+	}
+
+	getenv := func(key string) string {
+		switch key {
+		case "LOCALAPPDATA":
+			return localAppData
+		default:
+			return ""
+		}
+	}
+
+	got := findWindowsGitBashPath(getenv)
+	if got != bashPath {
+		t.Fatalf("expected %q, got %q", bashPath, got)
+	}
+}
+
+func TestFindWindowsGitBashPathFallsBackToGitExecutable(t *testing.T) {
+	prevGOOS := claudeInstallGOOS
+	prevLookPath := claudeInstallLookPathFn
+	t.Cleanup(func() {
+		claudeInstallGOOS = prevGOOS
+		claudeInstallLookPathFn = prevLookPath
+	})
+
+	claudeInstallGOOS = "windows"
+	root := t.TempDir()
+	gitPath := filepath.Join(root, "Git", "cmd", "git.exe")
+	bashPath := filepath.Join(root, "Git", "bin", "bash.exe")
+	for _, path := range []string{gitPath, bashPath} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir for %s: %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	claudeInstallLookPathFn = func(file string) (string, error) {
+		if file == "git" {
+			return gitPath, nil
+		}
+		return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
+	}
+
+	got := findWindowsGitBashPath(func(string) string { return "" })
+	if got != bashPath {
+		t.Fatalf("expected %q, got %q", bashPath, got)
+	}
+}
+
+func TestResolveLocalAppDataDirFallsBackToHome(t *testing.T) {
+	got := resolveLocalAppDataDir(func(key string) string {
+		if key == "HOME" {
+			return `/tmp/example-home`
+		}
+		return ""
+	})
+	want := filepath.Join(`/tmp/example-home`, "AppData", "Local")
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestFindInstalledClaudePathFallsBackToWindowsDefaultLocation(t *testing.T) {
+	t.Setenv("PATH", "")
+
+	home := t.TempDir()
+	claudePath := filepath.Join(home, ".local", "bin", "claude.exe")
+	if err := os.MkdirAll(filepath.Dir(claudePath), 0o755); err != nil {
+		t.Fatalf("mkdir claude dir: %v", err)
+	}
+	if err := os.WriteFile(claudePath, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write claude.exe: %v", err)
+	}
+
+	getenv := func(key string) string {
+		switch key {
+		case "USERPROFILE":
+			return home
+		default:
+			return ""
+		}
+	}
+
+	got, ok := findInstalledClaudePath("windows", "", getenv)
+	if !ok {
+		t.Fatalf("expected fallback location to resolve")
+	}
+	if got != claudePath {
+		t.Fatalf("expected %q, got %q", claudePath, got)
+	}
+}
+
+func TestEnsureWindowsGitBashUsesExistingPath(t *testing.T) {
+	prevGOOS := claudeInstallGOOS
+	t.Cleanup(func() { claudeInstallGOOS = prevGOOS })
+	claudeInstallGOOS = "windows"
+
+	localAppData := t.TempDir()
+	t.Setenv("LOCALAPPDATA", localAppData)
+	bashPath := filepath.Join(localAppData, "claude-proxy", "git", "current", "bin", "bash.exe")
+	if err := os.MkdirAll(filepath.Dir(bashPath), 0o755); err != nil {
+		t.Fatalf("mkdir bash dir: %v", err)
+	}
+	if err := os.WriteFile(bashPath, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write bash.exe: %v", err)
+	}
+
+	got, err := ensureWindowsGitBash(context.Background(), io.Discard, installProxyOptions{})
+	if err != nil {
+		t.Fatalf("ensureWindowsGitBash error: %v", err)
+	}
+	if got != bashPath {
+		t.Fatalf("expected %q, got %q", bashPath, got)
+	}
+}
+
+func TestEnsureWindowsGitBashFallsBackToNextCandidate(t *testing.T) {
+	prevGOOS := claudeInstallGOOS
+	prevLookPath := claudeInstallLookPathFn
+	t.Cleanup(func() {
+		claudeInstallGOOS = prevGOOS
+		claudeInstallLookPathFn = prevLookPath
+	})
+	claudeInstallGOOS = "windows"
+	claudeInstallLookPathFn = exec.LookPath
+
+	dir := t.TempDir()
+	bashPath := filepath.Join(t.TempDir(), "portable", "bash.exe")
+	if err := os.MkdirAll(filepath.Dir(bashPath), 0o755); err != nil {
+		t.Fatalf("mkdir bash dir: %v", err)
+	}
+	if err := os.WriteFile(bashPath, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write bash.exe: %v", err)
+	}
+	t.Setenv("TARGET_BASH_PATH", bashPath)
+	writeStub(t, dir, "powershell", "#!/bin/sh\nexit 1\n", "@echo off\r\nexit /b 1\r\n")
+	writeStub(t, dir, "pwsh", "#!/bin/sh\nprintf '%s\\n' \"$TARGET_BASH_PATH\"\nexit 0\n", "@echo off\r\necho %TARGET_BASH_PATH%\r\nexit /b 0\r\n")
+	setStubPath(t, dir)
+
+	got, err := ensureWindowsGitBash(context.Background(), io.Discard, installProxyOptions{})
+	if err != nil {
+		t.Fatalf("ensureWindowsGitBash error: %v", err)
+	}
+	if got != bashPath {
+		t.Fatalf("expected %q, got %q", bashPath, got)
+	}
+}
+
+func TestEnsureWindowsGitBashFailsWhenBootstrapDoesNotProduceBash(t *testing.T) {
+	prevGOOS := claudeInstallGOOS
+	prevLookPath := claudeInstallLookPathFn
+	t.Cleanup(func() {
+		claudeInstallGOOS = prevGOOS
+		claudeInstallLookPathFn = prevLookPath
+	})
+	claudeInstallGOOS = "windows"
+	claudeInstallLookPathFn = exec.LookPath
+
+	dir := t.TempDir()
+	writeStub(t, dir, "powershell", "#!/bin/sh\necho not-a-bash-path\nexit 0\n", "@echo off\r\necho not-a-bash-path\r\nexit /b 0\r\n")
+	writeStub(t, dir, "pwsh", "#!/bin/sh\necho still-not-a-bash-path\nexit 0\n", "@echo off\r\necho still-not-a-bash-path\r\nexit /b 0\r\n")
+	setStubPath(t, dir)
+
+	errOut := &strings.Builder{}
+	_, err := ensureWindowsGitBash(context.Background(), errOut, installProxyOptions{})
+	if err == nil {
+		t.Fatalf("expected ensureWindowsGitBash failure")
+	}
+	if !strings.Contains(err.Error(), "bootstrap completed but bash.exe was not found") {
+		t.Fatalf("expected missing bash error, got %v", err)
+	}
+}
+
+func TestRunClaudeInstallerWithEnvInjectsWindowsGitBashPath(t *testing.T) {
+	prevGOOS := claudeInstallGOOS
+	prevLookPath := claudeInstallLookPathFn
+	t.Cleanup(func() {
+		claudeInstallGOOS = prevGOOS
+		claudeInstallLookPathFn = prevLookPath
+	})
+	claudeInstallGOOS = "windows"
+	claudeInstallLookPathFn = exec.LookPath
+
+	dir := t.TempDir()
+	outFile := filepath.Join(dir, "env.txt")
+	bashPath := filepath.Join(t.TempDir(), "portable", "bash.exe")
+	if err := os.MkdirAll(filepath.Dir(bashPath), 0o755); err != nil {
+		t.Fatalf("mkdir bash dir: %v", err)
+	}
+	if err := os.WriteFile(bashPath, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write bash.exe: %v", err)
+	}
+	t.Setenv("CLAUDE_CODE_GIT_BASH_PATH", bashPath)
+	t.Setenv("OUT_FILE", outFile)
+	writeStub(t, dir, "bash", "#!/bin/sh\nprintf \"%s\\n%s\\n\" \"$CLAUDE_CODE_GIT_BASH_PATH\" \"$TEST_EXTRA\" > \"$OUT_FILE\"\nexit 0\n", "@echo off\r\n")
+	setStubPath(t, dir)
+
+	if err := runClaudeInstallerWithEnv(context.Background(), io.Discard, installProxyOptions{}, []string{"TEST_EXTRA=ok", "MALFORMED"}); err != nil {
+		t.Fatalf("runClaudeInstallerWithEnv error: %v", err)
+	}
+	content, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read env file: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines, got %d", len(lines))
+	}
+	if lines[0] != bashPath {
+		t.Fatalf("expected bash path %q, got %q", bashPath, lines[0])
+	}
+	if lines[1] != "ok" {
+		t.Fatalf("expected extra env %q, got %q", "ok", lines[1])
+	}
+}
+
+func TestExportCurrentProcessGitBashPathSetenvError(t *testing.T) {
+	prevGOOS := claudeInstallGOOS
+	prevSetenv := claudeInstallSetenvFn
+	t.Cleanup(func() {
+		claudeInstallGOOS = prevGOOS
+		claudeInstallSetenvFn = prevSetenv
+	})
+	claudeInstallGOOS = "windows"
+
+	bashPath := filepath.Join(t.TempDir(), "portable", "bash.exe")
+	if err := os.MkdirAll(filepath.Dir(bashPath), 0o755); err != nil {
+		t.Fatalf("mkdir bash dir: %v", err)
+	}
+	if err := os.WriteFile(bashPath, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write bash.exe: %v", err)
+	}
+	claudeInstallSetenvFn = func(key string, value string) error {
+		return errors.New("boom")
+	}
+
+	err := exportCurrentProcessGitBashPath(bashPath)
+	if err == nil || !strings.Contains(err.Error(), "set CLAUDE_CODE_GIT_BASH_PATH for current process") {
+		t.Fatalf("expected setenv failure, got %v", err)
+	}
+}
+
+func TestInstallEnvHelpersWindowsCaseInsensitive(t *testing.T) {
+	prevGOOS := claudeInstallGOOS
+	t.Cleanup(func() { claudeInstallGOOS = prevGOOS })
+	claudeInstallGOOS = "windows"
+
+	env := []string{"claude_code_git_bash_path=old", "OTHER=value"}
+	updated := setInstallEnvValue(append([]string{}, env...), "CLAUDE_CODE_GIT_BASH_PATH", "new")
+	if len(updated) != 2 {
+		t.Fatalf("expected 2 env entries, got %d", len(updated))
+	}
+	if updated[0] != "CLAUDE_CODE_GIT_BASH_PATH=new" {
+		t.Fatalf("expected replaced env entry, got %q", updated[0])
+	}
+	if !sameInstallEnvKey("Path", "path") {
+		t.Fatalf("expected case-insensitive env key comparison on windows")
+	}
+
+	getenv := getenvWithInstallOverrides(func(key string) string { return "base:" + key }, map[string]string{
+		"CLAUDE_CODE_GIT_BASH_PATH": "override",
+	})
+	if got := getenv("claude_code_git_bash_path"); got != "override" {
+		t.Fatalf("expected override value, got %q", got)
+	}
+	if got := getenv("UNRELATED"); got != "base:UNRELATED" {
+		t.Fatalf("expected base fallback, got %q", got)
+	}
+}
+
+func TestSameInstallEnvKeyNonWindowsIsCaseSensitive(t *testing.T) {
+	prevGOOS := claudeInstallGOOS
+	t.Cleanup(func() { claudeInstallGOOS = prevGOOS })
+	claudeInstallGOOS = "linux"
+
+	if sameInstallEnvKey("Path", "path") {
+		t.Fatalf("expected case-sensitive env key comparison outside windows")
+	}
+}
+
+func TestEnsureClaudeInstalledReturnsExportGitBashError(t *testing.T) {
+	prevGOOS := claudeInstallGOOS
+	prevLookPath := claudeInstallLookPathFn
+	prevSetenv := claudeInstallSetenvFn
+	t.Cleanup(func() {
+		claudeInstallGOOS = prevGOOS
+		claudeInstallLookPathFn = prevLookPath
+		claudeInstallSetenvFn = prevSetenv
+	})
+	claudeInstallGOOS = "windows"
+	claudeInstallLookPathFn = func(file string) (string, error) {
+		return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
+	}
+	claudeInstallSetenvFn = func(key string, value string) error {
+		return errors.New("cannot export")
+	}
+
+	localAppData := t.TempDir()
+	t.Setenv("LOCALAPPDATA", localAppData)
+	bashPath := filepath.Join(localAppData, "claude-proxy", "git", "current", "bin", "bash.exe")
+	if err := os.MkdirAll(filepath.Dir(bashPath), 0o755); err != nil {
+		t.Fatalf("mkdir bash dir: %v", err)
+	}
+	if err := os.WriteFile(bashPath, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write bash.exe: %v", err)
+	}
+
+	_, err := ensureClaudeInstalled(context.Background(), "", io.Discard, installProxyOptions{})
+	if err == nil || !strings.Contains(err.Error(), "set CLAUDE_CODE_GIT_BASH_PATH for current process") {
+		t.Fatalf("expected export git bash error, got %v", err)
+	}
+}
+
+func TestEnsureClaudeInstalledPropagatesRetryInstallerError(t *testing.T) {
+	prevGOOS := claudeInstallGOOS
+	prevInstaller := runClaudeInstallerWithEnvFn
+	prevEnsureGitBash := ensureWindowsGitBashFn
+	prevLookPath := claudeInstallLookPathFn
+	t.Cleanup(func() {
+		claudeInstallGOOS = prevGOOS
+		runClaudeInstallerWithEnvFn = prevInstaller
+		ensureWindowsGitBashFn = prevEnsureGitBash
+		claudeInstallLookPathFn = prevLookPath
+	})
+
+	claudeInstallGOOS = "windows"
+	claudeInstallLookPathFn = func(file string) (string, error) {
+		switch file {
+		case "claude", "git":
+			return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
+		default:
+			return exec.LookPath(file)
+		}
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	bashPath := filepath.Join(t.TempDir(), "portable", "bash.exe")
+	if err := os.MkdirAll(filepath.Dir(bashPath), 0o755); err != nil {
+		t.Fatalf("mkdir bash dir: %v", err)
+	}
+	if err := os.WriteFile(bashPath, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write bash.exe: %v", err)
+	}
+
+	installCalls := 0
+	runClaudeInstallerWithEnvFn = func(ctx context.Context, out io.Writer, opts installProxyOptions, extraEnv []string) error {
+		installCalls++
+		if installCalls == 1 {
+			_, _ = io.WriteString(out, "Claude Code on Windows requires git-bash\n")
+			return nil
+		}
+		return errors.New("retry failed")
+	}
+	ensureWindowsGitBashFn = func(ctx context.Context, out io.Writer, opts installProxyOptions) (string, error) {
+		return bashPath, nil
+	}
+
+	_, err := ensureClaudeInstalled(context.Background(), "", io.Discard, installProxyOptions{})
+	if err == nil || !strings.Contains(err.Error(), "retry failed") {
+		t.Fatalf("expected retry installer error, got %v", err)
+	}
+}
+
+func TestEnsureClaudeInstalledRetriesAfterInstallingWindowsGitBash(t *testing.T) {
+	prevGOOS := claudeInstallGOOS
+	prevInstaller := runClaudeInstallerWithEnvFn
+	prevEnsureGitBash := ensureWindowsGitBashFn
+	prevLookPath := claudeInstallLookPathFn
+	prevSetenv := claudeInstallSetenvFn
+	t.Cleanup(func() {
+		claudeInstallGOOS = prevGOOS
+		runClaudeInstallerWithEnvFn = prevInstaller
+		ensureWindowsGitBashFn = prevEnsureGitBash
+		claudeInstallLookPathFn = prevLookPath
+		claudeInstallSetenvFn = prevSetenv
+	})
+
+	claudeInstallGOOS = "windows"
+	t.Setenv("PATH", "")
+	t.Setenv("CLAUDE_CODE_GIT_BASH_PATH", "")
+	claudeInstallLookPathFn = func(file string) (string, error) {
+		switch file {
+		case "claude", "git":
+			return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
+		default:
+			return exec.LookPath(file)
+		}
+	}
+
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
+	claudePath := filepath.Join(home, ".local", "bin", "claude.exe")
+	bashPath := filepath.Join(home, "AppData", "Local", "claude-proxy", "git", "current", "bin", "bash.exe")
+	if err := os.MkdirAll(filepath.Dir(bashPath), 0o755); err != nil {
+		t.Fatalf("mkdir bash dir: %v", err)
+	}
+	if err := os.WriteFile(bashPath, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write bash.exe: %v", err)
+	}
+
+	installCalls := 0
+	runClaudeInstallerWithEnvFn = func(ctx context.Context, out io.Writer, opts installProxyOptions, extraEnv []string) error {
+		installCalls++
+		switch installCalls {
+		case 1:
+			_, _ = io.WriteString(out, "Claude Code on Windows requires git-bash\n")
+			return nil
+		case 2:
+			found := false
+			for _, kv := range extraEnv {
+				if kv == "CLAUDE_CODE_GIT_BASH_PATH="+bashPath {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("expected CLAUDE_CODE_GIT_BASH_PATH override, got %v", extraEnv)
+			}
+			if err := os.MkdirAll(filepath.Dir(claudePath), 0o755); err != nil {
+				t.Fatalf("mkdir claude dir: %v", err)
+			}
+			if err := os.WriteFile(claudePath, []byte("x"), 0o600); err != nil {
+				t.Fatalf("write claude.exe: %v", err)
+			}
+			_, _ = io.WriteString(out, "Claude Code successfully installed! Location: "+claudePath+"\n")
+			return nil
+		default:
+			t.Fatalf("unexpected installer call %d", installCalls)
+			return nil
+		}
+	}
+	ensureWindowsGitBashFn = func(ctx context.Context, out io.Writer, opts installProxyOptions) (string, error) {
+		return bashPath, nil
+	}
+
+	got, err := ensureClaudeInstalled(context.Background(), "", io.Discard, installProxyOptions{})
+	if err != nil {
+		t.Fatalf("ensureClaudeInstalled error: %v", err)
+	}
+	if got != claudePath {
+		t.Fatalf("expected %q, got %q", claudePath, got)
+	}
+	if installCalls != 2 {
+		t.Fatalf("expected 2 installer calls, got %d", installCalls)
+	}
+	if got := os.Getenv("CLAUDE_CODE_GIT_BASH_PATH"); got != bashPath {
+		t.Fatalf("expected current process CLAUDE_CODE_GIT_BASH_PATH %q, got %q", bashPath, got)
+	}
+}
+
+func TestClaudeInstallNotFoundErrorIncludesGitBashHelp(t *testing.T) {
+	err := claudeInstallNotFoundError("windows", "Claude Code on Windows requires git-bash")
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "binary not found in PATH") {
+		t.Fatalf("expected binary not found message, got %q", msg)
+	}
+	if !strings.Contains(msg, "CLAUDE_CODE_GIT_BASH_PATH") {
+		t.Fatalf("expected git-bash help in message, got %q", msg)
+	}
+}
+
+func TestClaudeInstallNotFoundErrorIncludesReportedLocation(t *testing.T) {
+	location := `C:\Users\local-jawei\.local\bin\claude.exe`
+	err := claudeInstallNotFoundError("windows", "Claude Code successfully installed! Location: "+location)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), location) {
+		t.Fatalf("expected reported location in error, got %q", err.Error())
 	}
 }

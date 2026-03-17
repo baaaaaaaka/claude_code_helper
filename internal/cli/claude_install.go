@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -17,12 +18,21 @@ import (
 	"github.com/baaaaaaaka/claude_code_helper/internal/stack"
 )
 
+var (
+	claudeInstallGOOS           = runtime.GOOS
+	runClaudeInstallerWithEnvFn = runClaudeInstallerWithEnv
+	ensureWindowsGitBashFn      = ensureWindowsGitBash
+	claudeInstallLookPathFn     = exec.LookPath
+	claudeInstallSetenvFn       = os.Setenv
+)
+
 type installCmd struct {
 	path string
 	args []string
 }
 
 const claudeInstallBootstrap = `url="https://claude.ai/install.sh"; if command -v curl >/dev/null 2>&1; then curl -fsSL "$url" | bash; elif command -v wget >/dev/null 2>&1; then wget -qO- "$url" | bash; else echo "need curl or wget" >&2; exit 1; fi`
+const windowsGitBashInstallHelp = "Claude Code on Windows needs Git Bash. Install Git for Windows or set CLAUDE_CODE_GIT_BASH_PATH to your bash.exe and rerun the command."
 
 const claudeInstallBootstrapWindows = `$installerUrl = 'https://claude.ai/install.ps1'
 $logPath = Join-Path ([IO.Path]::GetTempPath()) ('claude-installer-error-' + [DateTime]::UtcNow.ToString('yyyyMMddHHmmssfff') + '.log')
@@ -52,6 +62,125 @@ try {
   $ProgressPreference = $previousProgressPreference
 }`
 
+const windowsGitBashBootstrap = `$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$headers = @{ 'User-Agent' = 'claude-proxy-git-bash-bootstrap' }
+
+function Get-LocalAppDataDir {
+  if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+    return $env:LOCALAPPDATA
+  }
+  if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+    return (Join-Path $env:USERPROFILE 'AppData\Local')
+  }
+  throw 'LOCALAPPDATA and USERPROFILE are not set.'
+}
+
+function Resolve-KnownBashPath {
+  $candidates = @()
+  if (-not [string]::IsNullOrWhiteSpace($env:CLAUDE_CODE_GIT_BASH_PATH)) {
+    $candidates += $env:CLAUDE_CODE_GIT_BASH_PATH
+  }
+  $localAppData = Get-LocalAppDataDir
+  $candidates += (Join-Path $localAppData 'claude-proxy\git\current\bin\bash.exe')
+  if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) {
+    $candidates += (Join-Path $env:ProgramFiles 'Git\bin\bash.exe')
+  }
+  $programFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+  if (-not [string]::IsNullOrWhiteSpace($programFilesX86)) {
+    $candidates += (Join-Path $programFilesX86 'Git\bin\bash.exe')
+  }
+  $candidates += (Join-Path $localAppData 'Programs\Git\bin\bash.exe')
+
+  foreach ($candidate in $candidates) {
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+      continue
+    }
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+      return [IO.Path]::GetFullPath($candidate)
+    }
+  }
+
+  return ''
+}
+
+$existing = Resolve-KnownBashPath
+if (-not [string]::IsNullOrWhiteSpace($existing)) {
+  [Environment]::SetEnvironmentVariable('CLAUDE_CODE_GIT_BASH_PATH', $existing, 'User')
+  Write-Output $existing
+  exit 0
+}
+
+$arch = '64-bit'
+if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {
+  $arch = 'arm64'
+}
+
+$downloadPage = [string](Invoke-WebRequest -Uri 'https://git-scm.com/install/windows.html' -Headers $headers -UseBasicParsing).Content
+$pattern = 'https://github\.com/git-for-windows/git/releases/download/[^"]+/PortableGit-[^"]*-' + [regex]::Escape($arch) + '\.7z\.exe'
+$match = [regex]::Match($downloadPage, $pattern)
+if (-not $match.Success) {
+  throw ('PortableGit download URL not found for architecture ' + $arch)
+}
+$assetUrl = $match.Value
+$assetName = [IO.Path]::GetFileName($assetUrl)
+
+$downloadPath = Join-Path ([IO.Path]::GetTempPath()) $assetName
+$installRoot = Join-Path (Get-LocalAppDataDir) 'claude-proxy\git'
+$currentDir = Join-Path $installRoot 'current'
+$stagingDir = Join-Path $installRoot ('staging-' + [Guid]::NewGuid().ToString('N'))
+
+try {
+  Invoke-WebRequest -Uri $assetUrl -OutFile $downloadPath -UseBasicParsing
+  New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
+  $proc = Start-Process -FilePath $downloadPath -ArgumentList @('-y', ('-o' + $stagingDir)) -Wait -PassThru
+  if ($proc.ExitCode -ne 0) {
+    throw ('PortableGit extractor exited with code ' + $proc.ExitCode)
+  }
+
+  $resolvedRoot = ''
+  if (Test-Path -LiteralPath (Join-Path $stagingDir 'bin\bash.exe') -PathType Leaf) {
+    $resolvedRoot = $stagingDir
+  }
+  if ([string]::IsNullOrWhiteSpace($resolvedRoot)) {
+    foreach ($child in (Get-ChildItem -LiteralPath $stagingDir -Directory -ErrorAction SilentlyContinue)) {
+      if (Test-Path -LiteralPath (Join-Path $child.FullName 'bin\bash.exe') -PathType Leaf) {
+        $resolvedRoot = $child.FullName
+        break
+      }
+    }
+  }
+  if ([string]::IsNullOrWhiteSpace($resolvedRoot)) {
+    throw 'PortableGit extracted but bash.exe was not found.'
+  }
+
+  New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
+  if (Test-Path -LiteralPath $currentDir) {
+    Remove-Item -LiteralPath $currentDir -Recurse -Force
+  }
+
+  if ([IO.Path]::GetFullPath($resolvedRoot).TrimEnd('\') -ieq [IO.Path]::GetFullPath($stagingDir).TrimEnd('\')) {
+    Rename-Item -LiteralPath $stagingDir -NewName 'current'
+  } else {
+    Move-Item -LiteralPath $resolvedRoot -Destination $currentDir
+    Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
+
+  $bashPath = Join-Path $currentDir 'bin\bash.exe'
+  if (-not (Test-Path -LiteralPath $bashPath -PathType Leaf)) {
+    throw 'PortableGit install did not produce bash.exe.'
+  }
+  [Environment]::SetEnvironmentVariable('CLAUDE_CODE_GIT_BASH_PATH', $bashPath, 'User')
+  Write-Output $bashPath
+} finally {
+  if (Test-Path -LiteralPath $downloadPath) {
+    Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue
+  }
+  if (Test-Path -LiteralPath $stagingDir) {
+    Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}`
+
 type installProxyOptions struct {
 	UseProxy  bool
 	Profile   *config.Profile
@@ -66,24 +195,73 @@ func ensureClaudeInstalled(ctx context.Context, claudePath string, out io.Writer
 		return "", fmt.Errorf("claude not found at %s", claudePath)
 	}
 
-	if path, err := exec.LookPath("claude"); err == nil {
+	if path, err := claudeInstallLookPathFn("claude"); err == nil {
 		return path, nil
+	}
+	if err := exportCurrentProcessGitBashPath(findWindowsGitBashPath(os.Getenv)); err != nil {
+		return "", err
 	}
 
 	if out != nil {
 		_, _ = fmt.Fprintln(out, "claude not found; installing...")
 	}
-	if err := runClaudeInstaller(ctx, out, installOpts); err != nil {
+	var installLog bytes.Buffer
+	installOut := io.Writer(&installLog)
+	if out != nil {
+		installOut = io.MultiWriter(out, &installLog)
+	}
+	err := runClaudeInstaller(ctx, installOut, installOpts)
+	if err == nil {
+		if path, ok := findInstalledClaudePath(claudeInstallGOOS, installLog.String(), os.Getenv); ok {
+			return path, nil
+		}
+	} else if !needsWindowsGitBash(claudeInstallGOOS, installLog.String()) {
 		return "", err
 	}
 
-	if path, err := exec.LookPath("claude"); err == nil {
-		return path, nil
+	if needsWindowsGitBash(claudeInstallGOOS, installLog.String()) {
+		if out != nil {
+			_, _ = fmt.Fprintln(out, "Claude installer needs Git Bash; installing a private Git for Windows runtime...")
+		}
+		bashPath, bashErr := ensureWindowsGitBashFn(ctx, out, installOpts)
+		if bashErr != nil {
+			return "", fmt.Errorf("failed to install Git Bash for Claude Code: %w", bashErr)
+		}
+		if err := exportCurrentProcessGitBashPath(bashPath); err != nil {
+			return "", err
+		}
+		if out != nil {
+			_, _ = fmt.Fprintln(out, "Retrying Claude installer with the configured Git Bash...")
+		}
+		var retryLog bytes.Buffer
+		retryOut := io.Writer(&retryLog)
+		if out != nil {
+			retryOut = io.MultiWriter(out, &retryLog)
+		}
+		retryErr := runClaudeInstallerWithEnvFn(ctx, retryOut, installOpts, []string{"CLAUDE_CODE_GIT_BASH_PATH=" + bashPath})
+		combinedLog := installLog.String() + "\n" + retryLog.String()
+		if retryErr != nil {
+			return "", retryErr
+		}
+		if path, ok := findInstalledClaudePath(claudeInstallGOOS, combinedLog, getenvWithInstallOverrides(os.Getenv, map[string]string{
+			"CLAUDE_CODE_GIT_BASH_PATH": bashPath,
+		})); ok {
+			return path, nil
+		}
+		return "", claudeInstallNotFoundError(claudeInstallGOOS, combinedLog)
 	}
-	return "", fmt.Errorf("claude installation finished but binary not found in PATH")
+
+	if err == nil {
+		return "", claudeInstallNotFoundError(claudeInstallGOOS, installLog.String())
+	}
+	return "", err
 }
 
 func runClaudeInstaller(ctx context.Context, out io.Writer, installOpts installProxyOptions) error {
+	return runClaudeInstallerWithEnvFn(ctx, out, installOpts, nil)
+}
+
+func runClaudeInstallerWithEnv(ctx context.Context, out io.Writer, installOpts installProxyOptions, extraEnv []string) error {
 	proxyURL, cleanup, err := resolveInstallerProxy(ctx, installOpts)
 	if err != nil {
 		return err
@@ -101,14 +279,28 @@ func runClaudeInstaller(ctx context.Context, out io.Writer, installOpts installP
 	}
 	attemptErrors := make([]string, 0, len(candidates))
 	for _, cmd := range candidates {
-		if _, err := exec.LookPath(cmd.path); err != nil {
+		if _, err := claudeInstallLookPathFn(cmd.path); err != nil {
 			attemptErrors = append(attemptErrors, fmt.Sprintf("%s: not found in PATH", installerAttemptLabel(cmd)))
 			continue
 		}
 		c := exec.CommandContext(ctx, cmd.path, cmd.args...)
+		envList := append([]string{}, os.Environ()...)
 		if proxyURL != "" {
-			c.Env = env.WithProxy(os.Environ(), proxyURL)
+			envList = env.WithProxy(envList, proxyURL)
 		}
+		if strings.EqualFold(claudeInstallGOOS, "windows") {
+			if bashPath := findWindowsGitBashPath(os.Getenv); bashPath != "" {
+				envList = setInstallEnvValue(envList, "CLAUDE_CODE_GIT_BASH_PATH", bashPath)
+			}
+		}
+		for _, kv := range extraEnv {
+			key, value, ok := strings.Cut(kv, "=")
+			if !ok {
+				continue
+			}
+			envList = setInstallEnvValue(envList, key, value)
+		}
+		c.Env = envList
 		c.Stdout = out
 		c.Stderr = out
 		c.Stdin = os.Stdin
@@ -122,6 +314,78 @@ func runClaudeInstaller(ctx context.Context, out io.Writer, installOpts installP
 		return fmt.Errorf("no supported installer available for %s", runtime.GOOS)
 	}
 	return fmt.Errorf("failed to run Claude installer for %s (%s)", runtime.GOOS, strings.Join(attemptErrors, "; "))
+}
+
+func ensureWindowsGitBash(ctx context.Context, out io.Writer, installOpts installProxyOptions) (string, error) {
+	if path := findWindowsGitBashPath(os.Getenv); path != "" {
+		return path, nil
+	}
+
+	proxyURL, cleanup, err := resolveInstallerProxy(ctx, installOpts)
+	if err != nil {
+		return "", err
+	}
+	if cleanup != nil {
+		defer func() { _ = cleanup() }()
+	}
+	if proxyURL != "" && out != nil {
+		_, _ = fmt.Fprintln(out, "Using SSH proxy for Git for Windows bootstrap.")
+	}
+
+	candidates := []installCmd{
+		{path: "powershell", args: []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", windowsGitBashBootstrap}},
+		{path: "pwsh", args: []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", windowsGitBashBootstrap}},
+	}
+	attemptErrors := make([]string, 0, len(candidates))
+	for _, cmd := range candidates {
+		if _, err := claudeInstallLookPathFn(cmd.path); err != nil {
+			attemptErrors = append(attemptErrors, fmt.Sprintf("%s: not found in PATH", installerAttemptLabel(cmd)))
+			continue
+		}
+		var output bytes.Buffer
+		writer := io.Writer(&output)
+		if out != nil {
+			writer = io.MultiWriter(out, &output)
+		}
+		c := exec.CommandContext(ctx, cmd.path, cmd.args...)
+		envList := append([]string{}, os.Environ()...)
+		if proxyURL != "" {
+			envList = env.WithProxy(envList, proxyURL)
+		}
+		c.Env = envList
+		c.Stdout = writer
+		c.Stderr = writer
+		c.Stdin = os.Stdin
+		if err := c.Run(); err != nil {
+			attemptErrors = append(attemptErrors, fmt.Sprintf("%s: %v", installerAttemptLabel(cmd), err))
+			continue
+		}
+		if path := resolveWindowsGitBashLocation(parseInstalledGitBashLocation(output.String())); path != "" {
+			return path, nil
+		}
+		if path := findWindowsGitBashPath(os.Getenv); path != "" {
+			return path, nil
+		}
+		attemptErrors = append(attemptErrors, fmt.Sprintf("%s: bootstrap completed but bash.exe was not found", installerAttemptLabel(cmd)))
+	}
+	if len(attemptErrors) == 0 {
+		return "", fmt.Errorf("no supported Git Bash bootstrap available for %s", claudeInstallGOOS)
+	}
+	return "", fmt.Errorf("failed to install Git Bash for %s (%s)", claudeInstallGOOS, strings.Join(attemptErrors, "; "))
+}
+
+func exportCurrentProcessGitBashPath(path string) error {
+	if !strings.EqualFold(claudeInstallGOOS, "windows") {
+		return nil
+	}
+	path = resolveWindowsGitBashLocation(path)
+	if path == "" {
+		return nil
+	}
+	if err := claudeInstallSetenvFn("CLAUDE_CODE_GIT_BASH_PATH", path); err != nil {
+		return fmt.Errorf("set CLAUDE_CODE_GIT_BASH_PATH for current process: %w", err)
+	}
+	return nil
 }
 
 func resolveInstallerProxy(ctx context.Context, opts installProxyOptions) (string, func() error, error) {
@@ -174,6 +438,224 @@ func installerAttemptLabel(cmd installCmd) string {
 		return cmd.path
 	}
 	return fmt.Sprintf("%s %s", cmd.path, cmd.args[0])
+}
+
+func findInstalledClaudePath(goos string, installOutput string, getenv func(string) string) (string, bool) {
+	if path, err := claudeInstallLookPathFn("claude"); err == nil {
+		return path, true
+	}
+
+	if path := resolveInstalledClaudeLocation(goos, parseInstalledClaudeLocation(installOutput)); path != "" {
+		return path, true
+	}
+
+	for _, candidate := range defaultClaudeInstallCandidates(goos, getenv) {
+		if executableExists(candidate) {
+			return candidate, true
+		}
+	}
+
+	return "", false
+}
+
+func needsWindowsGitBash(goos string, output string) bool {
+	if !strings.EqualFold(goos, "windows") {
+		return false
+	}
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "git-bash") || strings.Contains(lower, "claude_code_git_bash_path")
+}
+
+func parseInstalledClaudeLocation(output string) string {
+	for _, rawLine := range strings.Split(output, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+		lower := strings.ToLower(line)
+		idx := strings.Index(lower, "location:")
+		if idx < 0 {
+			continue
+		}
+		location := strings.TrimSpace(line[idx+len("location:"):])
+		location = strings.Trim(location, `"'`)
+		if location != "" {
+			return location
+		}
+	}
+	return ""
+}
+
+func parseInstalledGitBashLocation(output string) string {
+	lines := strings.Split(output, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		line = strings.Trim(line, `"'`)
+		if line == "" {
+			continue
+		}
+		if strings.HasSuffix(strings.ToLower(line), `\bash.exe`) || strings.HasSuffix(strings.ToLower(line), `/bash.exe`) {
+			return line
+		}
+	}
+	return ""
+}
+
+func resolveInstalledClaudeLocation(goos string, location string) string {
+	location = strings.TrimSpace(location)
+	if location == "" {
+		return ""
+	}
+
+	candidates := []string{filepath.Clean(location)}
+	if strings.EqualFold(goos, "windows") && filepath.Ext(location) == "" {
+		for _, ext := range []string{".exe", ".cmd", ".bat", ".com"} {
+			candidates = append(candidates, filepath.Clean(location+ext))
+		}
+	}
+
+	for _, candidate := range candidates {
+		if executableExists(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func resolveWindowsGitBashLocation(location string) string {
+	location = strings.TrimSpace(location)
+	if location == "" {
+		return ""
+	}
+	if executableExists(location) {
+		return filepath.Clean(location)
+	}
+	return ""
+}
+
+func defaultClaudeInstallCandidates(goos string, getenv func(string) string) []string {
+	if !strings.EqualFold(goos, "windows") {
+		return nil
+	}
+
+	var homes []string
+	for _, key := range []string{"USERPROFILE", "HOME"} {
+		if home := strings.TrimSpace(getenv(key)); home != "" {
+			duplicate := false
+			for _, existing := range homes {
+				if strings.EqualFold(existing, home) {
+					duplicate = true
+					break
+				}
+			}
+			if !duplicate {
+				homes = append(homes, home)
+			}
+		}
+	}
+
+	candidates := make([]string, 0, len(homes)*5)
+	for _, home := range homes {
+		base := filepath.Join(home, ".local", "bin")
+		for _, name := range []string{"claude.exe", "claude.cmd", "claude.bat", "claude.com", "claude"} {
+			candidates = append(candidates, filepath.Join(base, name))
+		}
+	}
+	return candidates
+}
+
+func findWindowsGitBashPath(getenv func(string) string) string {
+	if path := resolveWindowsGitBashLocation(strings.TrimSpace(getenv("CLAUDE_CODE_GIT_BASH_PATH"))); path != "" {
+		return path
+	}
+
+	candidates := []string{}
+	if path := defaultWindowsPortableGitBashPath(getenv); path != "" {
+		candidates = append(candidates, path)
+	}
+	if programFiles := strings.TrimSpace(getenv("ProgramFiles")); programFiles != "" {
+		candidates = append(candidates, filepath.Join(programFiles, "Git", "bin", "bash.exe"))
+	}
+	if programFilesX86 := strings.TrimSpace(getenv("ProgramFiles(x86)")); programFilesX86 != "" {
+		candidates = append(candidates, filepath.Join(programFilesX86, "Git", "bin", "bash.exe"))
+	}
+	if localAppData := strings.TrimSpace(resolveLocalAppDataDir(getenv)); localAppData != "" {
+		candidates = append(candidates, filepath.Join(localAppData, "Programs", "Git", "bin", "bash.exe"))
+	}
+	if gitPath, err := claudeInstallLookPathFn("git"); err == nil {
+		gitDir := filepath.Dir(filepath.Clean(gitPath))
+		parent := filepath.Dir(gitDir)
+		candidates = append(candidates, filepath.Join(parent, "bin", "bash.exe"))
+	}
+
+	for _, candidate := range candidates {
+		if path := resolveWindowsGitBashLocation(candidate); path != "" {
+			return path
+		}
+	}
+	return ""
+}
+
+func defaultWindowsPortableGitBashPath(getenv func(string) string) string {
+	localAppData := strings.TrimSpace(resolveLocalAppDataDir(getenv))
+	if localAppData == "" {
+		return ""
+	}
+	return filepath.Join(localAppData, "claude-proxy", "git", "current", "bin", "bash.exe")
+}
+
+func resolveLocalAppDataDir(getenv func(string) string) string {
+	if localAppData := strings.TrimSpace(getenv("LOCALAPPDATA")); localAppData != "" {
+		return localAppData
+	}
+	if home := strings.TrimSpace(getenv("USERPROFILE")); home != "" {
+		return filepath.Join(home, "AppData", "Local")
+	}
+	if home := strings.TrimSpace(getenv("HOME")); home != "" {
+		return filepath.Join(home, "AppData", "Local")
+	}
+	return ""
+}
+
+func getenvWithInstallOverrides(base func(string) string, overrides map[string]string) func(string) string {
+	return func(key string) string {
+		for overrideKey, value := range overrides {
+			if sameInstallEnvKey(key, overrideKey) {
+				return value
+			}
+		}
+		return base(key)
+	}
+}
+
+func setInstallEnvValue(env []string, key string, value string) []string {
+	prefix := key + "="
+	for i, entry := range env {
+		k, _, ok := strings.Cut(entry, "=")
+		if ok && sameInstallEnvKey(k, key) {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
+}
+
+func sameInstallEnvKey(a string, b string) bool {
+	if strings.EqualFold(claudeInstallGOOS, "windows") {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+func claudeInstallNotFoundError(goos string, installOutput string) error {
+	msg := "claude installation finished but binary not found in PATH"
+	if strings.EqualFold(goos, "windows") && strings.Contains(strings.ToLower(installOutput), "git-bash") {
+		return fmt.Errorf("%s; %s", msg, windowsGitBashInstallHelp)
+	}
+	if location := parseInstalledClaudeLocation(installOutput); location != "" {
+		return fmt.Errorf("%s; installer reported location %s", msg, location)
+	}
+	return fmt.Errorf("%s", msg)
 }
 
 func executableExists(path string) bool {
