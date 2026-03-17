@@ -149,7 +149,8 @@ jobs:
         run: |
           go test ./internal/cli -run TestClaudePatchIntegration -count=1
 
-      - name: Claude install+launch smoke (all platforms)
+      - name: Claude install+launch smoke (Linux/macOS)
+        if: runner.os != 'Windows'
         shell: bash
         timeout-minutes: 15
         env:
@@ -166,6 +167,30 @@ jobs:
             echo "Retrying Claude install+launch smoke after transient failure..."
             sleep 3
           done
+
+      - name: Claude install+launch smoke (Windows realistic env)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 20
+        env:
+          CLAUDE_INSTALL_TEST: "1"
+          CLAUDE_INSTALL_TEST_NO_PATH_PRESEED: "1"
+          CLAUDE_INSTALL_TEST_HIDE_WINDOWS_GIT_BASH: "1"
+          CLAUDE_INSTALL_TEST_REQUIRE_WINDOWS_GIT_BASH_BOOTSTRAP: "1"
+        run: |
+          $ErrorActionPreference = "Stop"
+          for ($attempt = 1; $attempt -le 2; $attempt++) {
+            go test ./internal/cli -run TestClaudeInstallLaunchIntegration -count=1
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -eq 0) {
+              exit 0
+            }
+            if ($attempt -eq 2) {
+              exit $exitCode
+            }
+            Write-Host "Retrying Claude install+launch smoke after transient failure..."
+            Start-Sleep -Seconds 3
+          }
 
       - name: go test -race (Linux only)
         if: runner.os == 'Linux'
