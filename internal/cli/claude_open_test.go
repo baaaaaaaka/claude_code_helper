@@ -14,6 +14,35 @@ import (
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
 )
 
+func writeClaudeHelpStub(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script execution on windows")
+	}
+	path := filepath.Join(t.TempDir(), "claude")
+	body := "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then\n  echo \"--permission-mode\"\nfi\nexit 0\n"
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+		t.Fatalf("write claude stub: %v", err)
+	}
+	return path
+}
+
+func cloneArgs(args []string) []string {
+	return append([]string(nil), args...)
+}
+
+func requireArgsEqual(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("expected args %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("expected args %v, got %v", want, got)
+		}
+	}
+}
+
 func TestBuildClaudeResumeCommandUsesSessionPath(t *testing.T) {
 	dir := t.TempDir()
 	session := claudehistory.Session{SessionID: "abc", ProjectPath: dir}
@@ -318,6 +347,210 @@ func TestRunClaudeNewSessionRejectsProxyWithoutProfile(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error when proxy enabled without profile")
 	}
+}
+
+func TestRunClaudeSessionWiresRunnerCallbacks(t *testing.T) {
+	t.Run("direct", func(t *testing.T) {
+		withExePatchTestHooks(t)
+
+		claudePath := writeClaudeHelpStub(t)
+		store := newTempStore(t)
+		root := &rootOptions{configPath: store.Path()}
+		projectDir := t.TempDir()
+		session := claudehistory.Session{SessionID: "sess-1", ProjectPath: projectDir}
+		project := claudehistory.Project{Path: projectDir}
+
+		var patchCalls [][]string
+		maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+			patchCalls = append(patchCalls, cloneArgs(cmdArgs))
+			return &patchOutcome{TargetPath: fmt.Sprintf("patch-%d", len(patchCalls))}, nil
+		}
+		runTargetWithFallbackWithOptionsFn = func(ctx context.Context, cmdArgs []string, proxyURL string, healthCheck func() error, patchOutcome *patchOutcome, fatalCh <-chan error, opts runTargetOptions) error {
+			requireArgsEqual(t, cmdArgs, []string{claudePath, "--permission-mode", "bypassPermissions", "--resume", "sess-1"})
+			if opts.Cwd != projectDir {
+				t.Fatalf("expected cwd %s, got %s", projectDir, opts.Cwd)
+			}
+			if opts.UseProxy {
+				t.Fatalf("expected direct runner")
+			}
+			if patchOutcome == nil || patchOutcome.TargetPath != "patch-1" {
+				t.Fatalf("expected initial patch outcome, got %#v", patchOutcome)
+			}
+			if !opts.YoloEnabled || opts.OnYoloRetryPrepare == nil {
+				t.Fatalf("expected yolo retry prepare callback")
+			}
+			outcome, err := opts.OnYoloRetryPrepare([]string{claudePath, "--resume", "sess-1"})
+			if err != nil {
+				return err
+			}
+			if outcome == nil || outcome.TargetPath != "patch-2" {
+				t.Fatalf("expected retry patch outcome, got %#v", outcome)
+			}
+			return nil
+		}
+
+		if err := runClaudeSession(context.Background(), root, store, nil, nil, session, project, claudePath, "", false, true, io.Discard); err != nil {
+			t.Fatalf("runClaudeSession error: %v", err)
+		}
+		if len(patchCalls) != 2 {
+			t.Fatalf("expected 2 patch calls, got %d", len(patchCalls))
+		}
+		requireArgsEqual(t, patchCalls[0], []string{claudePath, "--permission-mode", "bypassPermissions", "--resume", "sess-1"})
+		requireArgsEqual(t, patchCalls[1], []string{claudePath, "--resume", "sess-1"})
+	})
+
+	t.Run("proxy", func(t *testing.T) {
+		withExePatchTestHooks(t)
+
+		claudePath := writeClaudeHelpStub(t)
+		store := newTempStore(t)
+		root := &rootOptions{configPath: store.Path()}
+		projectDir := t.TempDir()
+		session := claudehistory.Session{SessionID: "sess-1", ProjectPath: projectDir}
+		project := claudehistory.Project{Path: projectDir}
+		profile := config.Profile{ID: "p1", Name: "profile", Host: "host", Port: 22, User: "user"}
+
+		var patchCalls [][]string
+		maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+			patchCalls = append(patchCalls, cloneArgs(cmdArgs))
+			return &patchOutcome{TargetPath: fmt.Sprintf("patch-%d", len(patchCalls))}, nil
+		}
+		runWithProfileOptionsFn = func(ctx context.Context, store *config.Store, gotProfile config.Profile, instances []config.Instance, cmdArgs []string, patchOutcome *patchOutcome, opts runTargetOptions) error {
+			requireArgsEqual(t, cmdArgs, []string{claudePath, "--permission-mode", "bypassPermissions", "--resume", "sess-1"})
+			if gotProfile.ID != profile.ID {
+				t.Fatalf("expected profile %s, got %s", profile.ID, gotProfile.ID)
+			}
+			if opts.Cwd != projectDir {
+				t.Fatalf("expected cwd %s, got %s", projectDir, opts.Cwd)
+			}
+			if !opts.UseProxy {
+				t.Fatalf("expected proxy runner")
+			}
+			if patchOutcome == nil || patchOutcome.TargetPath != "patch-1" {
+				t.Fatalf("expected initial patch outcome, got %#v", patchOutcome)
+			}
+			if !opts.YoloEnabled || opts.OnYoloRetryPrepare == nil {
+				t.Fatalf("expected yolo retry prepare callback")
+			}
+			outcome, err := opts.OnYoloRetryPrepare([]string{claudePath, "--resume", "sess-1"})
+			if err != nil {
+				return err
+			}
+			if outcome == nil || outcome.TargetPath != "patch-2" {
+				t.Fatalf("expected retry patch outcome, got %#v", outcome)
+			}
+			return nil
+		}
+
+		if err := runClaudeSession(context.Background(), root, store, &profile, nil, session, project, claudePath, "", true, true, io.Discard); err != nil {
+			t.Fatalf("runClaudeSession error: %v", err)
+		}
+		if len(patchCalls) != 2 {
+			t.Fatalf("expected 2 patch calls, got %d", len(patchCalls))
+		}
+		requireArgsEqual(t, patchCalls[0], []string{claudePath, "--permission-mode", "bypassPermissions", "--resume", "sess-1"})
+		requireArgsEqual(t, patchCalls[1], []string{claudePath, "--resume", "sess-1"})
+	})
+}
+
+func TestRunClaudeNewSessionWiresRunnerCallbacks(t *testing.T) {
+	t.Run("direct", func(t *testing.T) {
+		withExePatchTestHooks(t)
+
+		claudePath := writeClaudeHelpStub(t)
+		store := newTempStore(t)
+		root := &rootOptions{configPath: store.Path()}
+		projectDir := t.TempDir()
+
+		var patchCalls [][]string
+		maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+			patchCalls = append(patchCalls, cloneArgs(cmdArgs))
+			return &patchOutcome{TargetPath: fmt.Sprintf("patch-%d", len(patchCalls))}, nil
+		}
+		runTargetWithFallbackWithOptionsFn = func(ctx context.Context, cmdArgs []string, proxyURL string, healthCheck func() error, patchOutcome *patchOutcome, fatalCh <-chan error, opts runTargetOptions) error {
+			requireArgsEqual(t, cmdArgs, []string{claudePath, "--permission-mode", "bypassPermissions"})
+			if opts.Cwd != projectDir {
+				t.Fatalf("expected cwd %s, got %s", projectDir, opts.Cwd)
+			}
+			if opts.UseProxy {
+				t.Fatalf("expected direct runner")
+			}
+			if patchOutcome == nil || patchOutcome.TargetPath != "patch-1" {
+				t.Fatalf("expected initial patch outcome, got %#v", patchOutcome)
+			}
+			if !opts.YoloEnabled || opts.OnYoloRetryPrepare == nil {
+				t.Fatalf("expected yolo retry prepare callback")
+			}
+			outcome, err := opts.OnYoloRetryPrepare([]string{claudePath})
+			if err != nil {
+				return err
+			}
+			if outcome == nil || outcome.TargetPath != "patch-2" {
+				t.Fatalf("expected retry patch outcome, got %#v", outcome)
+			}
+			return nil
+		}
+
+		if err := runClaudeNewSession(context.Background(), root, store, nil, nil, projectDir, claudePath, "", false, true, io.Discard); err != nil {
+			t.Fatalf("runClaudeNewSession error: %v", err)
+		}
+		if len(patchCalls) != 2 {
+			t.Fatalf("expected 2 patch calls, got %d", len(patchCalls))
+		}
+		requireArgsEqual(t, patchCalls[0], []string{claudePath, "--permission-mode", "bypassPermissions"})
+		requireArgsEqual(t, patchCalls[1], []string{claudePath})
+	})
+
+	t.Run("proxy", func(t *testing.T) {
+		withExePatchTestHooks(t)
+
+		claudePath := writeClaudeHelpStub(t)
+		store := newTempStore(t)
+		root := &rootOptions{configPath: store.Path()}
+		projectDir := t.TempDir()
+		profile := config.Profile{ID: "p1", Name: "profile", Host: "host", Port: 22, User: "user"}
+
+		var patchCalls [][]string
+		maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+			patchCalls = append(patchCalls, cloneArgs(cmdArgs))
+			return &patchOutcome{TargetPath: fmt.Sprintf("patch-%d", len(patchCalls))}, nil
+		}
+		runWithProfileOptionsFn = func(ctx context.Context, store *config.Store, gotProfile config.Profile, instances []config.Instance, cmdArgs []string, patchOutcome *patchOutcome, opts runTargetOptions) error {
+			requireArgsEqual(t, cmdArgs, []string{claudePath, "--permission-mode", "bypassPermissions"})
+			if gotProfile.ID != profile.ID {
+				t.Fatalf("expected profile %s, got %s", profile.ID, gotProfile.ID)
+			}
+			if opts.Cwd != projectDir {
+				t.Fatalf("expected cwd %s, got %s", projectDir, opts.Cwd)
+			}
+			if !opts.UseProxy {
+				t.Fatalf("expected proxy runner")
+			}
+			if patchOutcome == nil || patchOutcome.TargetPath != "patch-1" {
+				t.Fatalf("expected initial patch outcome, got %#v", patchOutcome)
+			}
+			if !opts.YoloEnabled || opts.OnYoloRetryPrepare == nil {
+				t.Fatalf("expected yolo retry prepare callback")
+			}
+			outcome, err := opts.OnYoloRetryPrepare([]string{claudePath})
+			if err != nil {
+				return err
+			}
+			if outcome == nil || outcome.TargetPath != "patch-2" {
+				t.Fatalf("expected retry patch outcome, got %#v", outcome)
+			}
+			return nil
+		}
+
+		if err := runClaudeNewSession(context.Background(), root, store, &profile, nil, projectDir, claudePath, "", true, true, io.Discard); err != nil {
+			t.Fatalf("runClaudeNewSession error: %v", err)
+		}
+		if len(patchCalls) != 2 {
+			t.Fatalf("expected 2 patch calls, got %d", len(patchCalls))
+		}
+		requireArgsEqual(t, patchCalls[0], []string{claudePath, "--permission-mode", "bypassPermissions"})
+		requireArgsEqual(t, patchCalls[1], []string{claudePath})
+	})
 }
 
 func canonicalPath(t *testing.T, path string) string {

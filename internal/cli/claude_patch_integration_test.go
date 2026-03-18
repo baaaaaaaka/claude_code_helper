@@ -108,7 +108,7 @@ func runClaudePatchIntegrationCase(t *testing.T, wantVersion string, installURL 
 		glibcCompatRoot: exePatchGlibcCompatRootDefault(),
 	}
 	var log bytes.Buffer
-	outcome, err := maybePatchExecutable([]string{path}, opts, configPath, &log)
+	outcome, err := maybePatchExecutable(yoloClaudeArgs(path), opts, configPath, &log)
 	if err != nil {
 		t.Fatalf("maybePatchExecutable: %v\n%s", err, log.String())
 	}

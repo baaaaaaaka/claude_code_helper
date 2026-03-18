@@ -208,24 +208,34 @@ func rootBypassGuardPatchSpec() (exePatchSpec, error) {
 }
 
 func (o exePatchOptions) compile() ([]exePatchSpec, error) {
+	builtin, err := o.compileBuiltinSpecs()
+	if err != nil {
+		return nil, err
+	}
+	custom, err := o.compileCustomSpecs()
+	if err != nil {
+		return nil, err
+	}
+	return append(builtin, custom...), nil
+}
+
+func (o exePatchOptions) compileBuiltinSpecs() ([]exePatchSpec, error) {
 	if err := o.validate(); err != nil {
 		return nil, err
 	}
-	if !o.enabled() {
+	if !o.enabled() || !o.policySettings {
 		return nil, nil
 	}
 
-	specs := make([]exePatchSpec, 0, len(o.regex2)+2)
-	if o.policySettings {
-		builtin, err := policySettingsSpecs()
-		if err != nil {
-			return nil, err
-		}
-		specs = append(specs, builtin...)
-	}
+	return policySettingsSpecs()
+}
 
-	if !o.customRulesEnabled() {
-		return specs, nil
+func (o exePatchOptions) compileCustomSpecs() ([]exePatchSpec, error) {
+	if err := o.validate(); err != nil {
+		return nil, err
+	}
+	if !o.enabled() || !o.customRulesEnabled() {
+		return nil, nil
 	}
 
 	re1, err := regexp.Compile(o.regex1)
@@ -233,6 +243,7 @@ func (o exePatchOptions) compile() ([]exePatchSpec, error) {
 		return nil, fmt.Errorf("compile --exe-patch-regex-1: %w", err)
 	}
 
+	specs := make([]exePatchSpec, 0, len(o.regex2))
 	for i := range o.regex2 {
 		re2, err := regexp.Compile(o.regex2[i])
 		if err != nil {
@@ -260,20 +271,22 @@ func maybePatchExecutable(cmdArgs []string, opts exePatchOptions, configPath str
 }
 
 func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
-	specs, err := opts.compile()
-	if err != nil {
-		return nil, err
-	}
-	glibcCompat := opts.glibcCompatConfigured()
-	if len(specs) == 0 && !glibcCompat {
-		return nil, nil
-	}
 	if len(cmdArgs) == 0 {
 		return nil, fmt.Errorf("missing command")
 	}
 	if log == nil {
 		log = io.Discard
 	}
+
+	builtinSpecs, err := opts.compileBuiltinSpecs()
+	if err != nil {
+		return nil, err
+	}
+	customSpecs, err := opts.compileCustomSpecs()
+	if err != nil {
+		return nil, err
+	}
+	glibcCompat := opts.glibcCompatConfigured()
 
 	exePath, err := execLookPathFn(cmdArgs[0])
 	if err != nil {
@@ -286,6 +299,21 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 	}
 
 	isClaude := isClaudeExecutable(cmdArgs[0], resolvedPath)
+	// Claude's built-in byte patches are only allowed for launches that
+	// explicitly request `--permission-mode bypassPermissions`. When that flag
+	// is absent, any previously-applied Claude byte patch must be restored
+	// before launch, but Linux glibc-compat rescue remains available below.
+	if isClaude && !hasYoloBypassPermissionsArg(cmdArgs) {
+		if err := disableClaudeBytePatch(resolvedPath, configPath, log, opts.dryRun); err != nil {
+			return nil, err
+		}
+		builtinSpecs = nil
+	}
+	specs := append(builtinSpecs, customSpecs...)
+	if len(specs) == 0 && !glibcCompat {
+		return nil, nil
+	}
+
 	proxyVersion := currentProxyVersionFn()
 	targetVersion := ""
 	targetSHA := ""
@@ -667,6 +695,121 @@ func restoreExecutableFromBackup(outcome *patchOutcome) error {
 	}
 	if err := os.WriteFile(outcome.TargetPath, data, info.Mode().Perm()); err != nil {
 		return fmt.Errorf("restore executable from backup: %w", err)
+	}
+	return nil
+}
+
+// disableClaudeBytePatch removes Claude-specific built-in byte patch state for
+// launches that do not include `--permission-mode bypassPermissions`. It
+// restores the original executable, clears patch metadata, and drops the stale
+// backup so a future built-in patch starts from the current Claude binary
+// instead of an older copy. Dry-run mode only reports what would happen.
+func disableClaudeBytePatch(resolvedPath string, configPath string, log io.Writer, dryRun bool) error {
+	backupPath := originalBackupPath(resolvedPath)
+	info, err := os.Stat(backupPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat backup file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("backup path %q is not a regular file", backupPath)
+	}
+
+	currentHash, err := hashFileSHA256Fn(resolvedPath)
+	if err != nil {
+		return fmt.Errorf("hash target executable %q: %w", resolvedPath, err)
+	}
+	backupHash, err := hashFileSHA256Fn(backupPath)
+	if err != nil {
+		return fmt.Errorf("hash backup executable %q: %w", backupPath, err)
+	}
+
+	var historyStore *config.PatchHistoryStore
+	if store, err := newPatchHistoryStoreFn(configPath); err != nil {
+		_, _ = fmt.Fprintf(log, "exe-patch: failed to init patch history: %v\n", err)
+	} else {
+		historyStore = store
+	}
+
+	if currentHash == backupHash {
+		return nil
+	}
+
+	looksPatched, err := looksLikeClaudeBuiltInBytePatch(resolvedPath)
+	if err != nil {
+		return err
+	}
+	if !looksPatched {
+		return nil
+	}
+
+	if dryRun {
+		_, _ = fmt.Fprintf(log, "exe-patch: dry-run enabled; would restore original Claude executable %s\n", resolvedPath)
+		return nil
+	}
+	_, _ = fmt.Fprintf(log, "exe-patch: yolo disabled; restoring original Claude executable %s\n", resolvedPath)
+	if err := restoreExecutableFromBackupFn(&patchOutcome{
+		TargetPath: resolvedPath,
+		BackupPath: backupPath,
+	}); err != nil {
+		return fmt.Errorf("restore patched executable: %w", err)
+	}
+	if err := cleanupPatchHistoryForPath(historyStore, resolvedPath); err != nil {
+		_, _ = fmt.Fprintf(log, "exe-patch: failed to cleanup patch history for %s: %v\n", resolvedPath, err)
+	}
+	if err := removePatchBackup(backupPath); err != nil {
+		_, _ = fmt.Fprintf(log, "exe-patch: failed to remove backup %s: %v\n", backupPath, err)
+	}
+	return nil
+}
+
+func looksLikeClaudeBuiltInBytePatch(path string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("read target executable %q: %w", path, err)
+	}
+	specs, err := policySettingsSpecs()
+	if err != nil {
+		return false, err
+	}
+	patched, stats, err := applyExePatches(data, specs, io.Discard, false)
+	if err != nil {
+		return false, nil
+	}
+	touched := false
+	for _, stat := range stats {
+		if stat.Eligible > 0 || stat.Replacements > 0 {
+			touched = true
+			break
+		}
+	}
+	return touched && bytes.Equal(patched, data), nil
+}
+
+func cleanupPatchHistoryForPath(store *config.PatchHistoryStore, path string) error {
+	if store == nil || strings.TrimSpace(path) == "" {
+		return nil
+	}
+	return store.Update(func(h *config.PatchHistory) error {
+		for i := 0; i < len(h.Entries); i++ {
+			if !config.PathsEqual(h.Entries[i].Path, path) {
+				continue
+			}
+			h.Entries = append(h.Entries[:i], h.Entries[i+1:]...)
+			i--
+		}
+		return nil
+	})
+}
+
+func removePatchBackup(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
 	}
 	return nil
 }

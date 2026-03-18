@@ -46,8 +46,9 @@ tool create a dedicated key if needed. You can toggle proxy mode later with
 - Press Enter to open a Claude Code session.
 - If there is no history yet, Enter starts a new session in the current directory.
 - If you have multiple profiles, select one with `claude-proxy <profile>`.
-- Run any command through the proxy (requires a profile):
-  `claude-proxy run <profile> -- <cmd> [args...]`.
+- Run any command through the proxy:
+  `claude-proxy run [profile] -- <cmd> [args...]`.
+- If only one profile exists, `[profile]` is optional.
 - Example: `claude-proxy run pdx -- curl https://example.com`.
 
 ### Optional: preconfigure a proxy profile
@@ -61,10 +62,16 @@ Config is stored under your OS user config directory (Linux typically
 
 ## Requirements (runtime)
 
-- `ssh` (OpenSSH client) is required
-- `ssh-keygen` is optional (only needed when proxy mode creates a dedicated key)
+- Direct mode does not require SSH.
+- SSH proxy mode requires `ssh` (OpenSSH client).
+- `ssh-keygen` is optional (only needed when proxy mode creates a dedicated key).
+- On Linux, `patchelf` is optional and only needed if Claude must be patched for
+  glibc compatibility.
+- On Linux, if the glibc compat runtime must be auto-downloaded and extracted
+  (`--exe-patch-glibc-root` unset and no cached runtime yet), `tar` is also
+  required.
 
-Check your environment:
+Check the SSH/proxy prerequisites:
 
 ```bash
 claude-proxy proxy doctor
@@ -92,7 +99,7 @@ export PATH="$HOME/.local/bin:$PATH"
 Install a specific version (example):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/baaaaaaaka/claude_code_helper/main/install.sh | sh -s -- --version v0.0.28
+curl -fsSL https://raw.githubusercontent.com/baaaaaaaka/claude_code_helper/main/install.sh | sh -s -- --version vX.Y.Z
 ```
 
 ### Windows (PowerShell one-liner)
@@ -104,7 +111,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "iwr -useb https://raw.gi
 Install a specific version:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$u='https://raw.githubusercontent.com/baaaaaaaka/claude_code_helper/main/install.ps1'; $p=Join-Path $env:TEMP 'claude-proxy-install.ps1'; iwr -useb $u -OutFile $p; & $p -Version v0.0.28; Remove-Item -Force $p"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$u='https://raw.githubusercontent.com/baaaaaaaka/claude_code_helper/main/install.ps1'; $p=Join-Path $env:TEMP 'claude-proxy-install.ps1'; iwr -useb $u -OutFile $p; & $p -Version vX.Y.Z; Remove-Item -Force $p"
 ```
 
 ## Claude Code compatibility
@@ -112,6 +119,26 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$u='https://raw.githubus
 See [`docs/claude_code_compatibility.md`](docs/claude_code_compatibility.md) for
 the automatically maintained table of Claude Code versions and per-platform
 patch test results (linux/mac/windows + linux distros).
+
+## Claude Code install and patching
+
+- When opening Claude Code from the TUI or history commands, if `claude` is
+  missing, `claude-proxy` can install it automatically with the official
+  installer.
+- On Windows, if that installer needs Git Bash, `claude-proxy` can bootstrap a
+  private Git for Windows runtime and retry automatically.
+- When launching `claude` with `--permission-mode bypassPermissions`,
+  `claude-proxy` enables its built-in Claude Code byte patches by default.
+  Without that argument, those Claude-specific byte patches are disabled and
+  any previously-applied Claude patch is restored before launch.
+- Built-in Claude patches target `policySettings` and
+  `--permission-mode bypassPermissions` guards.
+- On Linux, if `claude` fails with missing GLIBC symbols,
+  `claude-proxy` can apply a `patchelf`-based glibc compatibility patch.
+  If `--exe-patch-glibc-root` is not set, the compat runtime is auto-downloaded
+  from GitHub release assets on supported linux/amd64 builds.
+- Use `claude-proxy --help` to see the available `--exe-patch-*` flags if you
+  want to tune or disable this behavior.
 
 ## Claude Code history
 
@@ -130,12 +157,19 @@ enter SSH host/port/user. If no history exists yet, Enter starts a new
 session in the current directory.
 
 The Projects column always includes your current working directory and marks
-it as `[current]`. The Sessions column always includes a `(New Agent)` entry.
+it as `[current]`. The Sessions column always includes a `(New Agent)` entry,
+and sessions with subagents can be expanded or collapsed with `Ctrl+O`.
 
 If you have multiple proxy profiles:
 
 ```bash
 claude-proxy tui --profile <profile>
+```
+
+You can also change the auto-refresh interval (default `5s`, `0` disables it):
+
+```bash
+claude-proxy tui --refresh-interval 30s
 ```
 
 Default data dir is `~/.claude`. You can override it with:
@@ -151,6 +185,7 @@ Controls:
 - Search: `/` then type, Enter apply, Esc cancel (`n`/`N` next/prev in preview)
 - Open: Enter (opens in Claude Code and sets cwd)
 - New session: `(New Agent)` entry or `Ctrl+N` (in selected project or current dir)
+- Subagents: `Ctrl+O` expand/collapse selected session
 - Proxy mode: `Ctrl+P` toggle (status shows `Proxy mode (Ctrl+P): on/off`)
 - YOLO mode: `Ctrl+Y` toggle (`--permission-mode bypassPermissions`, status shows warning)
 - Refresh: `r` (or `Ctrl+R`)
@@ -187,7 +222,9 @@ claude-proxy history --claude-path /path/to/claude tui
 ```
 
 If Claude Code is not installed, `claude-proxy` will automatically run the
-official installer and then continue.
+official installer and then continue. On Windows, if that installer needs
+Git Bash, `claude-proxy` will install a private Git for Windows runtime and
+retry automatically.
 
 ## Upgrade
 
@@ -203,12 +240,25 @@ Optional flags:
 - `--version vX.Y.Z` (install a specific version)
 - `--install-path /path/to/claude-proxy` (override install path)
 
+Upgrade or install Claude Code explicitly:
+
+```bash
+claude-proxy upgrade-claude
+# or, if your saved config is using proxy mode
+claude-proxy upgrade-claude --profile <profile>
+```
+
+`upgrade-claude` expects `claude-proxy` to have already created its config
+file, for example via a first run of `claude-proxy` or `claude-proxy init`.
+If you previously chose direct mode, `--profile` is ignored until you
+re-enable proxy mode first (for example with `Ctrl+P` in the TUI).
+
 ## Long-lived instances (optional)
 
 Start a reusable daemon instance:
 
 ```bash
-claude-proxy proxy start <profile>
+claude-proxy proxy start [profile]
 claude-proxy proxy list
 ```
 
@@ -218,3 +268,8 @@ Stop an instance:
 claude-proxy proxy stop <instance-id>
 ```
 
+Clean up dead or unhealthy instances:
+
+```bash
+claude-proxy proxy prune
+```

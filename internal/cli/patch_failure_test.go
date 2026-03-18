@@ -132,6 +132,41 @@ func TestStripYoloArgs(t *testing.T) {
 	}
 }
 
+func TestHasYoloBypassPermissionsArg(t *testing.T) {
+	cases := []struct {
+		name    string
+		cmdArgs []string
+		want    bool
+	}{
+		{
+			name:    "disabled",
+			cmdArgs: []string{"claude", "--resume", "abc"},
+			want:    false,
+		},
+		{
+			name:    "split args",
+			cmdArgs: []string{"claude", "--permission-mode", "bypassPermissions", "--resume", "abc"},
+			want:    true,
+		},
+		{
+			name:    "equals form",
+			cmdArgs: []string{"claude", "--permission-mode=bypassPermissions", "--resume", "abc"},
+			want:    true,
+		},
+		{
+			name:    "different mode",
+			cmdArgs: []string{"claude", "--permission-mode", "acceptEdits"},
+			want:    false,
+		},
+	}
+
+	for _, tc := range cases {
+		if got := hasYoloBypassPermissionsArg(tc.cmdArgs); got != tc.want {
+			t.Fatalf("%s: expected %v, got %v", tc.name, tc.want, got)
+		}
+	}
+}
+
 func TestExtractVersion(t *testing.T) {
 	cases := []struct {
 		input string

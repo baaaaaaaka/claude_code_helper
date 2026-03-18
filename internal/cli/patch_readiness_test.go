@@ -95,7 +95,7 @@ func TestMaybePatchExecutableWindowsReadinessMarksVerified(t *testing.T) {
 		return "Claude Code 1.2.3", nil
 	}
 
-	outcome, err := maybePatchExecutableWithContext(context.Background(), []string{"claude"}, patchOptionsForVersionReplacement(`echo "Claude Code 9.9.9"`), configPath, io.Discard)
+	outcome, err := maybePatchExecutableWithContext(context.Background(), yoloClaudeArgs("claude"), patchOptionsForVersionReplacement(`echo "Claude Code 9.9.9"`), configPath, io.Discard)
 	if err != nil {
 		t.Fatalf("maybePatchExecutableWithContext error: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestMaybePatchExecutableWindowsReadinessHardFailureRestoresAndContinues(t *
 	}
 
 	var log bytes.Buffer
-	outcome, err := maybePatchExecutableWithContext(context.Background(), []string{"claude"}, patchOptionsForVersionReplacement(`echo "Claude Code 9.9.9"`), configPath, &log)
+	outcome, err := maybePatchExecutableWithContext(context.Background(), yoloClaudeArgs("claude"), patchOptionsForVersionReplacement(`echo "Claude Code 9.9.9"`), configPath, &log)
 	if err != nil {
 		t.Fatalf("maybePatchExecutableWithContext error: %v", err)
 	}

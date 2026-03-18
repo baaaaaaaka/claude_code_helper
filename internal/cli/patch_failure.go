@@ -76,6 +76,28 @@ func supportsYoloFlag(path string) bool {
 	return true
 }
 
+func hasYoloBypassPermissionsArg(cmdArgs []string) bool {
+	if len(cmdArgs) <= 1 {
+		return false
+	}
+	for i := 1; i < len(cmdArgs); i++ {
+		arg := strings.TrimSpace(cmdArgs[i])
+		if arg == "--permission-mode" {
+			if i+1 < len(cmdArgs) && strings.TrimSpace(cmdArgs[i+1]) == "bypassPermissions" {
+				return true
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--permission-mode=") {
+			value := strings.TrimSpace(strings.TrimPrefix(arg, "--permission-mode="))
+			if value == "bypassPermissions" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func runClaudeProbe(path string, arg string) (string, error) {
 	return runClaudeProbeWithContext(context.Background(), path, arg, 15*time.Second)
 }

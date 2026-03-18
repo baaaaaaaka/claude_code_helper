@@ -213,9 +213,10 @@ type runTargetOptions struct {
 	ExtraEnv []string
 	UseProxy bool
 	// PreserveTTY keeps stdout/stderr attached to the terminal for interactive CLIs.
-	PreserveTTY    bool
-	YoloEnabled    bool
-	OnYoloFallback func() error
+	PreserveTTY        bool
+	YoloEnabled        bool
+	OnYoloFallback     func() error
+	OnYoloRetryPrepare func([]string) (*patchOutcome, error)
 }
 
 func defaultRunTargetOptions() runTargetOptions {
@@ -331,10 +332,21 @@ func runTargetWithFallbackWithOptions(
 		out := stdoutBuf.String() + stderrBuf.String()
 		if opts.YoloEnabled && !yoloRetried && isYoloFailure(err, out) {
 			yoloRetried = true
+			nextArgs := stripYoloArgs(cmdArgs)
 			if opts.OnYoloFallback != nil {
 				_ = opts.OnYoloFallback()
 			}
-			cmdArgs = stripYoloArgs(cmdArgs)
+			if opts.OnYoloRetryPrepare != nil {
+				patchOutcome, err = opts.OnYoloRetryPrepare(nextArgs)
+				if err != nil {
+					return err
+				}
+				if err := waitPatchedExecutableReadyFn(ctx, patchOutcome); err != nil {
+					return err
+				}
+				patchChecked = false
+			}
+			cmdArgs = nextArgs
 			opts.YoloEnabled = false
 			continue
 		}
