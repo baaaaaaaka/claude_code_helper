@@ -182,6 +182,115 @@ func TestRunTargetWithFallbackYoloRetry(t *testing.T) {
 	}
 }
 
+func TestRunTargetWithFallbackYoloRetryRepreparesPatch(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mockcmd")
+	if runtime.GOOS == "windows" {
+		path += ".cmd"
+	}
+	unix := "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"--permission-mode\" ]; then\n    echo \"permission-mode unknown\"\n    exit 1\n  fi\n done\nexit 0\n"
+	win := "@echo off\r\nset has=0\r\n:loop\r\nif \"%~1\"==\"\" goto done\r\nif \"%~1\"==\"--permission-mode\" set has=1\r\nshift\r\ngoto loop\r\n:done\r\nif \"%has%\"==\"1\" (\r\n  echo permission-mode unknown\r\n  exit /b 1\r\n)\r\nexit /b 0\r\n"
+	writeStub(t, dir, "mockcmd", unix, win)
+
+	waitCalled := false
+	waitPatchedExecutableReadyFn = func(ctx context.Context, outcome *patchOutcome) error {
+		waitCalled = true
+		return nil
+	}
+
+	reprepared := false
+	opts := runTargetOptions{
+		UseProxy:    false,
+		YoloEnabled: true,
+		OnYoloRetryPrepare: func(nextArgs []string) (*patchOutcome, error) {
+			reprepared = true
+			want := []string{path}
+			if len(nextArgs) != len(want) || nextArgs[0] != want[0] {
+				t.Fatalf("expected stripped args %v, got %v", want, nextArgs)
+			}
+			return &patchOutcome{TargetPath: path}, nil
+		},
+	}
+	cmdArgs := []string{path, "--permission-mode", "bypassPermissions"}
+	if err := runTargetWithFallbackWithOptions(context.Background(), cmdArgs, "", nil, nil, nil, opts); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !reprepared {
+		t.Fatalf("expected yolo retry to reprepare patch state")
+	}
+	if !waitCalled {
+		t.Fatalf("expected yolo retry to wait for reprepared patch readiness")
+	}
+}
+
+func TestRunTargetWithFallbackYoloRetryPrepareError(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mockcmd")
+	if runtime.GOOS == "windows" {
+		path += ".cmd"
+	}
+	unix := "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"--permission-mode\" ]; then\n    echo \"permission-mode unknown\"\n    exit 1\n  fi\n done\nexit 0\n"
+	win := "@echo off\r\nset has=0\r\n:loop\r\nif \"%~1\"==\"\" goto done\r\nif \"%~1\"==\"--permission-mode\" set has=1\r\nshift\r\ngoto loop\r\n:done\r\nif \"%has%\"==\"1\" (\r\n  echo permission-mode unknown\r\n  exit /b 1\r\n)\r\nexit /b 0\r\n"
+	writeStub(t, dir, "mockcmd", unix, win)
+
+	wantErr := errors.New("retry prepare boom")
+	opts := runTargetOptions{
+		UseProxy:    false,
+		YoloEnabled: true,
+		OnYoloRetryPrepare: func(nextArgs []string) (*patchOutcome, error) {
+			return nil, wantErr
+		},
+	}
+	cmdArgs := []string{path, "--permission-mode", "bypassPermissions"}
+	err := runTargetWithFallbackWithOptions(context.Background(), cmdArgs, "", nil, nil, nil, opts)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected retry prepare error %v, got %v", wantErr, err)
+	}
+}
+
+func TestRunTargetWithFallbackYoloRetryReadinessError(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mockcmd")
+	if runtime.GOOS == "windows" {
+		path += ".cmd"
+	}
+	unix := "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"--permission-mode\" ]; then\n    echo \"permission-mode unknown\"\n    exit 1\n  fi\n done\nexit 0\n"
+	win := "@echo off\r\nset has=0\r\n:loop\r\nif \"%~1\"==\"\" goto done\r\nif \"%~1\"==\"--permission-mode\" set has=1\r\nshift\r\ngoto loop\r\n:done\r\nif \"%has%\"==\"1\" (\r\n  echo permission-mode unknown\r\n  exit /b 1\r\n)\r\nexit /b 0\r\n"
+	writeStub(t, dir, "mockcmd", unix, win)
+
+	waitCalls := 0
+	wantErr := errors.New("retry readiness boom")
+	waitPatchedExecutableReadyFn = func(ctx context.Context, outcome *patchOutcome) error {
+		waitCalls++
+		if waitCalls == 2 {
+			return wantErr
+		}
+		return nil
+	}
+
+	opts := runTargetOptions{
+		UseProxy:    false,
+		YoloEnabled: true,
+		OnYoloRetryPrepare: func(nextArgs []string) (*patchOutcome, error) {
+			return &patchOutcome{TargetPath: path}, nil
+		},
+	}
+	cmdArgs := []string{path, "--permission-mode", "bypassPermissions"}
+	err := runTargetWithFallbackWithOptions(context.Background(), cmdArgs, "", nil, nil, nil, opts)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected retry readiness error %v, got %v", wantErr, err)
+	}
+	if waitCalls != 2 {
+		t.Fatalf("expected 2 readiness waits, got %d", waitCalls)
+	}
+}
+
 func TestRunWithNewStackOptionsSuccess(t *testing.T) {
 	shell := requireShell(t)
 	store := newTempStore(t)

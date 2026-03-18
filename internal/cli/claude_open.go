@@ -13,6 +13,12 @@ import (
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
 )
 
+// Test hooks for verifying runner wiring without spawning a real Claude session.
+var (
+	runWithProfileOptionsFn            = runWithProfileOptions
+	runTargetWithFallbackWithOptionsFn = runTargetWithFallbackWithOptions
+)
+
 func buildClaudeResumeCommand(
 	claudePath string,
 	session claudehistory.Session,
@@ -99,7 +105,7 @@ func runClaudeSession(
 	}
 
 	cmdArgs := append([]string{path}, args...)
-	patchOutcome, err := maybePatchExecutableCtxFn(ctx, cmdArgs, root.exePatch, root.configPath, log)
+	exePatchOutcome, err := maybePatchExecutableCtxFn(ctx, cmdArgs, root.exePatch, root.configPath, log)
 	if err != nil {
 		return err
 	}
@@ -121,14 +127,17 @@ func runClaudeSession(
 		OnYoloFallback: func() error {
 			return persistYoloEnabled(store, false)
 		},
+		OnYoloRetryPrepare: func(nextArgs []string) (*patchOutcome, error) {
+			return maybePatchExecutableCtxFn(ctx, nextArgs, root.exePatch, root.configPath, log)
+		},
 	}
 	if useProxy {
 		if profile == nil {
 			return fmt.Errorf("proxy mode enabled but no profile configured")
 		}
-		return runWithProfileOptions(ctx, store, *profile, instances, cmdArgs, patchOutcome, opts)
+		return runWithProfileOptionsFn(ctx, store, *profile, instances, cmdArgs, exePatchOutcome, opts)
 	}
-	return runTargetWithFallbackWithOptions(ctx, cmdArgs, "", nil, patchOutcome, nil, opts)
+	return runTargetWithFallbackWithOptionsFn(ctx, cmdArgs, "", nil, exePatchOutcome, nil, opts)
 }
 
 func runClaudeNewSession(
@@ -167,7 +176,7 @@ func runClaudeNewSession(
 		cmdArgs = append(cmdArgs, "--permission-mode", "bypassPermissions")
 	}
 
-	patchOutcome, err := maybePatchExecutableCtxFn(ctx, cmdArgs, root.exePatch, root.configPath, log)
+	exePatchOutcome, err := maybePatchExecutableCtxFn(ctx, cmdArgs, root.exePatch, root.configPath, log)
 	if err != nil {
 		return err
 	}
@@ -189,12 +198,15 @@ func runClaudeNewSession(
 		OnYoloFallback: func() error {
 			return persistYoloEnabled(store, false)
 		},
+		OnYoloRetryPrepare: func(nextArgs []string) (*patchOutcome, error) {
+			return maybePatchExecutableCtxFn(ctx, nextArgs, root.exePatch, root.configPath, log)
+		},
 	}
 	if useProxy {
 		if profile == nil {
 			return fmt.Errorf("proxy mode enabled but no profile configured")
 		}
-		return runWithProfileOptions(ctx, store, *profile, instances, cmdArgs, patchOutcome, opts)
+		return runWithProfileOptionsFn(ctx, store, *profile, instances, cmdArgs, exePatchOutcome, opts)
 	}
-	return runTargetWithFallbackWithOptions(ctx, cmdArgs, "", nil, patchOutcome, nil, opts)
+	return runTargetWithFallbackWithOptionsFn(ctx, cmdArgs, "", nil, exePatchOutcome, nil, opts)
 }
