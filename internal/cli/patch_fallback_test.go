@@ -411,6 +411,9 @@ func TestDisableClaudeBytePatchRestoreError(t *testing.T) {
 
 func TestDisableClaudeBytePatchLogsCleanupHistoryFailure(t *testing.T) {
 	requireExePatchEnabled(t)
+	if os.PathSeparator == '\\' {
+		t.Skip("cleanup history permission failure is platform-specific")
+	}
 
 	targetDir := t.TempDir()
 	path := filepath.Join(targetDir, "claude")
