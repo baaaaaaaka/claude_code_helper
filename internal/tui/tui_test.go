@@ -1103,6 +1103,9 @@ func TestHandleKeyCtrlYTogglesYoloOn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleKey error: %v", err)
 	}
+	if !state.yoloVisible {
+		t.Fatalf("expected yolo to become visible")
+	}
 	if !state.yoloEnabled {
 		t.Fatalf("expected yolo enabled")
 	}
@@ -1116,6 +1119,9 @@ func TestHandleKeyCtrlYTogglesYoloOff(t *testing.T) {
 	_, err := handleKey(context.Background(), screen, state, Options{}, tcell.NewEventKey(tcell.KeyCtrlY, 0, 0))
 	if err != nil {
 		t.Fatalf("handleKey error: %v", err)
+	}
+	if !state.yoloVisible {
+		t.Fatalf("expected yolo to stay visible")
 	}
 	if state.yoloEnabled {
 		t.Fatalf("expected yolo disabled")
@@ -1280,7 +1286,7 @@ func TestDrawHidesUpdateErrorAfterTimeout(t *testing.T) {
 	}
 }
 
-func TestDrawShowsYoloStatus(t *testing.T) {
+func TestDrawHidesYoloStatusWithoutEvidence(t *testing.T) {
 	screen := newTestScreen(t, 160, 20)
 	state := newTestState([]claudehistory.Project{})
 
@@ -1291,14 +1297,35 @@ func TestDrawShowsYoloStatus(t *testing.T) {
 
 	_, h := screen.Size()
 	line := readScreenLine(screen, h-1)
+	if strings.Contains(line, "YOLO mode (Ctrl+Y): off") {
+		t.Fatalf("expected yolo hint to be hidden without evidence, got %q", strings.TrimSpace(line))
+	}
+	if strings.Contains(line, "[!] YOLO mode (Ctrl+Y): on") {
+		t.Fatalf("expected yolo warning to be hidden without evidence, got %q", strings.TrimSpace(line))
+	}
+}
+
+func TestDrawShowsYoloStatusAfterPriorUse(t *testing.T) {
+	screen := newTestScreen(t, 160, 20)
+	state := newTestState([]claudehistory.Project{})
+	state.yoloVisible = true
+
+	previewCh := make(chan previewEvent, 1)
+	if err := draw(screen, state, Options{}, previewCh); err != nil {
+		t.Fatalf("draw error: %v", err)
+	}
+
+	_, h := screen.Size()
+	line := readScreenLine(screen, h-1)
 	if !strings.Contains(line, "YOLO mode (Ctrl+Y): off") {
-		t.Fatalf("expected yolo off hint in status line, got %q", strings.TrimSpace(line))
+		t.Fatalf("expected yolo off hint after prior use, got %q", strings.TrimSpace(line))
 	}
 }
 
 func TestDrawShowsYoloWarningWhenEnabled(t *testing.T) {
 	screen := newTestScreen(t, 160, 20)
 	state := newTestState([]claudehistory.Project{})
+	state.yoloVisible = true
 	state.yoloEnabled = true
 
 	previewCh := make(chan previewEvent, 1)

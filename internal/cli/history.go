@@ -231,6 +231,7 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 		}
 		useProxy, cfg := pref.Enabled, pref.Cfg
 		useYolo := resolveYoloEnabled(cfg)
+		showYolo := resolveYoloVisible(cfg)
 
 		var profile *config.Profile
 		if useProxy {
@@ -265,6 +266,7 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 			Version:         version,
 			ProxyEnabled:    useProxy,
 			ProxyConfigured: len(cfg.Profiles) > 0,
+			YoloVisible:     showYolo,
 			YoloEnabled:     useYolo,
 			RefreshInterval: refreshInterval,
 			DefaultCwd:      defaultCwd,
