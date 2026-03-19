@@ -48,6 +48,7 @@ type Options struct {
 	PreviewMessages int
 	ProxyEnabled    bool
 	ProxyConfigured bool
+	YoloVisible     bool
 	YoloEnabled     bool
 	RefreshInterval time.Duration
 	PersistYolo     func(bool) error
@@ -138,6 +139,7 @@ type uiState struct {
 
 	proxyEnabled    bool
 	proxyConfigured bool
+	yoloVisible     bool
 	yoloEnabled     bool
 
 	expandedSessions map[string]bool
@@ -165,6 +167,7 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 		lastListFocus:    "projects",
 		proxyEnabled:     opts.ProxyEnabled,
 		proxyConfigured:  opts.ProxyConfigured,
+		yoloVisible:      opts.YoloVisible || opts.YoloEnabled,
 		yoloEnabled:      opts.YoloEnabled,
 		expandedSessions: map[string]bool{},
 		previewCache:     map[string]string{},
@@ -399,6 +402,7 @@ func handleKey(
 				return nil, err
 			}
 		}
+		state.yoloVisible = true
 		state.yoloEnabled = enable
 		return nil, nil
 	case tcell.KeyCtrlR:
@@ -704,6 +708,7 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 	if state.proxyEnabled {
 		proxyLabel = "Proxy mode (Ctrl+P): on"
 	}
+	showYolo := state.yoloVisible || state.yoloEnabled
 	yoloLabel := "YOLO mode (Ctrl+Y): off"
 	if state.yoloEnabled {
 		yoloLabel = "[!] YOLO mode (Ctrl+Y): on"
@@ -712,6 +717,12 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 	yoloStatusStyle := baseStatusStyle
 	if state.yoloEnabled {
 		yoloStatusStyle = baseStatusStyle.Foreground(tcell.ColorYellow)
+	}
+	appendYoloSegment := func(segments []statusSegment) []statusSegment {
+		if !showYolo {
+			return segments
+		}
+		return append(segments, statusSegment{text: yoloLabel, style: yoloStatusStyle})
 	}
 	newSessionPath := newSessionCwd(selectedProject, opts.DefaultCwd)
 	openLabel := "Enter: open"
@@ -724,20 +735,20 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 	}
 	statusSegments := []statusSegment{
 		{text: "Tab/Left/Right: switch  /: search  Ctrl+O: subagents  " + openLabel + "  r: refresh" + newHint + "  " + proxyLabel + "  ", style: baseStatusStyle},
-		{text: yoloLabel, style: yoloStatusStyle},
-		{text: "  q: quit", style: baseStatusStyle},
 	}
+	statusSegments = appendYoloSegment(statusSegments)
+	statusSegments = append(statusSegments, statusSegment{text: "  q: quit", style: baseStatusStyle})
 	if state.inputMode != "" {
 		statusSegments = []statusSegment{
 			{text: "Type to search. Enter: apply  Esc: cancel  " + proxyLabel + "  ", style: baseStatusStyle},
-			{text: yoloLabel, style: yoloStatusStyle},
 		}
+		statusSegments = appendYoloSegment(statusSegments)
 	} else if state.focus == "preview" {
 		statusSegments = []statusSegment{
 			{text: "Up/Down PgUp/PgDn: scroll  /: search  Ctrl+O: subagents  " + openLabel + "  Tab/Left/Right: switch" + newHint + "  " + proxyLabel + "  ", style: baseStatusStyle},
-			{text: yoloLabel, style: yoloStatusStyle},
-			{text: "  q: quit", style: baseStatusStyle},
 		}
+		statusSegments = appendYoloSegment(statusSegments)
+		statusSegments = append(statusSegments, statusSegment{text: "  q: quit", style: baseStatusStyle})
 		if state.previewSearch != "" && len(state.previewMatches) > 0 {
 			statusSegments = append(statusSegments, statusSegment{text: "  n/N: next/prev", style: baseStatusStyle})
 		}
@@ -746,9 +757,9 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 		if len(state.projects) == 0 && newSessionPath != "" {
 			statusSegments = []statusSegment{
 				{text: "No history found. " + openLabel + "  " + proxyLabel + "  ", style: baseStatusStyle},
-				{text: yoloLabel, style: yoloStatusStyle},
-				{text: "  q: quit", style: baseStatusStyle},
 			}
+			statusSegments = appendYoloSegment(statusSegments)
+			statusSegments = append(statusSegments, statusSegment{text: "  q: quit", style: baseStatusStyle})
 		} else {
 			statusSegments = []statusSegment{{text: fmt.Sprintf("Load error: %v", state.loadError), style: baseStatusStyle}}
 		}
