@@ -237,9 +237,7 @@ func runInstallPs1(t *testing.T, apiFail bool, pathAlreadySet bool) {
 		"Path="+pathValue,
 		"TEMP="+tempDir,
 	)
-	pathContainsInstall := pathInEnvViaPowerShell(t, cmd.Env, installDir)
 	claudeBinDir := filepath.Join(homeDir, ".local", "bin")
-	pathContainsClaude := pathInEnvViaPowerShell(t, cmd.Env, claudeBinDir)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("install.ps1 failed: %v\n%s", err, string(output))
@@ -299,7 +297,7 @@ func runInstallPs1(t *testing.T, apiFail bool, pathAlreadySet bool) {
 	if !strings.Contains(strings.ToLower(definition), strings.ToLower(installDirResolved)) {
 		t.Fatalf("expected clp definition to reference install dir, got %q", definition)
 	}
-	if pathContainsInstall {
+	if pathAlreadySet {
 		if hasPathMarker(profileText, installDirResolved) {
 			t.Fatalf("unexpected install dir PATH update in profile")
 		}
@@ -308,39 +306,13 @@ func runInstallPs1(t *testing.T, apiFail bool, pathAlreadySet bool) {
 			t.Fatalf("missing install dir PATH update in profile")
 		}
 	}
-	if pathContainsClaude {
-		if hasPathMarker(profileText, claudeBinDirResolved) {
-			t.Fatalf("unexpected claude PATH update in profile")
-		}
-	} else {
-		if !hasPathMarker(profileText, claudeBinDirResolved) {
-			t.Fatalf("missing claude PATH update in profile")
-		}
+	if !hasPathMarker(profileText, claudeBinDirResolved) {
+		t.Fatalf("missing claude PATH update in profile")
 	}
 }
 
 func hasPathMarker(profileText, installDir string) bool {
 	return strings.Contains(strings.ToLower(profileText), strings.ToLower("# claude-proxy PATH "+installDir))
-}
-
-func pathInEnvViaPowerShell(t *testing.T, env []string, installDir string) bool {
-	t.Helper()
-	script := `$target = [IO.Path]::GetFullPath($env:TEST_INSTALL_DIR);` +
-		`$parts = $env:Path -split ';';` +
-		`$found = $false;` +
-		`foreach ($part in $parts) {` +
-		` if ([string]::IsNullOrWhiteSpace($part)) { continue }` +
-		` if ($part.TrimEnd('\') -ieq $target) { $found = $true; break }` +
-		`}` +
-		`if ($found) { 'true' } else { 'false' }`
-	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
-	cmd.Env = append([]string{}, env...)
-	cmd.Env = append(cmd.Env, "TEST_INSTALL_DIR="+installDir)
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("compute pathInEnv: %v", err)
-	}
-	return strings.EqualFold(strings.TrimSpace(string(out)), "true")
 }
 
 func resolvePathViaPowerShell(t *testing.T, env []string, installDir string) string {
