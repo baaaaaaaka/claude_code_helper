@@ -66,7 +66,7 @@ func TestInstallShUsesProfileWhenShellMissing(t *testing.T) {
 	}
 	text := string(contents)
 	claudeBinDir := expectedClaudeBinDir(run.homeDir)
-	if !hasPathMarker(text, run.installDir) {
+	if !hasPathMarker(text, expectedInstallDir(t, run.installDir)) {
 		t.Fatalf("missing install dir PATH update in profile")
 	}
 	if !hasPathMarker(text, claudeBinDir) {
@@ -92,7 +92,7 @@ func TestInstallShUsesZshConfigs(t *testing.T) {
 			t.Fatalf("read %s: %v", path, err)
 		}
 		text := string(contents)
-		if !hasPathMarker(text, run.installDir) {
+		if !hasPathMarker(text, expectedInstallDir(t, run.installDir)) {
 			t.Fatalf("missing install dir PATH update in %s", path)
 		}
 		if !hasPathMarker(text, claudeBinDir) {
@@ -121,7 +121,7 @@ func TestInstallShUsesFishConfig(t *testing.T) {
 	}
 	text := string(contents)
 	claudeBinDir := expectedClaudeBinDir(run.homeDir)
-	if !hasPathMarker(text, run.installDir) {
+	if !hasPathMarker(text, expectedInstallDir(t, run.installDir)) {
 		t.Fatalf("missing install dir PATH update in fish config")
 	}
 	if !hasPathMarker(text, claudeBinDir) {
@@ -147,7 +147,7 @@ func TestInstallShUsesCshConfigs(t *testing.T) {
 			t.Fatalf("read %s: %v", path, err)
 		}
 		text := string(contents)
-		if !hasPathMarker(text, run.installDir) {
+		if !hasPathMarker(text, expectedInstallDir(t, run.installDir)) {
 			t.Fatalf("missing install dir PATH update in %s", path)
 		}
 		if !hasPathMarker(text, claudeBinDir) {
@@ -180,7 +180,7 @@ func TestInstallShUsesTcshConfigs(t *testing.T) {
 			t.Fatalf("read %s: %v", path, err)
 		}
 		text := string(contents)
-		if !hasPathMarker(text, run.installDir) {
+		if !hasPathMarker(text, expectedInstallDir(t, run.installDir)) {
 			t.Fatalf("missing install dir PATH update in %s", path)
 		}
 		if !hasPathMarker(text, claudeBinDir) {
@@ -205,6 +205,7 @@ func TestInstallShBashConfigSources(t *testing.T) {
 	run := newInstallShRun(t, false, false)
 	run.env = overrideEnv(run.env, "SHELL", "/bin/bash")
 	runInstallShRun(t, run)
+	installDir := expectedInstallDir(t, run.installDir)
 
 	script := fmt.Sprintf(`
 . "%s"
@@ -217,7 +218,7 @@ case ":$PATH:" in
   *) exit 12 ;;
 esac
 alias clp >/dev/null 2>&1 || exit 13
-`, expectedBashConfigPath(run.homeDir), run.installDir, expectedClaudeBinDir(run.homeDir))
+`, expectedBashConfigPath(run.homeDir), installDir, expectedClaudeBinDir(run.homeDir))
 	runShellCheck(t, "bash", []string{"-lc", script}, run.env)
 }
 
@@ -229,6 +230,7 @@ func TestInstallShZshConfigSources(t *testing.T) {
 	run := newInstallShRun(t, false, false)
 	run.env = overrideEnv(run.env, "SHELL", "/bin/zsh")
 	runInstallShRun(t, run)
+	installDir := expectedInstallDir(t, run.installDir)
 
 	script := fmt.Sprintf(`
 source "%s"
@@ -242,7 +244,7 @@ case ":$PATH:" in
   *) exit 12 ;;
 esac
 alias clp >/dev/null 2>&1 || exit 13
-`, filepath.Join(run.homeDir, ".zprofile"), filepath.Join(run.homeDir, ".zshrc"), run.installDir, expectedClaudeBinDir(run.homeDir))
+`, filepath.Join(run.homeDir, ".zprofile"), filepath.Join(run.homeDir, ".zshrc"), installDir, expectedClaudeBinDir(run.homeDir))
 	runShellCheck(t, "zsh", []string{"-lc", script}, run.env)
 }
 
@@ -254,13 +256,14 @@ func TestInstallShFishConfigSources(t *testing.T) {
 	run := newInstallShRun(t, false, false)
 	run.env = overrideEnv(run.env, "SHELL", "/usr/bin/fish")
 	runInstallShRun(t, run)
+	installDir := expectedInstallDir(t, run.installDir)
 
 	script := fmt.Sprintf(`
 source "%s"
 contains -- "%s" $PATH; or exit 11
 contains -- "%s" $PATH; or exit 12
 functions -q clp; or exit 13
-`, filepath.Join(run.homeDir, ".config", "fish", "config.fish"), run.installDir, expectedClaudeBinDir(run.homeDir))
+`, filepath.Join(run.homeDir, ".config", "fish", "config.fish"), installDir, expectedClaudeBinDir(run.homeDir))
 	runShellCheck(t, "fish", []string{"-c", script}, run.env)
 }
 
@@ -273,6 +276,7 @@ func TestInstallShCshConfigSources(t *testing.T) {
 	run := newInstallShRun(t, false, false)
 	run.env = overrideEnv(run.env, "SHELL", "/bin/csh")
 	runInstallShRun(t, run)
+	installDir := expectedInstallDir(t, run.installDir)
 
 	script := fmt.Sprintf(`
 source "%s"
@@ -281,7 +285,7 @@ if (":$PATH:" !~ "*:%s:*") exit 11
 if (":$PATH:" !~ "*:%s:*") exit 12
 alias clp >& /dev/null
 if ($status != 0) exit 13
-`, filepath.Join(run.homeDir, ".login"), filepath.Join(run.homeDir, ".cshrc"), run.installDir, expectedClaudeBinDir(run.homeDir))
+`, filepath.Join(run.homeDir, ".login"), filepath.Join(run.homeDir, ".cshrc"), installDir, expectedClaudeBinDir(run.homeDir))
 	runShellCheck(t, shellPath, []string{"-c", script}, run.env)
 }
 
@@ -294,6 +298,7 @@ func TestInstallShTcshConfigSources(t *testing.T) {
 	run := newInstallShRun(t, false, false)
 	run.env = overrideEnv(run.env, "SHELL", "/bin/tcsh")
 	runInstallShRun(t, run)
+	installDir := expectedInstallDir(t, run.installDir)
 
 	script := fmt.Sprintf(`
 source "%s"
@@ -303,7 +308,7 @@ if (":$PATH:" !~ "*:%s:*") exit 11
 if (":$PATH:" !~ "*:%s:*") exit 12
 alias clp >& /dev/null
 if ($status != 0) exit 13
-`, filepath.Join(run.homeDir, ".login"), filepath.Join(run.homeDir, ".cshrc"), filepath.Join(run.homeDir, ".tcshrc"), run.installDir, expectedClaudeBinDir(run.homeDir))
+`, filepath.Join(run.homeDir, ".login"), filepath.Join(run.homeDir, ".cshrc"), filepath.Join(run.homeDir, ".tcshrc"), installDir, expectedClaudeBinDir(run.homeDir))
 	runShellCheck(t, shellPath, []string{"-c", script}, run.env)
 }
 
@@ -359,7 +364,7 @@ func runInstallSh(t *testing.T, apiFail bool, pathAlreadySet bool) {
 
 	pathValue := binDir + string(os.PathListSeparator) + os.Getenv("PATH")
 	if pathAlreadySet {
-		pathValue = installDir + string(os.PathListSeparator) + pathValue
+		pathValue = expectedInstallDir(t, installDir) + string(os.PathListSeparator) + pathValue
 	}
 	env := append([]string{}, os.Environ()...)
 	env = append(env,
@@ -410,12 +415,13 @@ func runInstallSh(t *testing.T, apiFail bool, pathAlreadySet bool) {
 	}
 	text := string(contents)
 	claudeBinDir := expectedClaudeBinDir(homeDir)
+	installDirResolved := expectedInstallDir(t, installDir)
 	if pathAlreadySet {
-		if hasPathMarker(text, installDir) {
+		if hasPathMarker(text, installDirResolved) {
 			t.Fatalf("unexpected install dir PATH update in shell config")
 		}
 	} else {
-		if !hasPathMarker(text, installDir) {
+		if !hasPathMarker(text, installDirResolved) {
 			t.Fatalf("missing install dir PATH update in shell config")
 		}
 	}
@@ -489,7 +495,7 @@ func newInstallShRun(t *testing.T, apiFail bool, pathAlreadySet bool) installShR
 
 	pathValue := binDir + string(os.PathListSeparator) + os.Getenv("PATH")
 	if pathAlreadySet {
-		pathValue = installDir + string(os.PathListSeparator) + pathValue
+		pathValue = expectedInstallDir(t, installDir) + string(os.PathListSeparator) + pathValue
 	}
 	env := append([]string{}, os.Environ()...)
 	env = append(env,
@@ -612,6 +618,19 @@ func expectedBashConfigPath(home string) string {
 
 func expectedClaudeBinDir(home string) string {
 	return filepath.Join(home, ".local", "bin")
+}
+
+func expectedInstallDir(t *testing.T, dir string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err == nil && resolved != "" {
+		return resolved
+	}
+	abs, err := filepath.Abs(dir)
+	if err == nil && abs != "" {
+		return abs
+	}
+	return dir
 }
 
 func hasPathMarker(text, dir string) bool {

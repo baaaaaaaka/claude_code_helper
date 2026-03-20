@@ -5,6 +5,7 @@ package installtest
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -358,8 +359,9 @@ func resolvePathViaPowerShell(t *testing.T, env []string, installDir string) str
 func resolveClpCommandViaPowerShell(env []string, profilePath string) (string, string, error) {
 	script := `. $env:TEST_PROFILE_PATH;` +
 		`$cmd = Get-Command clp -ErrorAction Stop;` +
-		`Write-Output ('TYPE=' + [string]$cmd.CommandType);` +
-		`Write-Output ('DEF=' + [string]$cmd.Definition)`
+		`$scriptBlock = '';` +
+		`if ($null -ne $cmd.ScriptBlock) { $scriptBlock = [string]$cmd.ScriptBlock };` +
+		`[pscustomobject]@{ CommandType = [string]$cmd.CommandType; Definition = [string]$cmd.Definition; ScriptBlock = $scriptBlock } | ConvertTo-Json -Compress`
 	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
 	cmd.Env = append([]string{}, env...)
 	cmd.Env = append(cmd.Env, "TEST_PROFILE_PATH="+profilePath)
@@ -367,18 +369,19 @@ func resolveClpCommandViaPowerShell(env []string, profilePath string) (string, s
 	if err != nil {
 		return "", "", fmt.Errorf("%v\n%s", err, string(out))
 	}
-	var commandType string
-	var definition string
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		switch {
-		case strings.HasPrefix(line, "TYPE="):
-			commandType = strings.TrimPrefix(line, "TYPE=")
-		case strings.HasPrefix(line, "DEF="):
-			definition = strings.TrimPrefix(line, "DEF=")
-		}
+	var command struct {
+		CommandType string `json:"CommandType"`
+		Definition  string `json:"Definition"`
+		ScriptBlock string `json:"ScriptBlock"`
 	}
-	return commandType, definition, nil
+	if err := json.Unmarshal(bytes.TrimSpace(out), &command); err != nil {
+		return "", "", fmt.Errorf("decode command info: %w\n%s", err, string(out))
+	}
+	definition := command.Definition
+	if strings.TrimSpace(command.ScriptBlock) != "" {
+		definition = command.ScriptBlock
+	}
+	return command.CommandType, definition, nil
 }
 
 func filterEnvWithoutKey(env []string, key string) []string {
