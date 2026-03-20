@@ -14,15 +14,22 @@ import (
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
 )
 
+const (
+	readinessTestProbeTimeout  = 5 * time.Millisecond
+	readinessTestRetryInterval = 5 * time.Millisecond
+	readinessTestBudget        = 100 * time.Millisecond
+	readinessTimeoutBudget     = 30 * time.Millisecond
+)
+
 func TestVerifyWindowsPatchReadinessRetriesUntilSuccess(t *testing.T) {
 	requireExePatchEnabled(t)
 	withExePatchTestHooks(t)
 
 	policy := patchReadinessPolicy{
-		InitialProbeTimeout: time.Millisecond,
-		RetryProbeTimeout:   time.Millisecond,
-		RetryInterval:       time.Millisecond,
-		TotalBudget:         10 * time.Millisecond,
+		InitialProbeTimeout: readinessTestProbeTimeout,
+		RetryProbeTimeout:   readinessTestProbeTimeout,
+		RetryInterval:       readinessTestRetryInterval,
+		TotalBudget:         readinessTestBudget,
 	}
 
 	calls := 0
@@ -51,10 +58,10 @@ func TestVerifyWindowsPatchReadinessTimesOut(t *testing.T) {
 	withExePatchTestHooks(t)
 
 	policy := patchReadinessPolicy{
-		InitialProbeTimeout: time.Millisecond,
-		RetryProbeTimeout:   time.Millisecond,
-		RetryInterval:       time.Millisecond,
-		TotalBudget:         5 * time.Millisecond,
+		InitialProbeTimeout: readinessTestProbeTimeout,
+		RetryProbeTimeout:   readinessTestProbeTimeout,
+		RetryInterval:       readinessTestRetryInterval,
+		TotalBudget:         readinessTimeoutBudget,
 	}
 
 	runClaudeTimedProbeFn = func(ctx context.Context, path string, arg string, timeout time.Duration) (string, error) {
@@ -73,10 +80,10 @@ func TestMaybePatchExecutableWindowsReadinessMarksVerified(t *testing.T) {
 	runtimeGOOS = "windows"
 	patchReadinessPolicyFn = func() patchReadinessPolicy {
 		return patchReadinessPolicy{
-			InitialProbeTimeout: time.Millisecond,
-			RetryProbeTimeout:   time.Millisecond,
-			RetryInterval:       time.Millisecond,
-			TotalBudget:         10 * time.Millisecond,
+			InitialProbeTimeout: readinessTestProbeTimeout,
+			RetryProbeTimeout:   readinessTestProbeTimeout,
+			RetryInterval:       readinessTestRetryInterval,
+			TotalBudget:         readinessTestBudget,
 			QuietDelay:          time.Hour,
 		}
 	}
@@ -135,10 +142,10 @@ func TestMaybePatchExecutableWindowsReadinessHardFailureRestoresAndContinues(t *
 	runtimeGOOS = "windows"
 	patchReadinessPolicyFn = func() patchReadinessPolicy {
 		return patchReadinessPolicy{
-			InitialProbeTimeout: time.Millisecond,
-			RetryProbeTimeout:   time.Millisecond,
-			RetryInterval:       time.Millisecond,
-			TotalBudget:         10 * time.Millisecond,
+			InitialProbeTimeout: readinessTestProbeTimeout,
+			RetryProbeTimeout:   readinessTestProbeTimeout,
+			RetryInterval:       readinessTestRetryInterval,
+			TotalBudget:         readinessTestBudget,
 			QuietDelay:          time.Hour,
 		}
 	}
@@ -215,10 +222,10 @@ func TestVerifyWindowsPatchReadinessImmediateSuccess(t *testing.T) {
 	withExePatchTestHooks(t)
 
 	policy := patchReadinessPolicy{
-		InitialProbeTimeout: time.Millisecond,
-		RetryProbeTimeout:   time.Millisecond,
-		RetryInterval:       time.Millisecond,
-		TotalBudget:         10 * time.Millisecond,
+		InitialProbeTimeout: readinessTestProbeTimeout,
+		RetryProbeTimeout:   readinessTestProbeTimeout,
+		RetryInterval:       readinessTestRetryInterval,
+		TotalBudget:         readinessTestBudget,
 	}
 
 	calls := 0
@@ -245,9 +252,9 @@ func TestVerifyWindowsPatchReadinessInitialTimeoutCappedByBudget(t *testing.T) {
 
 	policy := patchReadinessPolicy{
 		InitialProbeTimeout: 10 * time.Second, // much larger than budget
-		RetryProbeTimeout:   time.Millisecond,
-		RetryInterval:       time.Millisecond,
-		TotalBudget:         5 * time.Millisecond,
+		RetryProbeTimeout:   readinessTestProbeTimeout,
+		RetryInterval:       readinessTestRetryInterval,
+		TotalBudget:         readinessTimeoutBudget,
 	}
 
 	var initialTimeout time.Duration
@@ -259,7 +266,7 @@ func TestVerifyWindowsPatchReadinessInitialTimeoutCappedByBudget(t *testing.T) {
 	if _, err := verifyWindowsPatchReadiness(context.Background(), "claude", policy); err != nil {
 		t.Fatalf("verifyWindowsPatchReadiness error: %v", err)
 	}
-	// InitialProbeTimeout (10s) should be capped to TotalBudget (5ms).
+	// InitialProbeTimeout (10s) should be capped to TotalBudget.
 	if initialTimeout > policy.TotalBudget {
 		t.Fatalf("expected initial timeout to be capped to budget (%v), got %v", policy.TotalBudget, initialTimeout)
 	}
@@ -270,10 +277,10 @@ func TestVerifyWindowsPatchReadinessHardErrorNotRetried(t *testing.T) {
 	withExePatchTestHooks(t)
 
 	policy := patchReadinessPolicy{
-		InitialProbeTimeout: time.Millisecond,
-		RetryProbeTimeout:   time.Millisecond,
-		RetryInterval:       time.Millisecond,
-		TotalBudget:         50 * time.Millisecond,
+		InitialProbeTimeout: readinessTestProbeTimeout,
+		RetryProbeTimeout:   readinessTestProbeTimeout,
+		RetryInterval:       readinessTestRetryInterval,
+		TotalBudget:         readinessTestBudget,
 	}
 
 	calls := 0
@@ -298,10 +305,10 @@ func TestStartPatchedExecutableReadinessVerificationFailureLogsButContinues(t *t
 	runtimeGOOS = "windows"
 	patchReadinessPolicyFn = func() patchReadinessPolicy {
 		return patchReadinessPolicy{
-			InitialProbeTimeout: time.Millisecond,
-			RetryProbeTimeout:   time.Millisecond,
-			RetryInterval:       time.Millisecond,
-			TotalBudget:         10 * time.Millisecond,
+			InitialProbeTimeout: readinessTestProbeTimeout,
+			RetryProbeTimeout:   readinessTestProbeTimeout,
+			RetryInterval:       readinessTestRetryInterval,
+			TotalBudget:         readinessTestBudget,
 			QuietDelay:          time.Hour,
 		}
 	}
@@ -393,10 +400,10 @@ func TestStartPatchedExecutableReadinessTimeoutReturnsStillPending(t *testing.T)
 	runtimeGOOS = "windows"
 	patchReadinessPolicyFn = func() patchReadinessPolicy {
 		return patchReadinessPolicy{
-			InitialProbeTimeout: time.Millisecond,
-			RetryProbeTimeout:   time.Millisecond,
-			RetryInterval:       time.Millisecond,
-			TotalBudget:         5 * time.Millisecond,
+			InitialProbeTimeout: readinessTestProbeTimeout,
+			RetryProbeTimeout:   readinessTestProbeTimeout,
+			RetryInterval:       readinessTestRetryInterval,
+			TotalBudget:         readinessTimeoutBudget,
 			QuietDelay:          time.Hour,
 		}
 	}
@@ -547,9 +554,9 @@ func TestWaitPatchedExecutableReadyContextCancellation(t *testing.T) {
 	runtimeGOOS = "windows"
 	patchReadinessPolicyFn = func() patchReadinessPolicy {
 		return patchReadinessPolicy{
-			InitialProbeTimeout: time.Millisecond,
-			RetryProbeTimeout:   time.Millisecond,
-			RetryInterval:       time.Millisecond,
+			InitialProbeTimeout: readinessTestProbeTimeout,
+			RetryProbeTimeout:   readinessTestProbeTimeout,
+			RetryInterval:       readinessTestRetryInterval,
 			TotalBudget:         10 * time.Second, // long budget so we cancel before it expires
 			QuietDelay:          time.Hour,
 		}
