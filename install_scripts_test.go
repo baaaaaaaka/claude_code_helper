@@ -65,13 +65,246 @@ func TestInstallShUsesProfileWhenShellMissing(t *testing.T) {
 		t.Fatalf("read profile: %v", err)
 	}
 	text := string(contents)
-	pathLine := fmt.Sprintf("export PATH=\"%s:$PATH\"", run.installDir)
-	if !strings.Contains(text, pathLine) {
-		t.Fatalf("missing PATH update in profile")
+	claudeBinDir := expectedClaudeBinDir(run.homeDir)
+	if !hasPathMarker(text, run.installDir) {
+		t.Fatalf("missing install dir PATH update in profile")
+	}
+	if !hasPathMarker(text, claudeBinDir) {
+		t.Fatalf("missing claude PATH update in profile")
 	}
 	if !strings.Contains(text, "alias clp='claude-proxy'") {
 		t.Fatalf("missing clp alias in profile")
 	}
+}
+
+func TestInstallShUsesZshConfigs(t *testing.T) {
+	run := newInstallShRun(t, false, false)
+	run.env = overrideEnv(run.env, "SHELL", "/bin/zsh")
+	runInstallShRun(t, run)
+
+	claudeBinDir := expectedClaudeBinDir(run.homeDir)
+	for _, path := range []string{
+		filepath.Join(run.homeDir, ".zprofile"),
+		filepath.Join(run.homeDir, ".zshrc"),
+	} {
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		text := string(contents)
+		if !hasPathMarker(text, run.installDir) {
+			t.Fatalf("missing install dir PATH update in %s", path)
+		}
+		if !hasPathMarker(text, claudeBinDir) {
+			t.Fatalf("missing claude PATH update in %s", path)
+		}
+	}
+
+	zshrc, err := os.ReadFile(filepath.Join(run.homeDir, ".zshrc"))
+	if err != nil {
+		t.Fatalf("read .zshrc: %v", err)
+	}
+	if !strings.Contains(string(zshrc), "alias clp='claude-proxy'") {
+		t.Fatalf("missing clp alias in .zshrc")
+	}
+}
+
+func TestInstallShUsesFishConfig(t *testing.T) {
+	run := newInstallShRun(t, false, false)
+	run.env = overrideEnv(run.env, "SHELL", "/usr/bin/fish")
+	runInstallShRun(t, run)
+
+	configPath := filepath.Join(run.homeDir, ".config", "fish", "config.fish")
+	contents, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read fish config: %v", err)
+	}
+	text := string(contents)
+	claudeBinDir := expectedClaudeBinDir(run.homeDir)
+	if !hasPathMarker(text, run.installDir) {
+		t.Fatalf("missing install dir PATH update in fish config")
+	}
+	if !hasPathMarker(text, claudeBinDir) {
+		t.Fatalf("missing claude PATH update in fish config")
+	}
+	if !strings.Contains(text, "alias clp \"claude-proxy\"") {
+		t.Fatalf("missing clp alias in fish config")
+	}
+}
+
+func TestInstallShUsesCshConfigs(t *testing.T) {
+	run := newInstallShRun(t, false, false)
+	run.env = overrideEnv(run.env, "SHELL", "/bin/csh")
+	runInstallShRun(t, run)
+
+	claudeBinDir := expectedClaudeBinDir(run.homeDir)
+	for _, path := range []string{
+		filepath.Join(run.homeDir, ".cshrc"),
+		filepath.Join(run.homeDir, ".login"),
+	} {
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		text := string(contents)
+		if !hasPathMarker(text, run.installDir) {
+			t.Fatalf("missing install dir PATH update in %s", path)
+		}
+		if !hasPathMarker(text, claudeBinDir) {
+			t.Fatalf("missing claude PATH update in %s", path)
+		}
+	}
+
+	cshrc, err := os.ReadFile(filepath.Join(run.homeDir, ".cshrc"))
+	if err != nil {
+		t.Fatalf("read .cshrc: %v", err)
+	}
+	if !strings.Contains(string(cshrc), "alias clp claude-proxy") {
+		t.Fatalf("missing clp alias in .cshrc")
+	}
+}
+
+func TestInstallShUsesTcshConfigs(t *testing.T) {
+	run := newInstallShRun(t, false, false)
+	run.env = overrideEnv(run.env, "SHELL", "/bin/tcsh")
+	runInstallShRun(t, run)
+
+	claudeBinDir := expectedClaudeBinDir(run.homeDir)
+	for _, path := range []string{
+		filepath.Join(run.homeDir, ".cshrc"),
+		filepath.Join(run.homeDir, ".tcshrc"),
+		filepath.Join(run.homeDir, ".login"),
+	} {
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		text := string(contents)
+		if !hasPathMarker(text, run.installDir) {
+			t.Fatalf("missing install dir PATH update in %s", path)
+		}
+		if !hasPathMarker(text, claudeBinDir) {
+			t.Fatalf("missing claude PATH update in %s", path)
+		}
+	}
+
+	tcshrc, err := os.ReadFile(filepath.Join(run.homeDir, ".tcshrc"))
+	if err != nil {
+		t.Fatalf("read .tcshrc: %v", err)
+	}
+	if !strings.Contains(string(tcshrc), "alias clp claude-proxy") {
+		t.Fatalf("missing clp alias in .tcshrc")
+	}
+}
+
+func TestInstallShBashConfigSources(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+
+	run := newInstallShRun(t, false, false)
+	run.env = overrideEnv(run.env, "SHELL", "/bin/bash")
+	runInstallShRun(t, run)
+
+	script := fmt.Sprintf(`
+. "%s"
+case ":$PATH:" in
+  *:"%s":*) ;;
+  *) exit 11 ;;
+esac
+case ":$PATH:" in
+  *:"%s":*) ;;
+  *) exit 12 ;;
+esac
+alias clp >/dev/null 2>&1 || exit 13
+`, expectedBashConfigPath(run.homeDir), run.installDir, expectedClaudeBinDir(run.homeDir))
+	runShellCheck(t, "bash", []string{"-lc", script}, run.env)
+}
+
+func TestInstallShZshConfigSources(t *testing.T) {
+	if _, err := exec.LookPath("zsh"); err != nil {
+		t.Skip("zsh not available")
+	}
+
+	run := newInstallShRun(t, false, false)
+	run.env = overrideEnv(run.env, "SHELL", "/bin/zsh")
+	runInstallShRun(t, run)
+
+	script := fmt.Sprintf(`
+source "%s"
+source "%s"
+case ":$PATH:" in
+  *:"%s":*) ;;
+  *) exit 11 ;;
+esac
+case ":$PATH:" in
+  *:"%s":*) ;;
+  *) exit 12 ;;
+esac
+alias clp >/dev/null 2>&1 || exit 13
+`, filepath.Join(run.homeDir, ".zprofile"), filepath.Join(run.homeDir, ".zshrc"), run.installDir, expectedClaudeBinDir(run.homeDir))
+	runShellCheck(t, "zsh", []string{"-lc", script}, run.env)
+}
+
+func TestInstallShFishConfigSources(t *testing.T) {
+	if _, err := exec.LookPath("fish"); err != nil {
+		t.Skip("fish not available")
+	}
+
+	run := newInstallShRun(t, false, false)
+	run.env = overrideEnv(run.env, "SHELL", "/usr/bin/fish")
+	runInstallShRun(t, run)
+
+	script := fmt.Sprintf(`
+source "%s"
+contains -- "%s" $PATH; or exit 11
+contains -- "%s" $PATH; or exit 12
+functions -q clp; or exit 13
+`, filepath.Join(run.homeDir, ".config", "fish", "config.fish"), run.installDir, expectedClaudeBinDir(run.homeDir))
+	runShellCheck(t, "fish", []string{"-c", script}, run.env)
+}
+
+func TestInstallShCshConfigSources(t *testing.T) {
+	shellPath := "csh"
+	if _, err := exec.LookPath(shellPath); err != nil {
+		t.Skip("csh not available")
+	}
+
+	run := newInstallShRun(t, false, false)
+	run.env = overrideEnv(run.env, "SHELL", "/bin/csh")
+	runInstallShRun(t, run)
+
+	script := fmt.Sprintf(`
+source "%s"
+source "%s"
+if (":$PATH:" !~ "*:%s:*") exit 11
+if (":$PATH:" !~ "*:%s:*") exit 12
+alias clp >& /dev/null
+if ($status != 0) exit 13
+`, filepath.Join(run.homeDir, ".login"), filepath.Join(run.homeDir, ".cshrc"), run.installDir, expectedClaudeBinDir(run.homeDir))
+	runShellCheck(t, shellPath, []string{"-c", script}, run.env)
+}
+
+func TestInstallShTcshConfigSources(t *testing.T) {
+	shellPath := "tcsh"
+	if _, err := exec.LookPath(shellPath); err != nil {
+		t.Skip("tcsh not available")
+	}
+
+	run := newInstallShRun(t, false, false)
+	run.env = overrideEnv(run.env, "SHELL", "/bin/tcsh")
+	runInstallShRun(t, run)
+
+	script := fmt.Sprintf(`
+source "%s"
+source "%s"
+source "%s"
+if (":$PATH:" !~ "*:%s:*") exit 11
+if (":$PATH:" !~ "*:%s:*") exit 12
+alias clp >& /dev/null
+if ($status != 0) exit 13
+`, filepath.Join(run.homeDir, ".login"), filepath.Join(run.homeDir, ".cshrc"), filepath.Join(run.homeDir, ".tcshrc"), run.installDir, expectedClaudeBinDir(run.homeDir))
+	runShellCheck(t, shellPath, []string{"-c", script}, run.env)
 }
 
 func TestInstallShRejectsUnknownArg(t *testing.T) {
@@ -176,18 +409,42 @@ func runInstallSh(t *testing.T, apiFail bool, pathAlreadySet bool) {
 		t.Fatalf("read shell config: %v", err)
 	}
 	text := string(contents)
-	pathLine := fmt.Sprintf("export PATH=\"%s:$PATH\"", installDir)
+	claudeBinDir := expectedClaudeBinDir(homeDir)
 	if pathAlreadySet {
-		if strings.Contains(text, pathLine) {
-			t.Fatalf("unexpected PATH update in shell config")
+		if hasPathMarker(text, installDir) {
+			t.Fatalf("unexpected install dir PATH update in shell config")
 		}
 	} else {
-		if !strings.Contains(text, pathLine) {
-			t.Fatalf("missing PATH update in shell config")
+		if !hasPathMarker(text, installDir) {
+			t.Fatalf("missing install dir PATH update in shell config")
 		}
+	}
+	if !hasPathMarker(text, claudeBinDir) {
+		t.Fatalf("missing claude PATH update in shell config")
 	}
 	if !strings.Contains(text, "alias clp='claude-proxy'") {
 		t.Fatalf("missing clp alias in shell config")
+	}
+}
+
+func runInstallShRun(t *testing.T, run installShRun) {
+	t.Helper()
+	cmd := exec.Command("sh", run.scriptPath)
+	cmd.Dir = run.repoRoot
+	cmd.Env = run.env
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("install.sh failed: %v\n%s", err, string(output))
+	}
+}
+
+func runShellCheck(t *testing.T, shell string, args []string, env []string) {
+	t.Helper()
+	cmd := exec.Command(shell, args...)
+	cmd.Env = env
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s check failed: %v\n%s", shell, err, string(output))
 	}
 }
 
@@ -351,4 +608,12 @@ func expectedBashConfigPath(home string) string {
 		return filepath.Join(home, ".bash_profile")
 	}
 	return filepath.Join(home, ".bashrc")
+}
+
+func expectedClaudeBinDir(home string) string {
+	return filepath.Join(home, ".local", "bin")
+}
+
+func hasPathMarker(text, dir string) bool {
+	return strings.Contains(text, "# claude-proxy PATH "+dir)
 }

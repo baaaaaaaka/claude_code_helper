@@ -43,41 +43,188 @@ function Ensure-ProfileLine([string]$path, [string]$line) {
   return $false
 }
 
-function Test-PathInEnv([string]$pathValue) {
-  if ([string]::IsNullOrWhiteSpace($pathValue)) {
+function Remove-ProfileLine([string]$path, [string]$line) {
+  if ([string]::IsNullOrWhiteSpace($path) -or [string]::IsNullOrWhiteSpace($line)) {
     return $false
   }
-  $target = $pathValue.TrimEnd("\")
-  $parts = $env:Path -split ";"
-  foreach ($part in $parts) {
+  if (-not (Test-Path -LiteralPath $path)) {
+    return $false
+  }
+  $lines = Get-Content -LiteralPath $path
+  $kept = New-Object System.Collections.Generic.List[string]
+  $removed = $false
+  foreach ($existing in $lines) {
+    if ($existing -ceq $line) {
+      $removed = $true
+      continue
+    }
+    $kept.Add($existing)
+  }
+  if (-not $removed) {
+    return $false
+  }
+  Set-Content -LiteralPath $path -Value $kept -Encoding UTF8
+  return $true
+}
+
+function Ensure-ProfileBlock([string]$path, [string]$marker, [string]$block) {
+  if ([string]::IsNullOrWhiteSpace($path) -or [string]::IsNullOrWhiteSpace($marker) -or [string]::IsNullOrWhiteSpace($block)) {
+    return $false
+  }
+  $dir = Split-Path -Parent $path
+  if (-not (Test-Path -LiteralPath $dir)) {
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  }
+  if (-not (Test-Path -LiteralPath $path)) {
+    New-Item -ItemType File -Force -Path $path | Out-Null
+  }
+  if (-not (Select-String -Path $path -SimpleMatch -Quiet -Pattern $marker)) {
+    Add-Content -Path $path -Value $block
+    return $true
+  }
+  return $false
+}
+
+function Resolve-FullPath([string]$pathValue) {
+  if ([string]::IsNullOrWhiteSpace($pathValue)) {
+    return ""
+  }
+  try {
+    return [IO.Path]::GetFullPath($pathValue)
+  } catch {
+    return $pathValue
+  }
+}
+
+function Normalize-PathForCompare([string]$pathValue) {
+  $resolved = Resolve-FullPath -pathValue $pathValue
+  if ([string]::IsNullOrWhiteSpace($resolved)) {
+    return ""
+  }
+  return $resolved.TrimEnd("\", "/")
+}
+
+function Split-PathEntries([string]$pathList) {
+  if ([string]::IsNullOrWhiteSpace($pathList)) {
+    return @()
+  }
+  return @($pathList -split [regex]::Escape([IO.Path]::PathSeparator))
+}
+
+function Test-PathListContains([string]$pathList, [string]$pathValue) {
+  $target = Normalize-PathForCompare -pathValue $pathValue
+  if ([string]::IsNullOrWhiteSpace($target)) {
+    return $false
+  }
+  foreach ($part in Split-PathEntries -pathList $pathList) {
     if ([string]::IsNullOrWhiteSpace($part)) { continue }
-    if ($part.TrimEnd("\") -ieq $target) {
+    if ((Normalize-PathForCompare -pathValue $part) -ieq $target) {
       return $true
     }
   }
   return $false
 }
 
-function Add-PathPersistent([string]$pathValue) {
-  if ([string]::IsNullOrWhiteSpace($pathValue)) {
+function Test-PathInEnv([string]$pathValue) {
+  return Test-PathListContains -pathList $env:Path -pathValue $pathValue
+}
+
+function Get-UniquePathTargets([string[]]$pathValues) {
+  $seen = @{}
+  $result = New-Object System.Collections.Generic.List[string]
+  foreach ($pathValue in $pathValues) {
+    $resolved = Resolve-FullPath -pathValue $pathValue
+    $normalized = Normalize-PathForCompare -pathValue $resolved
+    if ([string]::IsNullOrWhiteSpace($normalized)) {
+      continue
+    }
+    $key = $normalized.ToLowerInvariant()
+    if ($seen.ContainsKey($key)) {
+      continue
+    }
+    $seen[$key] = $true
+    $result.Add($resolved)
+  }
+  return $result.ToArray()
+}
+
+function Prepend-PathForCurrentSession([string[]]$pathValues) {
+  $missing = New-Object System.Collections.Generic.List[string]
+  foreach ($pathValue in $pathValues) {
+    if (-not (Test-PathInEnv -pathValue $pathValue)) {
+      $missing.Add($pathValue)
+    }
+  }
+  if ($missing.Count -eq 0) {
     return
   }
-  $current = [Environment]::GetEnvironmentVariable("Path", "User")
-  $paths = @()
-  if (-not [string]::IsNullOrWhiteSpace($current)) {
-    $paths = $current -split ";"
-  }
-  if ($paths -contains $pathValue) {
+  $currentParts = Split-PathEntries -pathList $env:Path
+  $env:Path = (@($missing.ToArray()) + $currentParts) -join [IO.Path]::PathSeparator
+}
+
+function Add-PathPersistent([string[]]$pathValues) {
+  if (-not $pathValues -or $pathValues.Count -eq 0) {
     return
   }
-  $newPath = if ([string]::IsNullOrWhiteSpace($current)) { $pathValue } else { "$pathValue;$current" }
   if ($env:CLAUDE_PROXY_SKIP_PATH_UPDATE -eq "1") {
     return
   }
+  $current = [Environment]::GetEnvironmentVariable("Path", "User")
+  $newEntries = New-Object System.Collections.Generic.List[string]
+  foreach ($pathValue in $pathValues) {
+    if (Test-PathListContains -pathList $current -pathValue $pathValue) {
+      continue
+    }
+    $newEntries.Add($pathValue)
+  }
+  if ($newEntries.Count -eq 0) {
+    return
+  }
+  $existing = Split-PathEntries -pathList $current
+  $newPath = (@($newEntries.ToArray()) + $existing) -join [IO.Path]::PathSeparator
   try {
-    & setx PATH "$newPath" | Out-Null
+    [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
   } catch {
     Write-Warning "Failed to persist PATH update: $_"
+  }
+}
+
+function New-ProfilePathBlock([string]$pathValue) {
+  $resolved = Resolve-FullPath -pathValue $pathValue
+  $escaped = $resolved.Replace("'", "''")
+  $marker = "# claude-proxy PATH $resolved"
+  $block = @"
+$marker
+`$claudeProxyPathEntry = '$escaped'
+`$claudeProxyTrimChars = [char[]]@('\', '/')
+if (-not ((`$env:Path -split [regex]::Escape([IO.Path]::PathSeparator)) | Where-Object { -not [string]::IsNullOrWhiteSpace(`$_) -and `$_.TrimEnd(`$claudeProxyTrimChars) -ieq `$claudeProxyPathEntry.TrimEnd(`$claudeProxyTrimChars) })) {
+  `$env:Path = `$claudeProxyPathEntry + [IO.Path]::PathSeparator + `$env:Path
+}
+Remove-Variable claudeProxyPathEntry, claudeProxyTrimChars -ErrorAction SilentlyContinue
+"@
+  return @{
+    Marker = $marker
+    Block = $block
+  }
+}
+
+function New-ProfileClpFunctionBlock([string]$installDir) {
+  $resolved = Resolve-FullPath -pathValue $installDir
+  $exePath = Join-Path $resolved "claude-proxy.exe"
+  $escapedExePath = $exePath.Replace("'", "''")
+  $marker = "# claude-proxy command clp $exePath"
+  $block = @"
+$marker
+if (Test-Path Alias:clp) {
+  Remove-Item Alias:clp -Force -ErrorAction SilentlyContinue
+}
+function global:clp {
+  & '$escapedExePath' @args
+}
+"@
+  return @{
+    Marker = $marker
+    Block = $block
   }
 }
 
@@ -146,28 +293,55 @@ $clpCmd = Join-Path $installDirResolved "clp.cmd"
 $clpContent = "@echo off`r`n`"%~dp0claude-proxy.exe`" %*`r`n"
 Set-Content -Path $clpCmd -Value $clpContent -Encoding ASCII
 
-$pathInEnv = Test-PathInEnv -pathValue $installDirResolved
-if (-not $pathInEnv) {
-  $env:Path = "$installDirResolved;$env:Path"
+$clpSh = Join-Path $installDirResolved "clp"
+$clpShContent = @'
+#!/usr/bin/env sh
+exec "$(dirname "$0")/claude-proxy.exe" "$@"
+'@
+Set-Content -Path $clpSh -Value $clpShContent -Encoding ASCII
+
+$homeDir = ""
+if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+  $homeDir = $env:USERPROFILE
+} elseif (-not [string]::IsNullOrWhiteSpace($env:HOME)) {
+  $homeDir = $env:HOME
 }
-if (-not $pathInEnv) {
-  Add-PathPersistent -pathValue $installDirResolved
+$claudeBinDir = ""
+if (-not [string]::IsNullOrWhiteSpace($homeDir)) {
+  $claudeBinDir = Resolve-FullPath -pathValue (Join-Path $homeDir ".local\bin")
 }
+$pathTargets = Get-UniquePathTargets @($installDirResolved, $claudeBinDir)
+$missingPathTargets = New-Object System.Collections.Generic.List[string]
+foreach ($pathTarget in $pathTargets) {
+  if (-not (Test-PathInEnv -pathValue $pathTarget)) {
+    $missingPathTargets.Add($pathTarget)
+  }
+}
+Prepend-PathForCurrentSession -pathValues $pathTargets
+Add-PathPersistent -pathValues $pathTargets
 
 $profilePath = $env:CLAUDE_PROXY_PROFILE_PATH
 if ([string]::IsNullOrWhiteSpace($profilePath)) {
   $profilePath = $PROFILE
 }
-$pathLine = '$env:Path = "' + $installDirResolved + ';$env:Path"'
-$aliasLine = 'Set-Alias -Name clp -Value claude-proxy'
+$legacyAliasLine = 'Set-Alias -Name clp -Value claude-proxy'
+$clpFunctionBlock = New-ProfileClpFunctionBlock -installDir $installDirResolved
 
 $profileUpdated = $false
-if (-not $pathInEnv) {
-  if (Ensure-ProfileLine -path $profilePath -line $pathLine) {
-    $profileUpdated = $true
+if ($missingPathTargets.Count -gt 0) {
+  $profilePathTargets = $missingPathTargets.ToArray()
+  [array]::Reverse($profilePathTargets)
+  foreach ($pathTarget in $profilePathTargets) {
+    $pathBlock = New-ProfilePathBlock -pathValue $pathTarget
+    if (Ensure-ProfileBlock -path $profilePath -marker $pathBlock.Marker -block $pathBlock.Block) {
+      $profileUpdated = $true
+    }
   }
 }
-if (Ensure-ProfileLine -path $profilePath -line $aliasLine) {
+if (Remove-ProfileLine -path $profilePath -line $legacyAliasLine) {
+  $profileUpdated = $true
+}
+if (Ensure-ProfileBlock -path $profilePath -marker $clpFunctionBlock.Marker -block $clpFunctionBlock.Block) {
   $profileUpdated = $true
 }
 
@@ -179,9 +353,10 @@ if ($profileUpdated) {
   }
 }
 
-Write-Host "Installed: $dst"
-Write-Host "Hint: add to PATH for current session:"
-Write-Host "  `$env:Path = `"$installDirResolved;`$env:Path`""
-Write-Host "Shell profile checked for PATH and alias 'clp' (reload attempted):"
-Write-Host "  $profilePath"
+$pathHint = $pathTargets -join [IO.Path]::PathSeparator
 
+Write-Host "Installed: $dst"
+Write-Host "Hint: PATH entries prepared for current session:"
+Write-Host "  $pathHint"
+Write-Host "Shell profile checked for PATH entries and a PowerShell 'clp' command override:"
+Write-Host "  $profilePath"

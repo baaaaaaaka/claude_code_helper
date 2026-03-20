@@ -24,9 +24,12 @@ Windows (PowerShell):
 powershell -NoProfile -ExecutionPolicy Bypass -Command "iwr -useb https://raw.githubusercontent.com/baaaaaaaka/claude_code_helper/main/install.ps1 | iex"
 ```
 
-The installer drops a `clp` shim alongside `claude-proxy` and tries to add the
-install directory to PATH (plus a `clp` alias). Open a new shell if the
-command is not found.
+The installer drops a `clp` shim alongside `claude-proxy` and tries to prepare
+PATH for both the `claude-proxy` install directory and Claude Code's native
+launcher directory. On PowerShell it also installs a `clp` function in the
+profile, intentionally overriding PowerShell's built-in `clp`
+(`Clear-ItemProperty`) alias so `clp` launches `claude-proxy` directly. Open a
+new shell if the command is not found.
 
 ### 2) **Run**
 
@@ -87,9 +90,10 @@ sh -c 'url="https://raw.githubusercontent.com/baaaaaaaka/claude_code_helper/main
 
 By default it installs to `~/.local/bin/claude-proxy`.
 
-The installer drops a `clp` shim alongside `claude-proxy` and tries to add
-`~/.local/bin` to PATH (plus a `clp` alias). Open a new shell if the command is
-not found.
+The installer drops a `clp` shim alongside `claude-proxy` and tries to prepare
+PATH for both the chosen install directory and Claude Code's native launcher
+directory (`~/.local/bin` by default), plus a `clp` alias where appropriate.
+Open a new shell if the command is not found.
 If you need to update PATH manually:
 
 ```bash

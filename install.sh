@@ -103,9 +103,20 @@ SOURCE_FILES=""
 
 add_source_file() {
   file="$1"
-  case " $SOURCE_FILES " in
-    *" $file "*) ;;
-    *) SOURCE_FILES="$SOURCE_FILES $file" ;;
+  case "
+$SOURCE_FILES
+" in
+    *"
+$file
+"*) ;;
+    *)
+      if [ -n "$SOURCE_FILES" ]; then
+        SOURCE_FILES="$SOURCE_FILES
+$file"
+      else
+        SOURCE_FILES="$file"
+      fi
+      ;;
   esac
 }
 
@@ -129,6 +140,41 @@ ensure_line() {
   fi
 }
 
+ensure_block() {
+  file="$1"
+  marker="$2"
+  block="$3"
+  if [ -z "${file:-}" ] || [ -z "${marker:-}" ] || [ -z "${block:-}" ]; then
+    return 0
+  fi
+  dir="$(dirname "$file")"
+  if [ -n "${dir:-}" ]; then
+    mkdir -p "$dir" 2>/dev/null || true
+  fi
+  if [ ! -f "$file" ]; then
+    : > "$file"
+  fi
+  if ! grep -Fqx "$marker" "$file" 2>/dev/null; then
+    printf "\n%s\n" "$block" >> "$file"
+    CONFIG_UPDATED=1
+    add_source_file "$file"
+  fi
+}
+
+trim_trailing_slash() {
+  value="$1"
+  while [ -n "$value" ] && [ "$value" != "/" ] && [ "${value%/}" != "$value" ]; do
+    value="${value%/}"
+  done
+  printf "%s" "$value"
+}
+
+same_path_string() {
+  a="$(trim_trailing_slash "$1")"
+  b="$(trim_trailing_slash "$2")"
+  [ "$a" = "$b" ]
+}
+
 path_has_dir() {
   target="${1%/}"
   old_ifs="$IFS"
@@ -142,6 +188,47 @@ path_has_dir() {
   done
   IFS="$old_ifs"
   return 1
+}
+
+ensure_posix_path_entry() {
+  file="$1"
+  dir="$2"
+  if [ -z "${file:-}" ] || [ -z "${dir:-}" ]; then
+    return 0
+  fi
+  marker="# claude-proxy PATH $dir"
+  block="$marker
+case \":\$PATH:\" in
+  *:\"$dir\":*) ;;
+  *) export PATH=\"$dir:\$PATH\" ;;
+esac"
+  ensure_block "$file" "$marker" "$block"
+}
+
+ensure_fish_path_entry() {
+  file="$1"
+  dir="$2"
+  if [ -z "${file:-}" ] || [ -z "${dir:-}" ]; then
+    return 0
+  fi
+  marker="# claude-proxy PATH $dir"
+  block="$marker
+if not contains -- \"$dir\" \$PATH
+  set -gx PATH \"$dir\" \$PATH
+end"
+  ensure_block "$file" "$marker" "$block"
+}
+
+ensure_csh_path_entry() {
+  file="$1"
+  dir="$2"
+  if [ -z "${file:-}" ] || [ -z "${dir:-}" ]; then
+    return 0
+  fi
+  marker="# claude-proxy PATH $dir"
+  block="$marker
+if ( \":\$PATH:\" !~ \"*:$dir:*\" ) setenv PATH \"$dir:\$PATH\""
+  ensure_block "$file" "$marker" "$block"
 }
 
 source_config_file() {
@@ -165,6 +252,18 @@ source_config_file() {
         fish -c "source \"$file\"" >/dev/null 2>&1 || true
       fi
       ;;
+    csh)
+      if have_cmd csh; then
+        csh -f -c "source \"$file\"" >/dev/null 2>&1 || true
+      fi
+      ;;
+    tcsh)
+      if have_cmd tcsh; then
+        tcsh -f -c "source \"$file\"" >/dev/null 2>&1 || true
+      elif have_cmd csh; then
+        csh -f -c "source \"$file\"" >/dev/null 2>&1 || true
+      fi
+      ;;
     *)
       . "$file" >/dev/null 2>&1 || true
       ;;
@@ -183,61 +282,117 @@ update_shell_config() {
       install_dir_resolved="$resolved"
     fi
   fi
-
-  path_needs_update=1
-  if path_has_dir "$install_dir" || path_has_dir "$install_dir_resolved"; then
-    path_needs_update=0
-  fi
-
-  path_line="export PATH=\"$install_dir:\$PATH\""
+  claude_bin_dir="$HOME/.local/bin"
   alias_line="alias clp='claude-proxy'"
-  path_file=""
-  alias_file=""
 
-  case "$shell_name" in
-    bash)
-      if [ "$os" = "darwin" ]; then
-        path_file="$HOME/.bash_profile"
-      else
-        if [ -f "$HOME/.bashrc" ]; then
-          path_file="$HOME/.bashrc"
-        elif [ -f "$HOME/.bash_profile" ]; then
-          path_file="$HOME/.bash_profile"
-        else
-          path_file="$HOME/.bashrc"
-        fi
-      fi
-      alias_file="$path_file"
-      ;;
-    zsh)
-      if [ "$os" = "darwin" ] || [ -f "$HOME/.zprofile" ]; then
-        path_file="$HOME/.zprofile"
-      else
-        path_file="$HOME/.zshrc"
-      fi
-      alias_file="$HOME/.zshrc"
-      ;;
-    fish)
-      path_file="$HOME/.config/fish/config.fish"
-      alias_file="$path_file"
-      path_line="set -gx PATH \"$install_dir\" \$PATH"
-      alias_line="alias clp \"claude-proxy\""
-      ;;
-    *)
-      path_file="$HOME/.profile"
-      alias_file="$path_file"
-      ;;
-  esac
+  ensure_posix_path_targets() {
+    file="$1"
+    if [ -z "${file:-}" ]; then
+      return 0
+    fi
+    if ! same_path_string "$claude_bin_dir" "$install_dir_resolved" && ! path_has_dir "$claude_bin_dir"; then
+      ensure_posix_path_entry "$file" "$claude_bin_dir"
+    fi
+    if ! path_has_dir "$install_dir_resolved"; then
+      ensure_posix_path_entry "$file" "$install_dir_resolved"
+    fi
+  }
 
-  if [ "$path_needs_update" -eq 1 ]; then
-    ensure_line "$path_file" "$path_line"
+  ensure_fish_path_targets() {
+    file="$1"
+    if [ -z "${file:-}" ]; then
+      return 0
+    fi
+    if ! same_path_string "$claude_bin_dir" "$install_dir_resolved" && ! path_has_dir "$claude_bin_dir"; then
+      ensure_fish_path_entry "$file" "$claude_bin_dir"
+    fi
+    if ! path_has_dir "$install_dir_resolved"; then
+      ensure_fish_path_entry "$file" "$install_dir_resolved"
+    fi
+  }
+
+  ensure_csh_path_targets() {
+    file="$1"
+    if [ -z "${file:-}" ]; then
+      return 0
+    fi
+    if ! same_path_string "$claude_bin_dir" "$install_dir_resolved" && ! path_has_dir "$claude_bin_dir"; then
+      ensure_csh_path_entry "$file" "$claude_bin_dir"
+    fi
+    if ! path_has_dir "$install_dir_resolved"; then
+      ensure_csh_path_entry "$file" "$install_dir_resolved"
+    fi
+  }
+
+  ensure_posix_path_targets "$HOME/.profile"
+  ensure_line "$HOME/.profile" "$alias_line"
+
+  wants_bash=0
+  if [ "$shell_name" = "bash" ] || [ -f "$HOME/.bashrc" ] || [ -f "$HOME/.bash_profile" ]; then
+    wants_bash=1
   fi
-  ensure_line "$alias_file" "$alias_line"
+  if [ "$wants_bash" -eq 1 ]; then
+    if [ "$os" = "darwin" ]; then
+      ensure_posix_path_targets "$HOME/.bash_profile"
+      ensure_line "$HOME/.bash_profile" "$alias_line"
+      if [ -f "$HOME/.bashrc" ]; then
+        ensure_posix_path_targets "$HOME/.bashrc"
+        ensure_line "$HOME/.bashrc" "$alias_line"
+      fi
+    else
+      ensure_posix_path_targets "$HOME/.bashrc"
+      ensure_line "$HOME/.bashrc" "$alias_line"
+      if [ -f "$HOME/.bash_profile" ]; then
+        ensure_posix_path_targets "$HOME/.bash_profile"
+        ensure_line "$HOME/.bash_profile" "$alias_line"
+      fi
+    fi
+  fi
 
-  if [ "$CONFIG_UPDATED" -eq 1 ]; then
+  wants_zsh=0
+  if [ "$shell_name" = "zsh" ] || [ -f "$HOME/.zprofile" ] || [ -f "$HOME/.zshrc" ]; then
+    wants_zsh=1
+  fi
+  if [ "$wants_zsh" -eq 1 ]; then
+    ensure_posix_path_targets "$HOME/.zprofile"
+    ensure_posix_path_targets "$HOME/.zshrc"
+    ensure_line "$HOME/.zshrc" "$alias_line"
+  fi
+
+  wants_fish=0
+  if [ "$shell_name" = "fish" ] || [ -f "$HOME/.config/fish/config.fish" ]; then
+    wants_fish=1
+  fi
+  if [ "$wants_fish" -eq 1 ]; then
+    fish_config="$HOME/.config/fish/config.fish"
+    ensure_fish_path_targets "$fish_config"
+    ensure_line "$fish_config" "alias clp \"claude-proxy\""
+  fi
+
+  wants_csh=0
+  if [ "$shell_name" = "csh" ] || [ "$shell_name" = "tcsh" ] || [ -f "$HOME/.cshrc" ] || [ -f "$HOME/.tcshrc" ] || [ -f "$HOME/.login" ]; then
+    wants_csh=1
+  fi
+  if [ "$wants_csh" -eq 1 ]; then
+    ensure_csh_path_targets "$HOME/.login"
+    if [ "$shell_name" = "csh" ] || [ -f "$HOME/.cshrc" ] || [ "$shell_name" = "tcsh" ]; then
+      ensure_csh_path_targets "$HOME/.cshrc"
+      ensure_line "$HOME/.cshrc" "alias clp claude-proxy"
+    fi
+    if [ "$shell_name" = "tcsh" ] || [ -f "$HOME/.tcshrc" ]; then
+      ensure_csh_path_targets "$HOME/.tcshrc"
+      ensure_line "$HOME/.tcshrc" "alias clp claude-proxy"
+    fi
+  fi
+
+  if [ "$CONFIG_UPDATED" -eq 1 ] && [ -n "$SOURCE_FILES" ]; then
+    old_ifs="$IFS"
+    IFS='
+'
     for file in $SOURCE_FILES; do
       source_config_file "$file"
     done
+    IFS="$old_ifs"
   fi
 }
 
@@ -359,5 +514,4 @@ chmod 0755 "$clp_dst" 2>/dev/null || true
 echo "Installed: $dst"
 update_shell_config
 echo "Run: $dst proxy doctor"
-echo "Shell config checked for PATH and alias 'clp' (reload attempted)"
-
+echo "Shell config checked for PATH entries and alias 'clp' (reload attempted)"
