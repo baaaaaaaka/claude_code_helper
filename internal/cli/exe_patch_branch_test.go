@@ -94,6 +94,33 @@ func yoloClaudeArgs(cmd string) []string {
 	return []string{cmd, "--permission-mode", "bypassPermissions"}
 }
 
+func assertSameExistingPath(t *testing.T, got string, want string) {
+	t.Helper()
+	gotInfo, err := os.Stat(got)
+	if err != nil {
+		t.Fatalf("stat got path %q: %v", got, err)
+	}
+	wantInfo, err := os.Stat(want)
+	if err != nil {
+		t.Fatalf("stat want path %q: %v", want, err)
+	}
+	if os.SameFile(gotInfo, wantInfo) {
+		return
+	}
+	gotEval := got
+	if resolved, err := filepath.EvalSymlinks(got); err == nil {
+		gotEval = resolved
+	}
+	wantEval := want
+	if resolved, err := filepath.EvalSymlinks(want); err == nil {
+		wantEval = resolved
+	}
+	if sameFilePath(gotEval, wantEval) {
+		return
+	}
+	t.Fatalf("expected path %q, got %q", want, got)
+}
+
 func TestExePatchOptionsCompileSuccess(t *testing.T) {
 	specs, err := (exePatchOptions{
 		enabledFlag:    true,
@@ -722,12 +749,12 @@ func TestMaybePatchExecutableSkipWithoutCompatOutcomeUsesResolvedPath(t *testing
 	if outcome == nil {
 		t.Fatalf("expected non-nil outcome")
 	}
-	if outcome.SourcePath != path || outcome.TargetPath != path {
-		t.Fatalf("expected resolved path for skip fallback, got %#v", outcome)
-	}
-	if len(outcome.LaunchArgsPrefix) != 1 || outcome.LaunchArgsPrefix[0] != path {
+	assertSameExistingPath(t, outcome.SourcePath, path)
+	assertSameExistingPath(t, outcome.TargetPath, path)
+	if len(outcome.LaunchArgsPrefix) != 1 {
 		t.Fatalf("unexpected launch prefix: %#v", outcome.LaunchArgsPrefix)
 	}
+	assertSameExistingPath(t, outcome.LaunchArgsPrefix[0], path)
 	if outcome.SourceSHA256 != "" {
 		t.Fatalf("expected version-based skip to leave SourceSHA256 empty, got %q", outcome.SourceSHA256)
 	}
@@ -784,9 +811,10 @@ func TestMaybePatchExecutableProbeCompatRescueBackfillsLaunchPrefix(t *testing.T
 	if outcome == nil {
 		t.Fatalf("expected non-nil outcome")
 	}
-	if len(outcome.LaunchArgsPrefix) != 1 || outcome.LaunchArgsPrefix[0] != mirrorPath {
+	if len(outcome.LaunchArgsPrefix) != 1 {
 		t.Fatalf("expected compat rescue to backfill launch prefix, got %#v", outcome.LaunchArgsPrefix)
 	}
+	assertSameExistingPath(t, outcome.LaunchArgsPrefix[0], mirrorPath)
 	if probeCalls != 2 {
 		t.Fatalf("expected 2 probe calls, got %d", probeCalls)
 	}
@@ -846,9 +874,10 @@ func TestMaybePatchExecutableRestoresSourceBeforePreparingEL7Mirror(t *testing.T
 	if err != nil {
 		t.Fatalf("maybePatchExecutable error: %v", err)
 	}
-	if outcome == nil || outcome.TargetPath != mirrorPath {
+	if outcome == nil {
 		t.Fatalf("expected mirror outcome, got %#v", outcome)
 	}
+	assertSameExistingPath(t, outcome.TargetPath, mirrorPath)
 	gotSource, err := os.ReadFile(sourcePath)
 	if err != nil {
 		t.Fatalf("read source after compat prep: %v", err)
@@ -915,9 +944,10 @@ func TestMaybePatchExecutableRestoresExistingEL7MirrorWhenYoloDisabled(t *testin
 	if err != nil {
 		t.Fatalf("maybePatchExecutable error: %v", err)
 	}
-	if outcome == nil || outcome.TargetPath != mirrorPath {
+	if outcome == nil {
 		t.Fatalf("expected mirror outcome, got %#v", outcome)
 	}
+	assertSameExistingPath(t, outcome.TargetPath, mirrorPath)
 	gotMirror, err := os.ReadFile(mirrorPath)
 	if err != nil {
 		t.Fatalf("read mirror after restore: %v", err)
@@ -983,9 +1013,10 @@ func TestMaybePatchExecutablePatchesMirrorInsteadOfSharedSourceOnEL7(t *testing.
 	if err != nil {
 		t.Fatalf("maybePatchExecutable error: %v", err)
 	}
-	if outcome == nil || outcome.TargetPath != mirrorPath {
+	if outcome == nil {
 		t.Fatalf("expected mirror patch outcome, got %#v", outcome)
 	}
+	assertSameExistingPath(t, outcome.TargetPath, mirrorPath)
 
 	gotSource, err := os.ReadFile(sourcePath)
 	if err != nil {
@@ -1045,13 +1076,10 @@ func TestMaybePatchExecutableSkipUsesCompatLaunchPrefixOnEL7(t *testing.T) {
 	if outcome == nil {
 		t.Fatalf("expected non-nil outcome")
 	}
-	if outcome.SourcePath != path {
-		t.Fatalf("expected source path %q, got %q", path, outcome.SourcePath)
-	}
-	if outcome.TargetPath != mirrorPath {
-		t.Fatalf("expected target path %q, got %q", mirrorPath, outcome.TargetPath)
-	}
-	if len(outcome.LaunchArgsPrefix) != 1 || outcome.LaunchArgsPrefix[0] != mirrorPath {
+	assertSameExistingPath(t, outcome.SourcePath, path)
+	assertSameExistingPath(t, outcome.TargetPath, mirrorPath)
+	if len(outcome.LaunchArgsPrefix) != 1 {
 		t.Fatalf("unexpected launch prefix: %#v", outcome.LaunchArgsPrefix)
 	}
+	assertSameExistingPath(t, outcome.LaunchArgsPrefix[0], mirrorPath)
 }

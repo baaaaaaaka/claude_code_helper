@@ -580,8 +580,8 @@ func TestPrepareGlibcCompatMirrorUsesDistinctCacheKeysPerRuntime(t *testing.T) {
 }
 
 func TestApplyClaudeGlibcCompatPatchRescuesNonEL7Hosts(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skip glibc compat flow on windows")
+	if runtime.GOOS != "linux" {
+		t.Skip("skip linux-only glibc compat flow outside linux")
 	}
 	glibcCompatHostEligibleFn = func() bool { return false }
 	t.Cleanup(func() { glibcCompatHostEligibleFn = isEL7GlibcCompatHost })
@@ -632,8 +632,8 @@ func TestApplyClaudeGlibcCompatPatchRescuesNonEL7Hosts(t *testing.T) {
 }
 
 func TestApplyClaudeGlibcCompatPatchFallsBackToWrapperWithoutPatchelf(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skip shell script test on windows")
+	if runtime.GOOS != "linux" {
+		t.Skip("skip linux-only glibc compat flow outside linux")
 	}
 	glibcCompatHostEligibleFn = func() bool { return true }
 	t.Cleanup(func() { glibcCompatHostEligibleFn = isEL7GlibcCompatHost })
