@@ -146,14 +146,9 @@ func prepareGlibcCompatLaunchMirror(path string, layout glibcCompatLayout, log i
 			if err != nil {
 				return fmt.Errorf("read interpreter: %w", err)
 			}
-			currentRPath, err := readPatchelfValue(stagePath, "--print-rpath")
-			if err != nil {
-				return fmt.Errorf("read rpath: %w", err)
-			}
-			targetRPath := mergeRPath(layout.LibDir, currentRPath)
-			if !sameFilePath(currentInterpreter, layout.LoaderPath) || !pathListContains(currentRPath, layout.LibDir) {
-				if err := patchElfInterpreterAndRPath(stagePath, layout.LoaderPath, targetRPath); err != nil {
-					return err
+			if !sameFilePath(currentInterpreter, layout.LoaderPath) {
+				if _, err := runPatchelf("--set-interpreter", layout.LoaderPath, stagePath); err != nil {
+					return fmt.Errorf("set interpreter: %w", err)
 				}
 			}
 		}
@@ -166,7 +161,11 @@ func prepareGlibcCompatLaunchMirror(path string, layout glibcCompatLayout, log i
 		return outcome, false, err
 	}
 	outcome.TargetPath = mirrorPath
-	outcome.LaunchArgsPrefix = []string{mirrorPath}
+	if patchELF {
+		outcome.LaunchArgsPrefix = glibcCompatMirrorLaunchPrefix(layout, mirrorPath)
+	} else {
+		outcome.LaunchArgsPrefix = []string{mirrorPath}
+	}
 	outcome.Applied = false
 	if created {
 		if patchELF {
@@ -265,6 +264,18 @@ func prepareGlibcCompatWrapper(path string, layout glibcCompatLayout, log io.Wri
 	outcome.Applied = false
 	_, _ = fmt.Fprintf(log, "exe-patch: using glibc compat wrapper %s for %s via %s\n", wrapperPath, path, outcome.TargetPath)
 	return outcome, nil
+}
+
+func glibcCompatMirrorLaunchPrefix(layout glibcCompatLayout, mirrorPath string) []string {
+	envBinary := "env"
+	if resolved, err := exec.LookPath("env"); err == nil && strings.TrimSpace(resolved) != "" {
+		envBinary = resolved
+	}
+	ldLibraryPath := layout.LibDir
+	if existing := strings.TrimSpace(os.Getenv("LD_LIBRARY_PATH")); existing != "" {
+		ldLibraryPath = layout.LibDir + string(os.PathListSeparator) + existing
+	}
+	return []string{envBinary, "LD_LIBRARY_PATH=" + ldLibraryPath, mirrorPath}
 }
 
 func resolveOrPrepareGlibcCompatLayout(opts exePatchOptions, log io.Writer) (glibcCompatLayout, error) {

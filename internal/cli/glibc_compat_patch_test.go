@@ -35,6 +35,25 @@ func writeGlibcCompatRuntimeFixture(t *testing.T, root string, loaderData string
 	return layout
 }
 
+func assertGlibcCompatMirrorLaunchPrefix(t *testing.T, prefix []string, targetPath string, libDir string) {
+	t.Helper()
+	if len(prefix) != 3 {
+		t.Fatalf("unexpected mirror launch prefix length: %#v", prefix)
+	}
+	if base := strings.ToLower(filepath.Base(prefix[0])); base != "env" && base != "env.exe" {
+		t.Fatalf("expected env launcher, got %q", prefix[0])
+	}
+	if !strings.HasPrefix(prefix[1], "LD_LIBRARY_PATH=") {
+		t.Fatalf("expected LD_LIBRARY_PATH assignment, got %q", prefix[1])
+	}
+	if !strings.Contains(prefix[1], libDir) {
+		t.Fatalf("expected LD_LIBRARY_PATH to include %q, got %q", libDir, prefix[1])
+	}
+	if !sameFilePath(prefix[2], targetPath) {
+		t.Fatalf("expected target path %q at end of launch prefix, got %#v", targetPath, prefix)
+	}
+}
+
 func TestResolveGlibcCompatLayout(t *testing.T) {
 	t.Run("direct root layout", func(t *testing.T) {
 		root := t.TempDir()
@@ -502,9 +521,7 @@ func TestPrepareGlibcCompatMirrorUsesHostScopedCopyAndPrunes(t *testing.T) {
 	if outcome.Applied {
 		t.Fatalf("expected compat mirror creation not to mark outcome as byte-patched")
 	}
-	if len(outcome.LaunchArgsPrefix) != 1 || outcome.LaunchArgsPrefix[0] != outcome.TargetPath {
-		t.Fatalf("unexpected launch prefix: %#v", outcome)
-	}
+	assertGlibcCompatMirrorLaunchPrefix(t, outcome.LaunchArgsPrefix, outcome.TargetPath, layout.LibDir)
 	if !strings.HasPrefix(outcome.TargetPath, claudeRoot) {
 		t.Fatalf("expected mirror under host root %q, got %q", claudeRoot, outcome.TargetPath)
 	}
@@ -623,9 +640,7 @@ func TestApplyClaudeGlibcCompatPatchRescuesNonEL7Hosts(t *testing.T) {
 	if outcome.TargetPath == sourcePath {
 		t.Fatalf("expected host-local mirror, got source path %q", outcome.TargetPath)
 	}
-	if len(outcome.LaunchArgsPrefix) != 1 || outcome.LaunchArgsPrefix[0] != outcome.TargetPath {
-		t.Fatalf("unexpected launch prefix: %#v", outcome.LaunchArgsPrefix)
-	}
+	assertGlibcCompatMirrorLaunchPrefix(t, outcome.LaunchArgsPrefix, outcome.TargetPath, layout.LibDir)
 	if _, err := os.Stat(outcome.TargetPath); err != nil {
 		t.Fatalf("expected mirror to exist: %v", err)
 	}

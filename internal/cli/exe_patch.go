@@ -531,10 +531,10 @@ func usesGlibcCompatMirrorLaunch(outcome *patchOutcome, sourcePath string) bool 
 	if targetPath == "" || config.PathsEqual(targetPath, sourcePath) {
 		return false
 	}
-	if len(outcome.LaunchArgsPrefix) != 1 {
+	if len(outcome.LaunchArgsPrefix) == 0 {
 		return false
 	}
-	return config.PathsEqual(strings.TrimSpace(outcome.LaunchArgsPrefix[0]), targetPath)
+	return config.PathsEqual(strings.TrimSpace(outcome.LaunchArgsPrefix[len(outcome.LaunchArgsPrefix)-1]), targetPath)
 }
 
 func patchExecutable(path string, specs []exePatchSpec, log io.Writer, preview bool, dryRun bool, historyStore *config.PatchHistoryStore, proxyVersion string) (*patchOutcome, error) {
