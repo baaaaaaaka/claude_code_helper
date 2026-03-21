@@ -720,6 +720,9 @@ func TestApplyClaudeGlibcCompatPatchFallsBackToWrapperWithoutPatchelf(t *testing
 }
 
 func TestEnsureGlibcCompatWrapperPathRepairsNonExecutableWrapper(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("wrapper execute-bit repair is only meaningful on linux")
+	}
 	cacheRoot := t.TempDir()
 	t.Setenv("XDG_CACHE_HOME", cacheRoot)
 	t.Setenv(claudeProxyHostIDEnv, "host-a")
