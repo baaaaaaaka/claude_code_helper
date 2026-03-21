@@ -302,6 +302,9 @@ func TestMaybePatchExecutableAppliesCustomClaudePatchWhenPermissionModeDisabled(
 }
 
 func TestMaybePatchExecutableRestoresClaudeWhenYoloDisabled(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("restore semantics are covered on non-windows targets")
+	}
 	requireExePatchEnabled(t)
 	withExePatchTestHooks(t)
 
