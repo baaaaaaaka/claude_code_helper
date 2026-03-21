@@ -554,7 +554,7 @@ func ensureGlibcCompatWrapperPath(layout glibcCompatLayout) (string, error) {
 		}
 		wrapperDir := filepath.Join(hostRoot, "glibc-wrapper")
 		wrapperPath := filepath.Join(wrapperDir, "run-with-glibc-"+fingerprint+".sh")
-		if info, statErr := os.Stat(wrapperPath); statErr == nil && info.Mode().IsRegular() {
+		if info, statErr := os.Stat(wrapperPath); statErr == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
 			return wrapperPath, nil
 		}
 		if mkErr := os.MkdirAll(wrapperDir, 0o755); mkErr != nil {
@@ -581,8 +581,11 @@ exec -a "$1" %q --library-path %q "$@"
 		if writeErr := os.WriteFile(stagePath, []byte(script), 0o755); writeErr != nil {
 			return "", fmt.Errorf("write glibc compat wrapper: %w", writeErr)
 		}
+		if chmodErr := os.Chmod(stagePath, 0o755); chmodErr != nil {
+			return "", fmt.Errorf("chmod glibc compat wrapper: %w", chmodErr)
+		}
 		if renameErr := os.Rename(stagePath, wrapperPath); renameErr != nil {
-			if info, statErr := os.Stat(wrapperPath); statErr == nil && info.Mode().IsRegular() {
+			if info, statErr := os.Stat(wrapperPath); statErr == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
 				return wrapperPath, nil
 			}
 			return "", fmt.Errorf("install glibc compat wrapper: %w", renameErr)

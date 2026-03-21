@@ -700,6 +700,13 @@ func TestApplyClaudeGlibcCompatPatchFallsBackToWrapperWithoutPatchelf(t *testing
 	if !strings.Contains(string(wrapperData), `exec -a "$1"`) {
 		t.Fatalf("expected generated wrapper to preserve argv0, got %q", string(wrapperData))
 	}
+	wrapperInfo, err := os.Stat(outcome.LaunchArgsPrefix[0])
+	if err != nil {
+		t.Fatalf("stat generated wrapper: %v", err)
+	}
+	if wrapperInfo.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("expected generated wrapper to be executable, got mode %v", wrapperInfo.Mode())
+	}
 	if _, err := os.Stat(outcome.TargetPath); err != nil {
 		t.Fatalf("expected wrapper mirror to exist: %v", err)
 	}
@@ -709,5 +716,39 @@ func TestApplyClaudeGlibcCompatPatchFallsBackToWrapperWithoutPatchelf(t *testing
 	}
 	if string(gotSource) != "claude" {
 		t.Fatalf("expected source to remain unchanged")
+	}
+}
+
+func TestEnsureGlibcCompatWrapperPathRepairsNonExecutableWrapper(t *testing.T) {
+	cacheRoot := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv(claudeProxyHostIDEnv, "host-a")
+
+	layout := writeGlibcCompatRuntimeFixture(t, filepath.Join(t.TempDir(), "runtime"), "loader", "libc")
+	wrapperPath, err := ensureGlibcCompatWrapperPath(layout)
+	if err != nil {
+		t.Fatalf("ensureGlibcCompatWrapperPath error: %v", err)
+	}
+	if err := os.Chmod(wrapperPath, 0o600); err != nil {
+		t.Fatalf("chmod wrapper non-executable: %v", err)
+	}
+
+	wrapperPath, err = ensureGlibcCompatWrapperPath(layout)
+	if err != nil {
+		t.Fatalf("ensureGlibcCompatWrapperPath repair error: %v", err)
+	}
+	info, err := os.Stat(wrapperPath)
+	if err != nil {
+		t.Fatalf("stat repaired wrapper: %v", err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("expected repaired wrapper to be executable, got mode %v", info.Mode())
+	}
+	wrapperData, err := os.ReadFile(wrapperPath)
+	if err != nil {
+		t.Fatalf("read repaired wrapper: %v", err)
+	}
+	if !strings.Contains(string(wrapperData), `exec -a "$1"`) {
+		t.Fatalf("expected repaired wrapper to preserve argv0, got %q", string(wrapperData))
 	}
 }
