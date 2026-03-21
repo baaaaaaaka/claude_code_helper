@@ -89,7 +89,7 @@ PermitRootLogin no
 PasswordAuthentication no
 ChallengeResponseAuthentication no
 KbdInteractiveAuthentication no
-UsePAM yes
+UsePAM no
 PubkeyAuthentication yes
 AuthorizedKeysFile %h/.ssh/authorized_keys
 StrictModes no
