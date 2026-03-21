@@ -23,22 +23,37 @@ patch_base_repo() {
 }
 
 install_deps() {
+  local -a base_packages=(ca-certificates openssh-server openssh-client)
+  local -a rpm_base_packages=(ca-certificates openssh-server openssh-clients)
+  local needs_patchelf=0
+  if [[ "$EXPECT_MODE" == "compat" ]]; then
+    needs_patchelf=1
+  fi
+
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    apt-get install -y --no-install-recommends ca-certificates openssh-server openssh-client patchelf
+    if [[ "$needs_patchelf" -eq 1 ]]; then
+      base_packages+=(patchelf)
+    fi
+    apt-get install -y --no-install-recommends "${base_packages[@]}"
     return
   fi
 
   if command -v dnf >/dev/null 2>&1; then
-    dnf -y install ca-certificates openssh-server openssh-clients patchelf
+    if [[ "$needs_patchelf" -eq 1 ]]; then
+      rpm_base_packages+=(patchelf)
+    fi
+    dnf -y install "${rpm_base_packages[@]}"
     return
   fi
 
   if command -v yum >/dev/null 2>&1; then
     patch_base_repo
-    yum -y install ca-certificates openssh-server openssh-clients epel-release
-    yum -y install patchelf
+    yum -y install "${rpm_base_packages[@]}" $([[ "$needs_patchelf" -eq 1 ]] && printf '%s' epel-release)
+    if [[ "$needs_patchelf" -eq 1 ]]; then
+      yum -y install patchelf
+    fi
     return
   fi
 
