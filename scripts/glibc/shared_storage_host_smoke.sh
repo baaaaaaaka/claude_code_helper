@@ -10,6 +10,8 @@ SSHD_PORT="${SSHD_PORT:-2222}"
 HOST_ID="${CLAUDE_PROXY_HOST_ID:?CLAUDE_PROXY_HOST_ID must be set}"
 GLIBC_COMPAT_REPO="${GLIBC_COMPAT_REPO:-baaaaaaaka/claude_code_helper}"
 GLIBC_COMPAT_TAG="${GLIBC_COMPAT_TAG:-glibc-compat-v2.31}"
+SHARED_UID="${SHARED_UID:-}"
+SHARED_GID="${SHARED_GID:-}"
 
 sshd_pid=""
 
@@ -277,6 +279,9 @@ run_smoke() {
 }
 
 cleanup() {
+  if [[ -n "$SHARED_UID" && -n "$SHARED_GID" && -d /shared ]]; then
+    chown -R "${SHARED_UID}:${SHARED_GID}" /shared 2>/dev/null || true
+  fi
   if [[ -n "$sshd_pid" ]]; then
     kill "$sshd_pid" 2>/dev/null || true
   fi

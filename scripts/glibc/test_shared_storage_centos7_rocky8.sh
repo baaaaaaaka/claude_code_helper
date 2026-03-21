@@ -28,7 +28,8 @@ tmp_dirs=()
 cleanup() {
   local dir
   for dir in "${tmp_dirs[@]}"; do
-    rm -rf "$dir"
+    chmod -R u+rwX "$dir" 2>/dev/null || true
+    rm -rf "$dir" || true
   done
 }
 trap cleanup EXIT
@@ -58,6 +59,8 @@ run_host() {
     -e SHARED_HOME=/shared/home \
     -e EXPECT_MODE="${expect_mode}" \
     -e CLAUDE_PROXY_HOST_ID="${host_id}" \
+    -e SHARED_UID="$(id -u)" \
+    -e SHARED_GID="$(id -g)" \
     -e GLIBC_COMPAT_REPO="${GLIBC_COMPAT_REPO}" \
     -e GLIBC_COMPAT_TAG="${GLIBC_COMPAT_TAG}" \
     "${image}" bash /scripts/shared_storage_host_smoke.sh
