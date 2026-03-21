@@ -73,7 +73,7 @@ func runClaudePatchIntegrationCase(t *testing.T, wantVersion string, installURL 
 	if skipPrecheck {
 		t.Logf("skip pre-patch startup checks because %s=1", claudePatchSkipPrecheckEnv)
 	} else {
-		beforeVersion, err := runClaudeVersion(ctx, path)
+		beforeVersion, err := runClaudeVersion(ctx, path, nil)
 		if err != nil {
 			t.Fatalf("claude --version (before): %v", err)
 		}
@@ -89,7 +89,7 @@ func runClaudePatchIntegrationCase(t *testing.T, wantVersion string, installURL 
 			t.Logf("skip root bypass probe: %s", reason)
 		} else {
 			probeCtx, cancelProbe := context.WithTimeout(ctx, 20*time.Second)
-			beforeRoot, beforeRootErr := runClaudeAsRoot(probeCtx, path, "--permission-mode", "bypassPermissions", "--version")
+			beforeRoot, beforeRootErr := runClaudeAsRoot(probeCtx, path, nil, "--permission-mode", "bypassPermissions", "--version")
 			cancelProbe()
 			if !strings.Contains(beforeRoot, rootBypassGuardErrorMessage) {
 				t.Logf("skip root bypass assert: guard message not observed before patch (err=%v, out=%q)", beforeRootErr, compactOutput(beforeRoot))
@@ -123,7 +123,7 @@ func runClaudePatchIntegrationCase(t *testing.T, wantVersion string, installURL 
 		})
 	}
 
-	afterVersion, err := runClaudeVersion(ctx, path)
+	afterVersion, err := runClaudeVersion(ctx, path, outcome)
 	if err != nil {
 		t.Fatalf("claude --version (after): %v\n%s", err, log.String())
 	}
@@ -133,7 +133,7 @@ func runClaudePatchIntegrationCase(t *testing.T, wantVersion string, installURL 
 
 	if verifyRootGuard {
 		probeCtx, cancelProbe := context.WithTimeout(ctx, 20*time.Second)
-		afterRoot, afterRootErr := runClaudeAsRoot(probeCtx, path, "--permission-mode", "bypassPermissions", "--version")
+		afterRoot, afterRootErr := runClaudeAsRoot(probeCtx, path, outcome, "--permission-mode", "bypassPermissions", "--version")
 		cancelProbe()
 		if afterRootErr != nil {
 			t.Fatalf("claude --version (after, root bypass): %v\n%s", afterRootErr, compactOutput(afterRoot))
@@ -156,7 +156,7 @@ func runClaudePatchIntegrationCase(t *testing.T, wantVersion string, installURL 
 		}
 	}
 
-	assertClaudeTUIStarts(t, path)
+	assertClaudeTUIStartsWithOutcome(t, path, outcome)
 }
 
 func parsePatchVersionMatrix(raw string) []string {
@@ -200,14 +200,15 @@ func isRootSession() bool {
 	return strings.TrimSpace(string(out)) == "0"
 }
 
-func runClaudeAsRoot(ctx context.Context, path string, args ...string) (string, error) {
+func runClaudeAsRoot(ctx context.Context, path string, outcome *patchOutcome, args ...string) (string, error) {
+	cmdArgs := commandArgsForOutcome(outcome, append([]string{path}, args...))
 	if isRootSession() {
-		cmd := exec.CommandContext(ctx, path, args...)
+		cmd := exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)
 		out, err := cmd.CombinedOutput()
 		return string(out), err
 	}
-	cmdArgs := append([]string{"-n", path}, args...)
-	cmd := exec.CommandContext(ctx, "sudo", cmdArgs...)
+	sudoArgs := append([]string{"-n"}, cmdArgs...)
+	cmd := exec.CommandContext(ctx, "sudo", sudoArgs...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -221,10 +222,43 @@ func compactOutput(s string) string {
 	return trimmed[:maxLen] + "..."
 }
 
-func runClaudeVersion(ctx context.Context, path string) (string, error) {
-	cmd := exec.CommandContext(ctx, path, "--version")
+func runClaudeVersion(ctx context.Context, path string, outcome *patchOutcome) (string, error) {
+	cmdArgs := commandArgsForOutcome(outcome, []string{path, "--version"})
+	cmd := exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+func assertClaudeTUIStartsWithOutcome(t *testing.T, path string, outcome *patchOutcome) {
+	t.Helper()
+	if outcome == nil || len(outcome.LaunchArgsPrefix) == 0 {
+		assertClaudeTUIStarts(t, path)
+		return
+	}
+	if runtime.GOOS == "windows" {
+		assertClaudeTUIStarts(t, path)
+		return
+	}
+
+	launchPath := path
+	launchArgs := commandArgsForOutcome(outcome, []string{path})
+	scriptPath := filepath.Join(t.TempDir(), "claude-launch.sh")
+	var script strings.Builder
+	script.WriteString("#!/bin/sh\nexec")
+	for _, arg := range launchArgs {
+		script.WriteString(" ")
+		script.WriteString(shQuote(arg))
+	}
+	script.WriteString("\n")
+	if err := os.WriteFile(scriptPath, []byte(script.String()), 0o755); err != nil {
+		t.Fatalf("write TUI launch shim: %v", err)
+	}
+	launchPath = scriptPath
+	assertClaudeTUIStarts(t, launchPath)
+}
+
+func shQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
 func resolveClaudeForPatchTest(t *testing.T, ctx context.Context, installURL string, version string) (string, error) {
