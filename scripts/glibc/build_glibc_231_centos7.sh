@@ -114,7 +114,7 @@ if [[ "\$#" -lt 1 ]]; then
 fi
 SCRIPT_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
 GLIBC_ROOT="\${SCRIPT_DIR}/glibc-${GLIBC_VERSION}"
-exec "\${GLIBC_ROOT}/lib/ld-linux-x86-64.so.2" --library-path "\${GLIBC_ROOT}/lib" "\$@"
+exec -a "\$1" "\${GLIBC_ROOT}/lib/ld-linux-x86-64.so.2" --library-path "\${GLIBC_ROOT}/lib" "\$@"
 EOF
   chmod +x "${runtime_root}/run-with-glibc-${GLIBC_VERSION}.sh"
 

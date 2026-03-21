@@ -253,7 +253,7 @@ func prepareGlibcCompatWrapper(path string, layout glibcCompatLayout, log io.Wri
 	if strings.TrimSpace(outcome.SourcePath) == "" {
 		outcome.SourcePath = path
 	}
-	wrapperPath, err := resolveGlibcCompatWrapperPath(layout)
+	wrapperPath, err := ensureGlibcCompatWrapperPath(layout)
 	if err != nil {
 		return outcome, err
 	}
@@ -543,6 +543,53 @@ func pruneGlibcCompatMirrors(claudeRoot string, keepKey string) error {
 		}
 	}
 	return nil
+}
+
+func ensureGlibcCompatWrapperPath(layout glibcCompatLayout) (string, error) {
+	hostRoot, _, err := resolveClaudeProxyHostRoot()
+	if err == nil {
+		fingerprint, fpErr := glibcCompatLayoutFingerprint(layout)
+		if fpErr != nil {
+			return "", fpErr
+		}
+		wrapperDir := filepath.Join(hostRoot, "glibc-wrapper")
+		wrapperPath := filepath.Join(wrapperDir, "run-with-glibc-"+fingerprint+".sh")
+		if info, statErr := os.Stat(wrapperPath); statErr == nil && info.Mode().IsRegular() {
+			return wrapperPath, nil
+		}
+		if mkErr := os.MkdirAll(wrapperDir, 0o755); mkErr != nil {
+			return "", fmt.Errorf("create glibc compat wrapper dir: %w", mkErr)
+		}
+		script := fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$#" -lt 1 ]]; then
+  echo "usage: $0 <binary> [args...]" >&2
+  exit 2
+fi
+exec -a "$1" %q --library-path %q "$@"
+`, layout.LoaderPath, layout.LibDir)
+		stageFile, mkErr := os.CreateTemp(wrapperDir, filepath.Base(wrapperPath)+".tmp-*")
+		if mkErr != nil {
+			return "", fmt.Errorf("create glibc compat wrapper temp file: %w", mkErr)
+		}
+		stagePath := stageFile.Name()
+		if closeErr := stageFile.Close(); closeErr != nil {
+			_ = os.Remove(stagePath)
+			return "", fmt.Errorf("close glibc compat wrapper temp file: %w", closeErr)
+		}
+		defer func() { _ = os.Remove(stagePath) }()
+		if writeErr := os.WriteFile(stagePath, []byte(script), 0o755); writeErr != nil {
+			return "", fmt.Errorf("write glibc compat wrapper: %w", writeErr)
+		}
+		if renameErr := os.Rename(stagePath, wrapperPath); renameErr != nil {
+			if info, statErr := os.Stat(wrapperPath); statErr == nil && info.Mode().IsRegular() {
+				return wrapperPath, nil
+			}
+			return "", fmt.Errorf("install glibc compat wrapper: %w", renameErr)
+		}
+		return wrapperPath, nil
+	}
+	return resolveGlibcCompatWrapperPath(layout)
 }
 
 func resolveGlibcCompatWrapperPath(layout glibcCompatLayout) (string, error) {

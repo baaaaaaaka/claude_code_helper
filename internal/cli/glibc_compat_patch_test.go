@@ -687,8 +687,18 @@ func TestApplyClaudeGlibcCompatPatchFallsBackToWrapperWithoutPatchelf(t *testing
 	if outcome.TargetPath == sourcePath {
 		t.Fatalf("expected wrapper fallback to use a host-local mirror, got source path %q", outcome.TargetPath)
 	}
-	if len(outcome.LaunchArgsPrefix) != 2 || outcome.LaunchArgsPrefix[0] != wrapperPath || outcome.LaunchArgsPrefix[1] != outcome.TargetPath {
+	if len(outcome.LaunchArgsPrefix) != 2 || outcome.LaunchArgsPrefix[1] != outcome.TargetPath {
 		t.Fatalf("unexpected launch prefix: %#v", outcome.LaunchArgsPrefix)
+	}
+	if outcome.LaunchArgsPrefix[0] == wrapperPath {
+		t.Fatalf("expected host-local wrapper path, got runtime wrapper %q", outcome.LaunchArgsPrefix[0])
+	}
+	wrapperData, err := os.ReadFile(outcome.LaunchArgsPrefix[0])
+	if err != nil {
+		t.Fatalf("read generated wrapper: %v", err)
+	}
+	if !strings.Contains(string(wrapperData), `exec -a "$1"`) {
+		t.Fatalf("expected generated wrapper to preserve argv0, got %q", string(wrapperData))
 	}
 	if _, err := os.Stat(outcome.TargetPath); err != nil {
 		t.Fatalf("expected wrapper mirror to exist: %v", err)
