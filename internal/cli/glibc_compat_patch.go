@@ -73,6 +73,13 @@ func applyClaudeGlibcCompatPatch(path string, opts exePatchOptions, log io.Write
 		_, _ = fmt.Fprintf(log, "exe-patch: dry-run enabled; would prepare host-local glibc compat launch path for %s\n", path)
 		return outcome, false, nil
 	}
+	if opts.glibcCompatPreferWrapper {
+		wrapperOutcome, wrapperErr := prepareGlibcCompatWrapper(path, layout, log, outcome)
+		if wrapperErr != nil {
+			return outcome, false, wrapperErr
+		}
+		return wrapperOutcome, true, nil
+	}
 	preparedOutcome, compatApplied, compatErr := prepareGlibcCompatMirror(path, layout, log, outcome)
 	if compatErr == nil {
 		return preparedOutcome, compatApplied, nil

@@ -35,16 +35,17 @@ var (
 )
 
 type exePatchOptions struct {
-	enabledFlag     bool
-	regex1          string
-	regex2          []string
-	regex3          []string
-	replace         []string
-	preview         bool
-	policySettings  bool
-	dryRun          bool
-	glibcCompat     bool
-	glibcCompatRoot string
+	enabledFlag              bool
+	regex1                   string
+	regex2                   []string
+	regex3                   []string
+	replace                  []string
+	preview                  bool
+	policySettings           bool
+	dryRun                   bool
+	glibcCompat              bool
+	glibcCompatRoot          string
+	glibcCompatPreferWrapper bool
 }
 
 type patchOutcome struct {
@@ -81,6 +82,11 @@ func (o exePatchOptions) customRulesEnabled() bool {
 
 func (o exePatchOptions) glibcCompatConfigured() bool {
 	return o.glibcCompat
+}
+
+func (o exePatchOptions) withGlibcCompatWrapperFallback() exePatchOptions {
+	o.glibcCompatPreferWrapper = true
+	return o
 }
 
 func (o exePatchOptions) validate() error {
@@ -479,6 +485,25 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 				out, probeErr = runClaudeProbeOutcome(outcome, resolvedPath, "--version")
 			}
 		}
+		if probeErr != nil && glibcCompat && usesGlibcCompatMirrorLaunch(outcome, resolvedPath) {
+			_, _ = fmt.Fprintf(log, "exe-patch: glibc compat mirror probe failed; retrying with wrapper: %v\n", probeErr)
+			wrapperOutcome, wrapperApplied, wrapperErr := applyClaudeGlibcCompatPatchFn(
+				resolvedPath,
+				opts.withGlibcCompatWrapperFallback(),
+				log,
+				opts.dryRun,
+				outcome,
+			)
+			if wrapperErr != nil {
+				_, _ = fmt.Fprintf(log, "exe-patch: glibc compat wrapper fallback failed: %v\n", wrapperErr)
+			} else if wrapperApplied {
+				outcome = wrapperOutcome
+				if len(outcome.LaunchArgsPrefix) == 0 && strings.TrimSpace(outcome.TargetPath) != "" {
+					outcome.LaunchArgsPrefix = []string{outcome.TargetPath}
+				}
+				out, probeErr = runClaudeProbeOutcome(outcome, resolvedPath, "--version")
+			}
+		}
 		if probeErr != nil {
 			if outcome.Applied || outcome.NeedsVerification {
 				if failureErr := handlePatchedExecutableFailure(outcome, probeErr, out); failureErr != nil {
@@ -496,6 +521,20 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 	}
 
 	return outcome, nil
+}
+
+func usesGlibcCompatMirrorLaunch(outcome *patchOutcome, sourcePath string) bool {
+	if outcome == nil {
+		return false
+	}
+	targetPath := strings.TrimSpace(outcome.TargetPath)
+	if targetPath == "" || config.PathsEqual(targetPath, sourcePath) {
+		return false
+	}
+	if len(outcome.LaunchArgsPrefix) != 1 {
+		return false
+	}
+	return config.PathsEqual(strings.TrimSpace(outcome.LaunchArgsPrefix[0]), targetPath)
 }
 
 func patchExecutable(path string, specs []exePatchSpec, log io.Writer, preview bool, dryRun bool, historyStore *config.PatchHistoryStore, proxyVersion string) (*patchOutcome, error) {

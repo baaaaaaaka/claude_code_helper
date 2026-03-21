@@ -104,7 +104,7 @@ run_sequence() {
   echo "PASS: ${name}"
 }
 
-run_sequence "centos7 -> rocky8" centos:7 centos7-host mirror rockylinux:8 rocky8-host direct
-run_sequence "rocky8 -> centos7" rockylinux:8 rocky8-host direct centos:7 centos7-host mirror
+run_sequence "centos7 -> rocky8" centos:7 centos7-host compat rockylinux:8 rocky8-host direct
+run_sequence "rocky8 -> centos7" rockylinux:8 rocky8-host direct centos:7 centos7-host compat
 
 echo "PASS: shared-storage mixed-host smoke completed."

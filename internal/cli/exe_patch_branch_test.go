@@ -820,6 +820,81 @@ func TestMaybePatchExecutableProbeCompatRescueBackfillsLaunchPrefix(t *testing.T
 	}
 }
 
+func TestMaybePatchExecutableFallsBackToCompatWrapperWhenMirrorProbeFails(t *testing.T) {
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	dir := t.TempDir()
+	writeClaudeVersionStub(t, dir, "Claude Code 1.2.3")
+	setStubPath(t, dir)
+	glibcCompatHostEligibleFn = func() bool { return true }
+	resolveClaudeVersionFn = func(path string) string { return "1.2.3" }
+	shouldSkipPatchFailureFn = func(configPath string, proxyVersion string, claudeVersion string, claudeSHA string) (bool, error) {
+		return false, nil
+	}
+
+	mirrorPath := filepath.Join(dir, "mirror", "claude")
+	wrapperPath := filepath.Join(dir, "wrapper", "claude")
+	if runtime.GOOS == "windows" {
+		mirrorPath += ".cmd"
+		wrapperPath += ".cmd"
+	}
+	for _, path := range []string{mirrorPath, wrapperPath} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir compat path: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("compat"), 0o700); err != nil {
+			t.Fatalf("write compat path: %v", err)
+		}
+	}
+
+	applyCalls := 0
+	runClaudeProbeFn = func(path string, arg string) (string, error) {
+		switch path {
+		case mirrorPath:
+			return "Error: signal: segmentation fault (core dumped)", os.ErrInvalid
+		case wrapperPath:
+			return "Claude Code 1.2.3", nil
+		default:
+			return "Claude Code 1.2.3", nil
+		}
+	}
+	applyClaudeGlibcCompatPatchFn = func(path string, opts exePatchOptions, log io.Writer, dryRun bool, outcome *patchOutcome) (*patchOutcome, bool, error) {
+		applyCalls++
+		if outcome == nil {
+			outcome = &patchOutcome{}
+		}
+		outcome.SourcePath = path
+		if opts.glibcCompatPreferWrapper {
+			outcome.TargetPath = wrapperPath
+			outcome.LaunchArgsPrefix = []string{wrapperPath}
+			return outcome, true, nil
+		}
+		outcome.TargetPath = mirrorPath
+		outcome.LaunchArgsPrefix = []string{mirrorPath}
+		return outcome, true, nil
+	}
+
+	outcome, err := maybePatchExecutable([]string{"claude"}, exePatchOptions{
+		enabledFlag: true,
+		glibcCompat: true,
+	}, filepath.Join(dir, "config.json"), io.Discard)
+	if err != nil {
+		t.Fatalf("maybePatchExecutable error: %v", err)
+	}
+	if outcome == nil {
+		t.Fatalf("expected non-nil outcome")
+	}
+	assertSameExistingPath(t, outcome.TargetPath, wrapperPath)
+	if len(outcome.LaunchArgsPrefix) != 1 {
+		t.Fatalf("unexpected launch prefix: %#v", outcome.LaunchArgsPrefix)
+	}
+	assertSameExistingPath(t, outcome.LaunchArgsPrefix[0], wrapperPath)
+	if applyCalls != 2 {
+		t.Fatalf("expected mirror prepare plus wrapper fallback, got %d apply calls", applyCalls)
+	}
+}
+
 func TestMaybePatchExecutableRestoresSourceBeforePreparingEL7Mirror(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skip glibc compat flow on windows")

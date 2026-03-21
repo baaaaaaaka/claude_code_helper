@@ -4,7 +4,7 @@ set -euo pipefail
 CLAUDE_PROXY_BIN="${CLAUDE_PROXY_BIN:-/dist/claude-proxy}"
 CLAUDE_PATH="${CLAUDE_PATH:-/shared/claude/claude}"
 SHARED_HOME="${SHARED_HOME:-/shared/home}"
-EXPECT_MODE="${EXPECT_MODE:?EXPECT_MODE must be mirror or direct}"
+EXPECT_MODE="${EXPECT_MODE:?EXPECT_MODE must be compat or direct}"
 TEST_USER="${TEST_USER:-testuser}"
 SSHD_PORT="${SSHD_PORT:-2222}"
 HOST_ID="${CLAUDE_PROXY_HOST_ID:?CLAUDE_PROXY_HOST_ID must be set}"
@@ -209,34 +209,54 @@ run_smoke() {
   fi
 
   case "$EXPECT_MODE" in
-    mirror)
+    compat)
       if [[ -z "$mirror_path" ]]; then
-        echo "expected host-local glibc compat mirror under ${mirror_root}" >&2
+        echo "expected host-local glibc compat artifact under ${mirror_root}" >&2
         exit 1
       fi
       if [[ "$mirror_path" == "$CLAUDE_PATH" ]]; then
-        echo "mirror path unexpectedly points at the shared source binary" >&2
+        echo "compat path unexpectedly points at the shared source binary" >&2
         exit 1
       fi
-      local interp
-      local rpath
-      interp="$(patchelf --print-interpreter "$mirror_path")"
-      rpath="$(patchelf --print-rpath "$mirror_path")"
-      echo "[mirror path] ${mirror_path}"
-      echo "[mirror interpreter] ${interp}"
-      echo "[mirror rpath] ${rpath}"
-      if [[ "$interp" != */glibc-2.31/lib/ld-linux-x86-64.so.2 ]]; then
-        echo "unexpected mirror interpreter: $interp" >&2
-        exit 1
+      local compat_mode="mirror"
+      local interp=""
+      local rpath=""
+      set +e
+      interp="$(patchelf --print-interpreter "$mirror_path" 2>/dev/null)"
+      local interp_ec=$?
+      if [[ "$interp_ec" -eq 0 ]]; then
+        rpath="$(patchelf --print-rpath "$mirror_path" 2>/dev/null || true)"
       fi
-      local glibc_lib_dir
-      glibc_lib_dir="$(dirname "$interp")"
-      if [[ ! -f "${glibc_lib_dir}/libc.so.6" ]]; then
-        echo "mirror runtime missing libc.so.6 in ${glibc_lib_dir}" >&2
-        exit 1
-      fi
-      if ! grep -q "${glibc_lib_dir}" <<<"$rpath"; then
-        echo "mirror rpath missing glibc lib dir ${glibc_lib_dir}: $rpath" >&2
+      set -e
+      echo "[compat path] ${mirror_path}"
+      if [[ "$interp" == */glibc-2.31/lib/ld-linux-x86-64.so.2 ]]; then
+        echo "[compat mode] mirror"
+        echo "[mirror interpreter] ${interp}"
+        echo "[mirror rpath] ${rpath}"
+        local glibc_lib_dir
+        glibc_lib_dir="$(dirname "$interp")"
+        if [[ ! -f "${glibc_lib_dir}/libc.so.6" ]]; then
+          echo "mirror runtime missing libc.so.6 in ${glibc_lib_dir}" >&2
+          exit 1
+        fi
+        if ! grep -q "${glibc_lib_dir}" <<<"$rpath"; then
+          echo "mirror rpath missing glibc lib dir ${glibc_lib_dir}: $rpath" >&2
+          exit 1
+        fi
+      elif grep -q "using glibc compat wrapper" <<<"$run_out"; then
+        compat_mode="wrapper"
+        echo "[compat mode] wrapper"
+        local wrapper_path
+        wrapper_path="$(printf '%s\n' "$run_out" | sed -n 's/.*using glibc compat wrapper \([^ ]*\) for.*/\1/p' | tail -n 1)"
+        if [[ -n "$wrapper_path" ]]; then
+          echo "[wrapper path] ${wrapper_path}"
+          if [[ ! -x "$wrapper_path" ]]; then
+            echo "wrapper fallback path is not executable: ${wrapper_path}" >&2
+            exit 1
+          fi
+        fi
+      else
+        echo "expected mirror patch or wrapper fallback, got interpreter: ${interp}" >&2
         exit 1
       fi
       ;;

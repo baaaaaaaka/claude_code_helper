@@ -4,7 +4,7 @@ set -euo pipefail
 # End-to-end smoke for CentOS 7:
 # - starts local sshd
 # - runs claude-proxy run ... claude --version
-# - verifies claude-proxy prepares a host-local glibc compat mirror
+# - verifies claude-proxy prepares a host-local glibc compat launch path
 # - confirms the shared Claude source binary remains unchanged
 # - confirms the compat launch path can still enter Claude's TUI
 
@@ -208,24 +208,46 @@ EOF
     exit 1
   fi
 
-  interp="$(patchelf --print-interpreter "$mirror_path")"
-  rpath="$(patchelf --print-rpath "$mirror_path")"
-  echo "[mirror path] ${mirror_path}"
-  echo "[mirror interpreter] ${interp}"
-  echo "[mirror rpath] ${rpath}"
+  local compat_mode="mirror"
+  local interp=""
+  local rpath=""
+  set +e
+  interp="$(patchelf --print-interpreter "$mirror_path" 2>/dev/null)"
+  local interp_ec=$?
+  if [[ "$interp_ec" -eq 0 ]]; then
+    rpath="$(patchelf --print-rpath "$mirror_path" 2>/dev/null || true)"
+  fi
+  set -e
 
-  if [[ "$interp" != */glibc-2.31/lib/ld-linux-x86-64.so.2 ]]; then
-    echo "unexpected patched interpreter: $interp" >&2
-    exit 1
-  fi
-  local glibc_lib_dir
-  glibc_lib_dir="$(dirname "$interp")"
-  if [[ ! -f "${glibc_lib_dir}/libc.so.6" ]]; then
-    echo "patched glibc runtime missing libc.so.6 in ${glibc_lib_dir}" >&2
-    exit 1
-  fi
-  if ! grep -q "${glibc_lib_dir}" <<<"$rpath"; then
-    echo "patched rpath missing glibc lib dir ${glibc_lib_dir}: $rpath" >&2
+  echo "[compat path] ${mirror_path}"
+  if [[ "$interp" == */glibc-2.31/lib/ld-linux-x86-64.so.2 ]]; then
+    echo "[compat mode] mirror"
+    echo "[mirror interpreter] ${interp}"
+    echo "[mirror rpath] ${rpath}"
+    local glibc_lib_dir
+    glibc_lib_dir="$(dirname "$interp")"
+    if [[ ! -f "${glibc_lib_dir}/libc.so.6" ]]; then
+      echo "patched glibc runtime missing libc.so.6 in ${glibc_lib_dir}" >&2
+      exit 1
+    fi
+    if ! grep -q "${glibc_lib_dir}" <<<"$rpath"; then
+      echo "patched rpath missing glibc lib dir ${glibc_lib_dir}: $rpath" >&2
+      exit 1
+    fi
+  elif grep -q "using glibc compat wrapper" <<<"$run_out"; then
+    compat_mode="wrapper"
+    echo "[compat mode] wrapper"
+    local wrapper_path
+    wrapper_path="$(printf '%s\n' "$run_out" | sed -n 's/.*using glibc compat wrapper \([^ ]*\) for.*/\1/p' | tail -n 1)"
+    if [[ -n "$wrapper_path" ]]; then
+      echo "[wrapper path] ${wrapper_path}"
+      if [[ ! -x "$wrapper_path" ]]; then
+        echo "wrapper fallback path is not executable: ${wrapper_path}" >&2
+        exit 1
+      fi
+    fi
+  else
+    echo "expected patched mirror or wrapper fallback, got interpreter: ${interp}" >&2
     exit 1
   fi
 
@@ -243,7 +265,7 @@ EOF
     CLAUDE_PATCH_BUCKET="$CLAUDE_BUCKET" \
     "$CLAUDE_CLI_TEST_BIN" -test.run TestClaudePatchIntegration -test.count=1 -test.v
 
-  echo "PASS: claude-proxy used a host-local glibc compat mirror on CentOS 7."
+  echo "PASS: claude-proxy used a host-local glibc compat ${compat_mode} path on CentOS 7."
 }
 
 cleanup() {
