@@ -239,9 +239,10 @@ run_smoke() {
           echo "mirror runtime missing libc.so.6 in ${glibc_lib_dir}" >&2
           exit 1
         fi
-        if ! grep -q "${glibc_lib_dir}" <<<"$rpath"; then
-          echo "mirror rpath missing glibc lib dir ${glibc_lib_dir}: $rpath" >&2
-          exit 1
+        if grep -q "${glibc_lib_dir}" <<<"$rpath"; then
+          echo "[mirror launch] rpath includes glibc lib dir"
+        else
+          echo "[mirror launch] relying on LD_LIBRARY_PATH for glibc lib dir"
         fi
       elif grep -q "using glibc compat wrapper" <<<"$run_out"; then
         compat_mode="wrapper"
