@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -26,6 +27,7 @@ func withExePatchTestHooks(t *testing.T) {
 	prevProbe := runClaudeProbeFn
 	prevTimedProbe := runClaudeTimedProbeFn
 	prevGlibcPatch := applyClaudeGlibcCompatPatchFn
+	prevGlibcHostEligible := glibcCompatHostEligibleFn
 	prevRestore := restoreExecutableFromBackupFn
 	prevCleanup := cleanupPatchHistoryFn
 	prevRecordFailure := recordPatchFailureFn
@@ -48,6 +50,7 @@ func withExePatchTestHooks(t *testing.T) {
 		runClaudeProbeFn = prevProbe
 		runClaudeTimedProbeFn = prevTimedProbe
 		applyClaudeGlibcCompatPatchFn = prevGlibcPatch
+		glibcCompatHostEligibleFn = prevGlibcHostEligible
 		restoreExecutableFromBackupFn = prevRestore
 		cleanupPatchHistoryFn = prevCleanup
 		recordPatchFailureFn = prevRecordFailure
@@ -622,6 +625,7 @@ func TestMaybePatchExecutableRestoresAfterCodesignFailure(t *testing.T) {
 func TestMaybePatchExecutableAppliesGlibcCompatAfterProbeFailure(t *testing.T) {
 	requireExePatchEnabled(t)
 	withExePatchTestHooks(t)
+	glibcCompatHostEligibleFn = func() bool { return true }
 
 	dir := t.TempDir()
 	path := writeClaudeVersionStub(t, dir, "Claude Code 1.2.3")
@@ -668,5 +672,386 @@ func TestMaybePatchExecutableAppliesGlibcCompatAfterProbeFailure(t *testing.T) {
 	}
 	if probeCalls != 2 {
 		t.Fatalf("expected two probe calls, got %d", probeCalls)
+	}
+}
+
+func TestMaybePatchExecutableReturnsCompatPreparationError(t *testing.T) {
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+	glibcCompatHostEligibleFn = func() bool { return true }
+
+	dir := t.TempDir()
+	path := writeClaudeVersionStub(t, dir, "Claude Code 1.2.3")
+	setStubPath(t, dir)
+	wantErr := io.EOF
+	applyClaudeGlibcCompatPatchFn = func(path string, opts exePatchOptions, log io.Writer, dryRun bool, outcome *patchOutcome) (*patchOutcome, bool, error) {
+		return outcome, false, wantErr
+	}
+
+	outcome, err := maybePatchExecutable([]string{"claude"}, exePatchOptions{
+		enabledFlag: true,
+		glibcCompat: true,
+	}, filepath.Join(dir, "config.json"), io.Discard)
+	if err == nil || !errors.Is(err, wantErr) {
+		t.Fatalf("expected compat preparation error %v, got outcome=%#v err=%v", wantErr, outcome, err)
+	}
+	resolvedPath, resolveErr := resolveExecutablePath(path)
+	if resolveErr != nil {
+		t.Fatalf("resolveExecutablePath error: %v", resolveErr)
+	}
+	if outcome != nil && outcome.TargetPath == resolvedPath {
+		t.Fatalf("expected nil outcome on compat preparation failure, got %#v", outcome)
+	}
+}
+
+func TestMaybePatchExecutableSkipWithoutCompatOutcomeUsesResolvedPath(t *testing.T) {
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	dir := t.TempDir()
+	path := writeClaudeVersionStub(t, dir, "Claude Code 1.2.3")
+	setStubPath(t, dir)
+	shouldSkipPatchFailureFn = func(configPath string, proxyVersion string, claudeVersion string, claudeSHA string) (bool, error) {
+		return true, nil
+	}
+
+	outcome, err := maybePatchExecutable([]string{"claude"}, patchOptionsForVersionReplacement("Claude Code 9.9.9"), filepath.Join(dir, "config.json"), io.Discard)
+	if err != nil {
+		t.Fatalf("maybePatchExecutable error: %v", err)
+	}
+	if outcome == nil {
+		t.Fatalf("expected non-nil outcome")
+	}
+	if outcome.SourcePath != path || outcome.TargetPath != path {
+		t.Fatalf("expected resolved path for skip fallback, got %#v", outcome)
+	}
+	if len(outcome.LaunchArgsPrefix) != 1 || outcome.LaunchArgsPrefix[0] != path {
+		t.Fatalf("unexpected launch prefix: %#v", outcome.LaunchArgsPrefix)
+	}
+	if outcome.SourceSHA256 != "" {
+		t.Fatalf("expected version-based skip to leave SourceSHA256 empty, got %q", outcome.SourceSHA256)
+	}
+}
+
+func TestMaybePatchExecutableProbeCompatRescueBackfillsLaunchPrefix(t *testing.T) {
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	dir := t.TempDir()
+	writeClaudeVersionStub(t, dir, "Claude Code 1.2.3")
+	setStubPath(t, dir)
+
+	probeCalls := 0
+	mirrorPath := filepath.Join(dir, "mirror", "claude")
+	if runtime.GOOS == "windows" {
+		mirrorPath += ".cmd"
+	}
+	if err := os.MkdirAll(filepath.Dir(mirrorPath), 0o755); err != nil {
+		t.Fatalf("mkdir mirror: %v", err)
+	}
+	if err := os.WriteFile(mirrorPath, []byte("mirror"), 0o700); err != nil {
+		t.Fatalf("write mirror: %v", err)
+	}
+
+	runClaudeProbeFn = func(path string, arg string) (string, error) {
+		probeCalls++
+		if probeCalls == 1 {
+			return path + ": /lib64/libc.so.6: version `GLIBC_2.25' not found", os.ErrInvalid
+		}
+		if path != mirrorPath {
+			t.Fatalf("expected compat rescue to reprobe mirror path %q, got %q", mirrorPath, path)
+		}
+		return "Claude Code 1.2.3", nil
+	}
+	applyClaudeGlibcCompatPatchFn = func(path string, opts exePatchOptions, log io.Writer, dryRun bool, outcome *patchOutcome) (*patchOutcome, bool, error) {
+		if outcome == nil {
+			outcome = &patchOutcome{}
+		}
+		outcome.SourcePath = path
+		outcome.TargetPath = mirrorPath
+		outcome.LaunchArgsPrefix = nil
+		outcome.Applied = false
+		return outcome, true, nil
+	}
+
+	outcome, err := maybePatchExecutable([]string{"claude"}, exePatchOptions{
+		enabledFlag: true,
+		glibcCompat: true,
+	}, filepath.Join(dir, "config.json"), io.Discard)
+	if err != nil {
+		t.Fatalf("maybePatchExecutable error: %v", err)
+	}
+	if outcome == nil {
+		t.Fatalf("expected non-nil outcome")
+	}
+	if len(outcome.LaunchArgsPrefix) != 1 || outcome.LaunchArgsPrefix[0] != mirrorPath {
+		t.Fatalf("expected compat rescue to backfill launch prefix, got %#v", outcome.LaunchArgsPrefix)
+	}
+	if probeCalls != 2 {
+		t.Fatalf("expected 2 probe calls, got %d", probeCalls)
+	}
+}
+
+func TestMaybePatchExecutableRestoresSourceBeforePreparingEL7Mirror(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip glibc compat flow on windows")
+	}
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	dir := t.TempDir()
+	glibcCompatHostEligibleFn = func() bool { return true }
+
+	sourcePath := filepath.Join(dir, "claude")
+	original, _ := writeBuiltInPatchedClaudeBinary(t, sourcePath)
+	mirrorPath := filepath.Join(dir, "mirror", filepath.Base(sourcePath))
+
+	execLookPathFn = func(file string) (string, error) { return sourcePath, nil }
+	resolveExecutablePathFn = func(path string) (string, error) { return sourcePath, nil }
+	resolveClaudeVersionFn = func(path string) string { return "2.1.3" }
+	shouldSkipPatchFailureFn = func(configPath string, proxyVersion string, claudeVersion string, claudeSHA string) (bool, error) {
+		return false, nil
+	}
+	runClaudeProbeFn = func(path string, arg string) (string, error) {
+		return "Claude Code 2.1.3", nil
+	}
+	applyClaudeGlibcCompatPatchFn = func(path string, opts exePatchOptions, log io.Writer, dryRun bool, outcome *patchOutcome) (*patchOutcome, bool, error) {
+		gotSource, err := os.ReadFile(sourcePath)
+		if err != nil {
+			t.Fatalf("read source during compat prep: %v", err)
+		}
+		if string(gotSource) != string(original) {
+			t.Fatalf("expected source to be restored before compat prep")
+		}
+		if err := os.MkdirAll(filepath.Dir(mirrorPath), 0o755); err != nil {
+			t.Fatalf("mkdir mirror dir: %v", err)
+		}
+		if err := os.WriteFile(mirrorPath, gotSource, 0o700); err != nil {
+			t.Fatalf("write mirror: %v", err)
+		}
+		if outcome == nil {
+			outcome = &patchOutcome{}
+		}
+		outcome.SourcePath = path
+		outcome.TargetPath = mirrorPath
+		outcome.LaunchArgsPrefix = []string{mirrorPath}
+		outcome.Applied = false
+		return outcome, true, nil
+	}
+
+	outcome, err := maybePatchExecutable([]string{"claude"}, exePatchOptions{
+		enabledFlag: true,
+		glibcCompat: true,
+	}, filepath.Join(dir, "config.json"), io.Discard)
+	if err != nil {
+		t.Fatalf("maybePatchExecutable error: %v", err)
+	}
+	if outcome == nil || outcome.TargetPath != mirrorPath {
+		t.Fatalf("expected mirror outcome, got %#v", outcome)
+	}
+	gotSource, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read source after compat prep: %v", err)
+	}
+	if string(gotSource) != string(original) {
+		t.Fatalf("expected source to remain restored after compat prep")
+	}
+	gotMirror, err := os.ReadFile(mirrorPath)
+	if err != nil {
+		t.Fatalf("read mirror after compat prep: %v", err)
+	}
+	if string(gotMirror) != string(original) {
+		t.Fatalf("expected mirror to be copied from restored source")
+	}
+	if _, err := os.Stat(originalBackupPath(sourcePath)); !os.IsNotExist(err) {
+		t.Fatalf("expected source backup to be removed after restore, got err=%v", err)
+	}
+}
+
+func TestMaybePatchExecutableRestoresExistingEL7MirrorWhenYoloDisabled(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip glibc compat flow on windows")
+	}
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	dir := t.TempDir()
+	glibcCompatHostEligibleFn = func() bool { return true }
+
+	sourcePath := filepath.Join(dir, "claude")
+	mirrorPath := filepath.Join(dir, "mirror", filepath.Base(sourcePath))
+	if err := os.MkdirAll(filepath.Dir(mirrorPath), 0o755); err != nil {
+		t.Fatalf("mkdir mirror dir: %v", err)
+	}
+	original, _ := writeBuiltInPatchedClaudeBinary(t, mirrorPath)
+	if err := os.WriteFile(sourcePath, original, 0o700); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	execLookPathFn = func(file string) (string, error) { return sourcePath, nil }
+	resolveExecutablePathFn = func(path string) (string, error) { return sourcePath, nil }
+	resolveClaudeVersionFn = func(path string) string { return "2.1.3" }
+	shouldSkipPatchFailureFn = func(configPath string, proxyVersion string, claudeVersion string, claudeSHA string) (bool, error) {
+		return false, nil
+	}
+	runClaudeProbeFn = func(path string, arg string) (string, error) {
+		return "Claude Code 2.1.3", nil
+	}
+	applyClaudeGlibcCompatPatchFn = func(path string, opts exePatchOptions, log io.Writer, dryRun bool, outcome *patchOutcome) (*patchOutcome, bool, error) {
+		if outcome == nil {
+			outcome = &patchOutcome{}
+		}
+		outcome.SourcePath = path
+		outcome.TargetPath = mirrorPath
+		outcome.LaunchArgsPrefix = []string{mirrorPath}
+		outcome.Applied = false
+		return outcome, true, nil
+	}
+
+	outcome, err := maybePatchExecutable([]string{"claude"}, exePatchOptions{
+		enabledFlag: true,
+		glibcCompat: true,
+	}, filepath.Join(dir, "config.json"), io.Discard)
+	if err != nil {
+		t.Fatalf("maybePatchExecutable error: %v", err)
+	}
+	if outcome == nil || outcome.TargetPath != mirrorPath {
+		t.Fatalf("expected mirror outcome, got %#v", outcome)
+	}
+	gotMirror, err := os.ReadFile(mirrorPath)
+	if err != nil {
+		t.Fatalf("read mirror after restore: %v", err)
+	}
+	if string(gotMirror) != string(original) {
+		t.Fatalf("expected mirror to be restored on non-yolo launch")
+	}
+	if _, err := os.Stat(originalBackupPath(mirrorPath)); !os.IsNotExist(err) {
+		t.Fatalf("expected mirror backup to be removed after restore, got err=%v", err)
+	}
+	gotSource, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read source after restore: %v", err)
+	}
+	if string(gotSource) != string(original) {
+		t.Fatalf("expected source to remain unchanged")
+	}
+}
+
+func TestMaybePatchExecutablePatchesMirrorInsteadOfSharedSourceOnEL7(t *testing.T) {
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	dir := t.TempDir()
+	setStubPath(t, dir)
+	glibcCompatHostEligibleFn = func() bool { return true }
+
+	sourcePath := filepath.Join(dir, "claude")
+	if runtime.GOOS == "windows" {
+		sourcePath += ".cmd"
+	}
+	original := []byte("function FI(H){if(H===\"policySettings\"){let L=sqA();if(L&&Object.keys(L).length>0)return L}let $=L4(H);if(!$)return null;let{settings:A}=DmA($);return A}")
+	if err := os.WriteFile(sourcePath, original, 0o700); err != nil {
+		t.Fatalf("write source claude: %v", err)
+	}
+	mirrorDir := filepath.Join(dir, "mirror")
+	if err := os.MkdirAll(mirrorDir, 0o755); err != nil {
+		t.Fatalf("mkdir mirror dir: %v", err)
+	}
+	mirrorPath := filepath.Join(mirrorDir, filepath.Base(sourcePath))
+	if err := os.WriteFile(mirrorPath, original, 0o700); err != nil {
+		t.Fatalf("write mirror claude: %v", err)
+	}
+
+	runClaudeProbeFn = func(path string, arg string) (string, error) {
+		return "Claude Code 1.2.3", nil
+	}
+	applyClaudeGlibcCompatPatchFn = func(path string, opts exePatchOptions, log io.Writer, dryRun bool, outcome *patchOutcome) (*patchOutcome, bool, error) {
+		if outcome == nil {
+			outcome = &patchOutcome{}
+		}
+		outcome.SourcePath = path
+		outcome.TargetPath = mirrorPath
+		outcome.LaunchArgsPrefix = []string{mirrorPath}
+		return outcome, true, nil
+	}
+
+	outcome, err := maybePatchExecutable(yoloClaudeArgs("claude"), exePatchOptions{
+		enabledFlag:    true,
+		policySettings: true,
+		glibcCompat:    true,
+	}, filepath.Join(dir, "config.json"), io.Discard)
+	if err != nil {
+		t.Fatalf("maybePatchExecutable error: %v", err)
+	}
+	if outcome == nil || outcome.TargetPath != mirrorPath {
+		t.Fatalf("expected mirror patch outcome, got %#v", outcome)
+	}
+
+	gotSource, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read source claude: %v", err)
+	}
+	if string(gotSource) != string(original) {
+		t.Fatalf("expected shared source to remain unchanged")
+	}
+	gotMirror, err := os.ReadFile(mirrorPath)
+	if err != nil {
+		t.Fatalf("read mirror claude: %v", err)
+	}
+	if string(gotMirror) == string(original) {
+		t.Fatalf("expected mirror executable to be patched")
+	}
+}
+
+func TestMaybePatchExecutableSkipUsesCompatLaunchPrefixOnEL7(t *testing.T) {
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	dir := t.TempDir()
+	setStubPath(t, dir)
+	glibcCompatHostEligibleFn = func() bool { return true }
+	shouldSkipPatchFailureFn = func(configPath string, proxyVersion string, claudeVersion string, claudeSHA string) (bool, error) {
+		return true, nil
+	}
+
+	path := writeClaudeVersionStub(t, dir, "Claude Code 1.2.3")
+	mirrorPath := filepath.Join(dir, "mirror", "claude")
+	if runtime.GOOS == "windows" {
+		mirrorPath += ".cmd"
+	}
+	if err := os.MkdirAll(filepath.Dir(mirrorPath), 0o755); err != nil {
+		t.Fatalf("mkdir mirror: %v", err)
+	}
+	if err := os.WriteFile(mirrorPath, []byte("mirror"), 0o700); err != nil {
+		t.Fatalf("write mirror: %v", err)
+	}
+	applyClaudeGlibcCompatPatchFn = func(path string, opts exePatchOptions, log io.Writer, dryRun bool, outcome *patchOutcome) (*patchOutcome, bool, error) {
+		if outcome == nil {
+			outcome = &patchOutcome{}
+		}
+		outcome.SourcePath = path
+		outcome.TargetPath = mirrorPath
+		outcome.LaunchArgsPrefix = []string{mirrorPath}
+		return outcome, true, nil
+	}
+
+	outcome, err := maybePatchExecutable([]string{"claude"}, exePatchOptions{
+		enabledFlag: true,
+		glibcCompat: true,
+	}, filepath.Join(dir, "config.json"), io.Discard)
+	if err != nil {
+		t.Fatalf("maybePatchExecutable error: %v", err)
+	}
+	if outcome == nil {
+		t.Fatalf("expected non-nil outcome")
+	}
+	if outcome.SourcePath != path {
+		t.Fatalf("expected source path %q, got %q", path, outcome.SourcePath)
+	}
+	if outcome.TargetPath != mirrorPath {
+		t.Fatalf("expected target path %q, got %q", mirrorPath, outcome.TargetPath)
+	}
+	if len(outcome.LaunchArgsPrefix) != 1 || outcome.LaunchArgsPrefix[0] != mirrorPath {
+		t.Fatalf("unexpected launch prefix: %#v", outcome.LaunchArgsPrefix)
 	}
 }

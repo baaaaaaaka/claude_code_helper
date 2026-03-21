@@ -62,23 +62,27 @@ func TestConfigPatchFailureOps(t *testing.T) {
 	cfg := Config{Version: CurrentVersion}
 	entry := PatchFailure{
 		ProxyVersion:  "v1.2.3",
+		HostID:        "host-a",
 		ClaudeVersion: "2.1.19",
 		ClaudeSHA256:  "abc",
 		ClaudePath:    "/tmp/claude",
 	}
 
-	if cfg.HasPatchFailure("v1.2.3", "2.1.19", "") {
+	if cfg.HasPatchFailure("host-a", "v1.2.3", "2.1.19", "") {
 		t.Fatalf("expected no patch failure initially")
 	}
 	cfg.UpsertPatchFailure(entry)
-	if !cfg.HasPatchFailure("v1.2.3", "2.1.19", "") {
+	if !cfg.HasPatchFailure("host-a", "v1.2.3", "2.1.19", "") {
 		t.Fatalf("expected patch failure by version")
 	}
-	if !cfg.HasPatchFailure("v1.2.3", "", "abc") {
+	if !cfg.HasPatchFailure("host-a", "v1.2.3", "", "abc") {
 		t.Fatalf("expected patch failure by sha fallback")
 	}
-	if cfg.HasPatchFailure("v1.2.4", "2.1.19", "") {
+	if cfg.HasPatchFailure("host-a", "v1.2.4", "2.1.19", "") {
 		t.Fatalf("expected mismatch by proxy version")
+	}
+	if cfg.HasPatchFailure("host-b", "v1.2.3", "2.1.19", "") {
+		t.Fatalf("expected mismatch by host id")
 	}
 
 	updated := entry
@@ -113,9 +117,16 @@ func TestConfigProfileAndPatchFailureEdges(t *testing.T) {
 	})
 
 	t.Run("HasPatchFailure requires proxy version", func(t *testing.T) {
-		cfg := Config{PatchFailures: []PatchFailure{{ProxyVersion: "v1", ClaudeVersion: "2.0"}}}
-		if cfg.HasPatchFailure("", "2.0", "") {
+		cfg := Config{PatchFailures: []PatchFailure{{ProxyVersion: "v1", HostID: "host-a", ClaudeVersion: "2.0"}}}
+		if cfg.HasPatchFailure("host-a", "", "2.0", "") {
 			t.Fatalf("expected empty proxy version to return false")
+		}
+	})
+
+	t.Run("HasPatchFailure treats legacy empty host id as current host", func(t *testing.T) {
+		cfg := Config{PatchFailures: []PatchFailure{{ProxyVersion: "v1", ClaudeVersion: "2.0"}}}
+		if !cfg.HasPatchFailure("host-a", "v1", "2.0", "") {
+			t.Fatalf("expected legacy empty host id entry to match current host")
 		}
 	})
 
@@ -161,15 +172,23 @@ func TestConfigProfileAndPatchFailureEdges(t *testing.T) {
 	})
 
 	t.Run("samePatchFailureKey matches sha and path", func(t *testing.T) {
-		a := PatchFailure{ProxyVersion: "v1", ClaudeSHA256: "ABC"}
-		b := PatchFailure{ProxyVersion: "v1", ClaudeSHA256: "abc"}
+		a := PatchFailure{ProxyVersion: "v1", HostID: "host-a", ClaudeSHA256: "ABC"}
+		b := PatchFailure{ProxyVersion: "v1", HostID: "host-a", ClaudeSHA256: "abc"}
 		if !samePatchFailureKey(a, b) {
 			t.Fatalf("expected sha to match case-insensitively")
 		}
-		a = PatchFailure{ProxyVersion: "v1", ClaudePath: "/tmp/claude"}
-		b = PatchFailure{ProxyVersion: "v1", ClaudePath: "/tmp/claude"}
+		a = PatchFailure{ProxyVersion: "v1", HostID: "host-a", ClaudePath: "/tmp/claude"}
+		b = PatchFailure{ProxyVersion: "v1", HostID: "host-a", ClaudePath: "/tmp/claude"}
 		if !samePatchFailureKey(a, b) {
 			t.Fatalf("expected path match when versions missing")
+		}
+	})
+
+	t.Run("samePatchFailureKey matches legacy empty host id", func(t *testing.T) {
+		a := PatchFailure{ProxyVersion: "v1", ClaudeVersion: "2.0"}
+		b := PatchFailure{ProxyVersion: "v1", HostID: "host-a", ClaudeVersion: "2.0"}
+		if !samePatchFailureKey(a, b) {
+			t.Fatalf("expected empty host id to match legacy entry")
 		}
 	})
 }

@@ -134,6 +134,37 @@ func TestRunTargetWithFallbackDisablesYolo(t *testing.T) {
 	}
 }
 
+func TestRunTargetWithFallbackUsesLaunchArgsPrefix(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script test on windows")
+	}
+	dir := t.TempDir()
+	outFile := filepath.Join(dir, "args.txt")
+	sourceScript := filepath.Join(dir, "source.sh")
+	if err := os.WriteFile(sourceScript, []byte("#!/bin/sh\nexit 9\n"), 0o700); err != nil {
+		t.Fatalf("write source script: %v", err)
+	}
+	launchScript := filepath.Join(dir, "launch.sh")
+	content := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"" + outFile + "\"\n"
+	if err := os.WriteFile(launchScript, []byte(content), 0o700); err != nil {
+		t.Fatalf("write launch script: %v", err)
+	}
+
+	outcome := &patchOutcome{
+		LaunchArgsPrefix: []string{launchScript, "--shim"},
+	}
+	if err := runTargetWithFallbackWithOptions(context.Background(), []string{sourceScript, "--resume", "abc"}, "", nil, outcome, nil, runTargetOptions{UseProxy: false}); err != nil {
+		t.Fatalf("runTargetWithFallbackWithOptions error: %v", err)
+	}
+	got, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read args file: %v", err)
+	}
+	if string(got) != "--shim\n--resume\nabc\n" {
+		t.Fatalf("unexpected launch args: %q", string(got))
+	}
+}
+
 func TestLimitedBufferWrite(t *testing.T) {
 	buf := &limitedBuffer{max: 5}
 	if _, err := buf.Write([]byte("abc")); err != nil {

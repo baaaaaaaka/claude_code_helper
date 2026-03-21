@@ -325,7 +325,8 @@ func runTargetWithFallbackWithOptions(
 		attempt++
 		stdoutBuf := &limitedBuffer{max: maxOutputCaptureBytes}
 		stderrBuf := &limitedBuffer{max: maxOutputCaptureBytes}
-		err := runTargetOnceWithOptions(ctx, cmdArgs, proxyURL, healthCheck, fatalCh, stdoutBuf, stderrBuf, opts)
+		launchArgs := commandArgsForOutcome(patchOutcome, cmdArgs)
+		err := runTargetOnceWithOptions(ctx, launchArgs, proxyURL, healthCheck, fatalCh, stdoutBuf, stderrBuf, opts)
 		if err == nil {
 			return nil
 		}

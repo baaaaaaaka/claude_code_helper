@@ -3,14 +3,37 @@ package cli
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+func writeGlibcCompatRuntimeFixture(t *testing.T, root string, loaderData string, libcData string) glibcCompatLayout {
+	t.Helper()
+	glibcRoot := filepath.Join(root, "glibc-2.31")
+	libDir := filepath.Join(glibcRoot, "lib")
+	if err := os.MkdirAll(libDir, 0o755); err != nil {
+		t.Fatalf("mkdir glibc lib: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(libDir, "ld-linux-x86-64.so.2"), []byte(loaderData), 0o755); err != nil {
+		t.Fatalf("write loader: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(libDir, "libc.so.6"), []byte(libcData), 0o644); err != nil {
+		t.Fatalf("write libc: %v", err)
+	}
+	layout, err := resolveGlibcCompatLayout(root)
+	if err != nil {
+		t.Fatalf("resolveGlibcCompatLayout error: %v", err)
+	}
+	return layout
+}
 
 func TestResolveGlibcCompatLayout(t *testing.T) {
 	t.Run("direct root layout", func(t *testing.T) {
@@ -66,6 +89,60 @@ func TestResolveGlibcCompatLayoutMissing(t *testing.T) {
 	}
 }
 
+func TestResolveStableCacheBaseFallsBackToTempDir(t *testing.T) {
+	prevUserCacheDirFn := userCacheDirFn
+	prevUserHomeDirFn := userHomeDirFn
+	prevTempDirFn := tempDirFn
+	userCacheDirFn = func() (string, error) { return "", errors.New("no user cache") }
+	userHomeDirFn = func() (string, error) { return "", errors.New("no home") }
+	tempDirFn = func() string { return "/tmp/claude-proxy-fallback" }
+	t.Cleanup(func() {
+		userCacheDirFn = prevUserCacheDirFn
+		userHomeDirFn = prevUserHomeDirFn
+		tempDirFn = prevTempDirFn
+	})
+
+	got, err := resolveStableCacheBase()
+	if err != nil {
+		t.Fatalf("resolveStableCacheBase error: %v", err)
+	}
+	if got != "/tmp/claude-proxy-fallback" {
+		t.Fatalf("expected temp-dir fallback, got %q", got)
+	}
+}
+
+func TestResolveHostIDUsesEnvOverride(t *testing.T) {
+	t.Setenv(claudeProxyHostIDEnv, "host id/with spaces")
+	if got := resolveHostID(); got != "host_id_with_spaces" {
+		t.Fatalf("unexpected host id: %q", got)
+	}
+}
+
+func TestLinuxOSReleaseFieldAndEL7HostDetection(t *testing.T) {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		t.Skip("host detection is only meaningful on linux/amd64")
+	}
+	prevReadOSReleaseFn := readLinuxOSReleaseFn
+	t.Cleanup(func() { readLinuxOSReleaseFn = prevReadOSReleaseFn })
+
+	readLinuxOSReleaseFn = func() ([]byte, error) {
+		return []byte("ID=centos\nVERSION_ID=\"7\"\nID_LIKE=\"rhel fedora\"\n"), nil
+	}
+	if got := linuxOSReleaseField("ID"); got != "centos" {
+		t.Fatalf("unexpected ID field: %q", got)
+	}
+	if !isEL7GlibcCompatHost() {
+		t.Fatalf("expected EL7 host detection to match centos 7")
+	}
+
+	readLinuxOSReleaseFn = func() ([]byte, error) {
+		return []byte("ID=rocky\nVERSION_ID=\"8.10\"\nID_LIKE=\"rhel centos fedora\"\n"), nil
+	}
+	if isEL7GlibcCompatHost() {
+		t.Fatalf("did not expect rocky 8 host to match EL7 compat auto mode")
+	}
+}
+
 func TestIsMissingGlibcSymbolError(t *testing.T) {
 	if !isMissingGlibcSymbolError("/tmp/claude: /lib64/libc.so.6: version `GLIBC_2.25' not found") {
 		t.Fatalf("expected GLIBC missing symbol output to be detected")
@@ -109,6 +186,24 @@ func TestResolveGlibcCompatRepoAndTag(t *testing.T) {
 		t.Setenv(glibcCompatTagEnv, "")
 		if got := resolveGlibcCompatTag(); got != glibcCompatDefaultTag {
 			t.Fatalf("expected default tag %q, got %q", glibcCompatDefaultTag, got)
+		}
+	})
+
+	t.Run("asset and release url", func(t *testing.T) {
+		asset, err := glibcCompatAssetName("linux", "amd64")
+		if err != nil {
+			t.Fatalf("glibcCompatAssetName error: %v", err)
+		}
+		if asset != "glibc-2.31-centos7-runtime-x86_64.tar.xz" {
+			t.Fatalf("unexpected asset name: %q", asset)
+		}
+		if _, err := glibcCompatAssetName("darwin", "arm64"); err == nil {
+			t.Fatalf("expected unsupported platform error")
+		}
+		gotURL := glibcCompatReleaseURL("owner/repo", "tag", asset)
+		wantURL := "https://github.com/owner/repo/releases/download/tag/" + asset
+		if gotURL != wantURL {
+			t.Fatalf("unexpected release url: %q", gotURL)
 		}
 	})
 }
@@ -218,5 +313,391 @@ func TestExtractGlibcCompatBundleUsesTarCommand(t *testing.T) {
 	text := string(got)
 	if !strings.Contains(text, "-xJf") || !strings.Contains(text, bundlePath) || !strings.Contains(text, runtimeRoot) {
 		t.Fatalf("unexpected tar args: %s", text)
+	}
+}
+
+func TestEnsureDefaultGlibcCompatRuntimeUsesSeededBundle(t *testing.T) {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		t.Skip("automatic glibc compat runtime only applies on linux/amd64")
+	}
+	cacheBase := t.TempDir()
+	stubDir := t.TempDir()
+	tag := "glibc-compat-test"
+	t.Setenv("XDG_CACHE_HOME", cacheBase)
+	t.Setenv(claudeProxyHostIDEnv, "host-a")
+	t.Setenv(glibcCompatTagEnv, tag)
+
+	hostRoot, _, err := resolveClaudeProxyHostRoot()
+	if err != nil {
+		t.Fatalf("resolveClaudeProxyHostRoot error: %v", err)
+	}
+	cacheRoot := filepath.Join(hostRoot, "glibc-compat", sanitizePathComponent(tag))
+	asset, err := glibcCompatAssetName(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("glibcCompatAssetName error: %v", err)
+	}
+	bundlePayload := []byte("seeded bundle")
+	bundlePath := filepath.Join(cacheRoot, asset)
+	checksumPath := bundlePath + ".sha256"
+	if err := os.MkdirAll(cacheRoot, 0o755); err != nil {
+		t.Fatalf("mkdir cache root: %v", err)
+	}
+	if err := os.WriteFile(bundlePath, bundlePayload, 0o644); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	sum := sha256.Sum256(bundlePayload)
+	if err := os.WriteFile(checksumPath, []byte(hex.EncodeToString(sum[:])+"  "+asset+"\n"), 0o644); err != nil {
+		t.Fatalf("write checksum: %v", err)
+	}
+
+	recordPath := filepath.Join(stubDir, "tar.args")
+	unix := "#!/bin/sh\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"-C\" ]; then\n    out=\"$2\"\n    shift 2\n    continue\n  fi\n  shift\n done\nprintf '%s\\n' \"$@\" > \"" + recordPath + "\"\nmkdir -p \"$out/glibc-2.31/lib\"\nprintf loader > \"$out/glibc-2.31/lib/ld-linux-x86-64.so.2\"\nprintf libc > \"$out/glibc-2.31/lib/libc.so.6\"\nexit 0\n"
+	win := "@echo off\r\nexit /b 1\r\n"
+	writeStub(t, stubDir, "tar", unix, win)
+	setStubPath(t, stubDir)
+
+	runtimeRoot, err := ensureDefaultGlibcCompatRuntime(io.Discard)
+	if err != nil {
+		t.Fatalf("ensureDefaultGlibcCompatRuntime error: %v", err)
+	}
+	layout, err := resolveGlibcCompatLayout(runtimeRoot)
+	if err != nil {
+		t.Fatalf("resolveGlibcCompatLayout error: %v", err)
+	}
+	if layout.RootDir == "" || !strings.HasPrefix(runtimeRoot, cacheRoot) {
+		t.Fatalf("unexpected runtime root: %q", runtimeRoot)
+	}
+
+	secondRoot, err := ensureDefaultGlibcCompatRuntime(io.Discard)
+	if err != nil {
+		t.Fatalf("second ensureDefaultGlibcCompatRuntime error: %v", err)
+	}
+	if secondRoot != runtimeRoot {
+		t.Fatalf("expected cached runtime root %q, got %q", runtimeRoot, secondRoot)
+	}
+}
+
+func TestGlibcCompatLayoutFingerprintChangesWhenRuntimeChanges(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "runtime")
+	layout := writeGlibcCompatRuntimeFixture(t, root, "loader-a", "libc-a")
+
+	first, err := glibcCompatLayoutFingerprint(layout)
+	if err != nil {
+		t.Fatalf("glibcCompatLayoutFingerprint error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(layout.LibDir, "libc.so.6"), []byte("libc-b"), 0o644); err != nil {
+		t.Fatalf("rewrite libc: %v", err)
+	}
+	second, err := glibcCompatLayoutFingerprint(layout)
+	if err != nil {
+		t.Fatalf("glibcCompatLayoutFingerprint second error: %v", err)
+	}
+	if first == second {
+		t.Fatalf("expected fingerprint to change when runtime contents change")
+	}
+}
+
+func TestInstallPreparedGlibcCompatRuntimeReplacesInvalidCache(t *testing.T) {
+	cacheRoot := t.TempDir()
+	runtimeRoot := filepath.Join(cacheRoot, "runtime")
+	if err := os.MkdirAll(filepath.Join(runtimeRoot, "broken"), 0o755); err != nil {
+		t.Fatalf("mkdir broken runtime: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeRoot, "broken", "stale.txt"), []byte("stale"), 0o644); err != nil {
+		t.Fatalf("write stale runtime marker: %v", err)
+	}
+
+	stageDir := filepath.Join(cacheRoot, "stage")
+	writeGlibcCompatRuntimeFixture(t, stageDir, "loader", "libc")
+
+	if err := installPreparedGlibcCompatRuntime(stageDir, runtimeRoot); err != nil {
+		t.Fatalf("installPreparedGlibcCompatRuntime error: %v", err)
+	}
+	layout, err := resolveGlibcCompatLayout(runtimeRoot)
+	if err != nil {
+		t.Fatalf("resolve installed runtime: %v", err)
+	}
+	if layout.RootDir == "" {
+		t.Fatalf("expected installed runtime root")
+	}
+	if _, err := os.Stat(filepath.Join(runtimeRoot, "broken", "stale.txt")); !os.IsNotExist(err) {
+		t.Fatalf("expected invalid runtime contents to be replaced, got err=%v", err)
+	}
+	if _, err := os.Stat(stageDir); !os.IsNotExist(err) {
+		t.Fatalf("expected stage dir to be moved into place, got err=%v", err)
+	}
+}
+
+func TestPrepareGlibcCompatMirrorUsesHostScopedCopyAndPrunes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script test on windows")
+	}
+	cacheRoot := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv(claudeProxyHostIDEnv, "host-a")
+
+	layoutRoot := filepath.Join(t.TempDir(), "runtime")
+	glibcRoot := filepath.Join(layoutRoot, "glibc-2.31")
+	libDir := filepath.Join(glibcRoot, "lib")
+	if err := os.MkdirAll(libDir, 0o755); err != nil {
+		t.Fatalf("mkdir glibc lib: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(libDir, "ld-linux-x86-64.so.2"), []byte("loader"), 0o755); err != nil {
+		t.Fatalf("write loader: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(libDir, "libc.so.6"), []byte("libc"), 0o644); err != nil {
+		t.Fatalf("write libc: %v", err)
+	}
+	layout, err := resolveGlibcCompatLayout(layoutRoot)
+	if err != nil {
+		t.Fatalf("resolveGlibcCompatLayout error: %v", err)
+	}
+
+	sourceDir := t.TempDir()
+	sourcePath := filepath.Join(sourceDir, "claude")
+	sourceData := []byte("claude-binary")
+	if err := os.WriteFile(sourcePath, sourceData, 0o700); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	stubDir := t.TempDir()
+	recordPath := filepath.Join(stubDir, "patchelf.args")
+	unix := "#!/bin/sh\nif [ \"$1\" = \"--print-interpreter\" ]; then\n  echo /lib64/ld-linux-x86-64.so.2\n  exit 0\nfi\nif [ \"$1\" = \"--print-rpath\" ]; then\n  echo /usr/lib64\n  exit 0\nfi\nprintf '%s\n' \"$@\" > \"" + recordPath + "\"\nexit 0\n"
+	win := "@echo off\r\nif \"%~1\"==\"--print-interpreter\" (\r\n  echo /lib64/ld-linux-x86-64.so.2\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"--print-rpath\" (\r\n  echo /usr/lib64\r\n  exit /b 0\r\n)\r\nbreak> \"" + recordPath + "\"\r\n:loop\r\nif \"%~1\"==\"\" exit /b 0\r\necho %~1>> \"" + recordPath + "\"\r\nshift\r\ngoto loop\r\n"
+	writeStub(t, stubDir, patchelfBinaryName, unix, win)
+	setStubPath(t, stubDir)
+
+	hostRoot, _, err := resolveClaudeProxyHostRoot()
+	if err != nil {
+		t.Fatalf("resolveClaudeProxyHostRoot error: %v", err)
+	}
+	claudeRoot := filepath.Join(hostRoot, "claude")
+	oldA := filepath.Join(claudeRoot, "old-a")
+	oldB := filepath.Join(claudeRoot, "old-b")
+	if err := os.MkdirAll(oldA, 0o755); err != nil {
+		t.Fatalf("mkdir old-a: %v", err)
+	}
+	if err := os.MkdirAll(oldB, 0o755); err != nil {
+		t.Fatalf("mkdir old-b: %v", err)
+	}
+	oldTime := time.Now().Add(-2 * time.Hour)
+	newerTime := time.Now().Add(-1 * time.Hour)
+	if err := os.Chtimes(oldA, oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes old-a: %v", err)
+	}
+	if err := os.Chtimes(oldB, newerTime, newerTime); err != nil {
+		t.Fatalf("chtimes old-b: %v", err)
+	}
+
+	outcome, applied, err := prepareGlibcCompatMirror(sourcePath, layout, io.Discard, &patchOutcome{SourcePath: sourcePath})
+	if err != nil {
+		t.Fatalf("prepareGlibcCompatMirror error: %v", err)
+	}
+	if !applied {
+		t.Fatalf("expected compat mirror to be reported as applied")
+	}
+	if outcome == nil {
+		t.Fatalf("expected non-nil outcome")
+	}
+	if outcome.Applied {
+		t.Fatalf("expected compat mirror creation not to mark outcome as byte-patched")
+	}
+	if len(outcome.LaunchArgsPrefix) != 1 || outcome.LaunchArgsPrefix[0] != outcome.TargetPath {
+		t.Fatalf("unexpected launch prefix: %#v", outcome)
+	}
+	if !strings.HasPrefix(outcome.TargetPath, claudeRoot) {
+		t.Fatalf("expected mirror under host root %q, got %q", claudeRoot, outcome.TargetPath)
+	}
+	gotSource, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read source: %v", err)
+	}
+	if string(gotSource) != string(sourceData) {
+		t.Fatalf("expected source binary to remain unchanged")
+	}
+	if _, err := os.Stat(oldA); !os.IsNotExist(err) {
+		t.Fatalf("expected oldest mirror to be pruned, got err=%v", err)
+	}
+	if _, err := os.Stat(oldB); err != nil {
+		t.Fatalf("expected newer mirror to remain: %v", err)
+	}
+	recordedArgs, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatalf("read patchelf record: %v", err)
+	}
+	if !strings.Contains(string(recordedArgs), "--set-interpreter") {
+		t.Fatalf("expected patchelf invocation, got %q", string(recordedArgs))
+	}
+}
+
+func TestPrepareGlibcCompatMirrorUsesDistinctCacheKeysPerRuntime(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script test on windows")
+	}
+	cacheRoot := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv(claudeProxyHostIDEnv, "host-a")
+
+	layoutA := writeGlibcCompatRuntimeFixture(t, filepath.Join(t.TempDir(), "runtime-a"), "loader-a", "libc-a")
+	layoutB := writeGlibcCompatRuntimeFixture(t, filepath.Join(t.TempDir(), "runtime-b"), "loader-b", "libc-b")
+
+	sourceDir := t.TempDir()
+	sourcePath := filepath.Join(sourceDir, "claude")
+	if err := os.WriteFile(sourcePath, []byte("claude-binary"), 0o700); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	stubDir := t.TempDir()
+	recordPath := filepath.Join(stubDir, "patchelf.args")
+	unix := "#!/bin/sh\nif [ \"$1\" = \"--print-interpreter\" ]; then\n  echo /lib64/ld-linux-x86-64.so.2\n  exit 0\nfi\nif [ \"$1\" = \"--print-rpath\" ]; then\n  echo /usr/lib64\n  exit 0\nfi\nprintf '%s\n' \"$@\" > \"" + recordPath + "\"\nexit 0\n"
+	win := "@echo off\r\nif \"%~1\"==\"--print-interpreter\" (\r\n  echo /lib64/ld-linux-x86-64.so.2\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"--print-rpath\" (\r\n  echo /usr/lib64\r\n  exit /b 0\r\n)\r\nbreak> \"" + recordPath + "\"\r\n:loop\r\nif \"%~1\"==\"\" exit /b 0\r\necho %~1>> \"" + recordPath + "\"\r\nshift\r\ngoto loop\r\n"
+	writeStub(t, stubDir, patchelfBinaryName, unix, win)
+	setStubPath(t, stubDir)
+
+	outcomeA, appliedA, err := prepareGlibcCompatMirror(sourcePath, layoutA, io.Discard, &patchOutcome{SourcePath: sourcePath})
+	if err != nil {
+		t.Fatalf("prepareGlibcCompatMirror layoutA error: %v", err)
+	}
+	outcomeB, appliedB, err := prepareGlibcCompatMirror(sourcePath, layoutB, io.Discard, &patchOutcome{SourcePath: sourcePath})
+	if err != nil {
+		t.Fatalf("prepareGlibcCompatMirror layoutB error: %v", err)
+	}
+	if !appliedA || !appliedB {
+		t.Fatalf("expected both runtime-specific mirrors to be created, got appliedA=%v appliedB=%v", appliedA, appliedB)
+	}
+	if outcomeA == nil || outcomeB == nil {
+		t.Fatalf("expected non-nil outcomes, got %#v %#v", outcomeA, outcomeB)
+	}
+	if outcomeA.TargetPath == outcomeB.TargetPath {
+		t.Fatalf("expected distinct mirror paths for different runtimes")
+	}
+	if _, err := os.Stat(outcomeA.TargetPath); err != nil {
+		t.Fatalf("expected first mirror to exist: %v", err)
+	}
+	if _, err := os.Stat(outcomeB.TargetPath); err != nil {
+		t.Fatalf("expected second mirror to exist: %v", err)
+	}
+}
+
+func TestApplyClaudeGlibcCompatPatchRescuesNonEL7Hosts(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip glibc compat flow on windows")
+	}
+	glibcCompatHostEligibleFn = func() bool { return false }
+	t.Cleanup(func() { glibcCompatHostEligibleFn = isEL7GlibcCompatHost })
+
+	cacheRoot := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv(claudeProxyHostIDEnv, "host-a")
+
+	dir := t.TempDir()
+	root := filepath.Join(dir, "runtime")
+	layout := writeGlibcCompatRuntimeFixture(t, root, "loader", "libc")
+
+	sourcePath := filepath.Join(dir, "claude")
+	if err := os.WriteFile(sourcePath, []byte("claude"), 0o700); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	stubDir := t.TempDir()
+	recordPath := filepath.Join(stubDir, "patchelf.args")
+	unix := "#!/bin/sh\nif [ \"$1\" = \"--print-interpreter\" ]; then\n  echo /lib64/ld-linux-x86-64.so.2\n  exit 0\nfi\nif [ \"$1\" = \"--print-rpath\" ]; then\n  echo /usr/lib64\n  exit 0\nfi\nprintf '%s\n' \"$@\" > \"" + recordPath + "\"\nexit 0\n"
+	win := "@echo off\r\nif \"%~1\"==\"--print-interpreter\" (\r\n  echo /lib64/ld-linux-x86-64.so.2\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"--print-rpath\" (\r\n  echo /usr/lib64\r\n  exit /b 0\r\n)\r\nbreak> \"" + recordPath + "\"\r\n:loop\r\nif \"%~1\"==\"\" exit /b 0\r\necho %~1>> \"" + recordPath + "\"\r\nshift\r\ngoto loop\r\n"
+	writeStub(t, stubDir, patchelfBinaryName, unix, win)
+	setStubPath(t, stubDir)
+
+	outcome, applied, err := applyClaudeGlibcCompatPatch(sourcePath, exePatchOptions{
+		enabledFlag:     true,
+		glibcCompat:     true,
+		glibcCompatRoot: layout.RootDir,
+	}, io.Discard, false, &patchOutcome{SourcePath: sourcePath, TargetPath: sourcePath})
+	if err != nil {
+		t.Fatalf("applyClaudeGlibcCompatPatch error: %v", err)
+	}
+	if !applied {
+		t.Fatalf("expected compat rescue to apply on non-EL7 host after probe failure")
+	}
+	if outcome == nil {
+		t.Fatalf("expected non-nil outcome")
+	}
+	if outcome.TargetPath == sourcePath {
+		t.Fatalf("expected host-local mirror, got source path %q", outcome.TargetPath)
+	}
+	if len(outcome.LaunchArgsPrefix) != 1 || outcome.LaunchArgsPrefix[0] != outcome.TargetPath {
+		t.Fatalf("unexpected launch prefix: %#v", outcome.LaunchArgsPrefix)
+	}
+	if _, err := os.Stat(outcome.TargetPath); err != nil {
+		t.Fatalf("expected mirror to exist: %v", err)
+	}
+}
+
+func TestApplyClaudeGlibcCompatPatchFallsBackToWrapperWithoutPatchelf(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script test on windows")
+	}
+	glibcCompatHostEligibleFn = func() bool { return true }
+	t.Cleanup(func() { glibcCompatHostEligibleFn = isEL7GlibcCompatHost })
+	cacheRoot := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv(claudeProxyHostIDEnv, "host-a")
+
+	dir := t.TempDir()
+	root := filepath.Join(dir, "runtime")
+	glibcRoot := filepath.Join(root, "glibc-2.31")
+	libDir := filepath.Join(glibcRoot, "lib")
+	if err := os.MkdirAll(libDir, 0o755); err != nil {
+		t.Fatalf("mkdir lib: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(libDir, "ld-linux-x86-64.so.2"), []byte("loader"), 0o755); err != nil {
+		t.Fatalf("write loader: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(libDir, "libc.so.6"), []byte("libc"), 0o644); err != nil {
+		t.Fatalf("write libc: %v", err)
+	}
+	wrapperPath := filepath.Join(root, "run-with-glibc-2.31.sh")
+	if err := os.WriteFile(wrapperPath, []byte("#!/bin/sh\nexec \"$@\"\n"), 0o755); err != nil {
+		t.Fatalf("write wrapper: %v", err)
+	}
+
+	sourcePath := filepath.Join(dir, "claude")
+	if err := os.WriteFile(sourcePath, []byte("claude"), 0o700); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	emptyPath := filepath.Join(dir, "empty-bin")
+	if err := os.MkdirAll(emptyPath, 0o755); err != nil {
+		t.Fatalf("mkdir empty bin: %v", err)
+	}
+	t.Setenv("PATH", emptyPath)
+
+	outcome, applied, err := applyClaudeGlibcCompatPatch(sourcePath, exePatchOptions{
+		enabledFlag:     true,
+		glibcCompat:     true,
+		glibcCompatRoot: root,
+	}, io.Discard, false, &patchOutcome{SourcePath: sourcePath, TargetPath: sourcePath})
+	if err != nil {
+		t.Fatalf("applyClaudeGlibcCompatPatch error: %v", err)
+	}
+	if !applied {
+		t.Fatalf("expected wrapper fallback to report applied")
+	}
+	if outcome == nil {
+		t.Fatalf("expected non-nil outcome")
+	}
+	if outcome.TargetPath == sourcePath {
+		t.Fatalf("expected wrapper fallback to use a host-local mirror, got source path %q", outcome.TargetPath)
+	}
+	if len(outcome.LaunchArgsPrefix) != 2 || outcome.LaunchArgsPrefix[0] != wrapperPath || outcome.LaunchArgsPrefix[1] != outcome.TargetPath {
+		t.Fatalf("unexpected launch prefix: %#v", outcome.LaunchArgsPrefix)
+	}
+	if _, err := os.Stat(outcome.TargetPath); err != nil {
+		t.Fatalf("expected wrapper mirror to exist: %v", err)
+	}
+	gotSource, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read source: %v", err)
+	}
+	if string(gotSource) != "claude" {
+		t.Fatalf("expected source to remain unchanged")
 	}
 }

@@ -15,6 +15,7 @@ type Config struct {
 
 type PatchFailure struct {
 	ProxyVersion  string    `json:"proxyVersion"`
+	HostID        string    `json:"hostId,omitempty"`
 	ClaudeVersion string    `json:"claudeVersion,omitempty"`
 	ClaudePath    string    `json:"claudePath,omitempty"`
 	ClaudeSHA256  string    `json:"claudeSha256,omitempty"`

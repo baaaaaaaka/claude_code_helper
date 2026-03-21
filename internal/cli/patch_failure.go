@@ -102,12 +102,38 @@ func runClaudeProbe(path string, arg string) (string, error) {
 	return runClaudeProbeWithContext(context.Background(), path, arg, 15*time.Second)
 }
 
+func runClaudeProbeArgs(args []string, arg string) (string, error) {
+	return runClaudeProbeArgsWithContext(context.Background(), args, arg, 15*time.Second)
+}
+
 func runClaudeProbeWithContext(parent context.Context, path string, arg string, timeout time.Duration) (string, error) {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, arg)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+func runClaudeProbeArgsWithContext(parent context.Context, args []string, arg string, timeout time.Duration) (string, error) {
+	if len(args) == 0 {
+		return "", errors.New("missing probe command")
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	cmdArgs := append(append([]string{}, args...), arg)
+	cmd := exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func runClaudeProbeOutcome(outcome *patchOutcome, fallbackPath string, arg string) (string, error) {
+	if probeArgs := probeArgsForOutcome(outcome, arg); len(probeArgs) > 0 {
+		if len(probeArgs) == 2 {
+			return runClaudeProbeFn(probeArgs[0], probeArgs[1])
+		}
+		return runClaudeProbeArgs(probeArgs[:len(probeArgs)-1], probeArgs[len(probeArgs)-1])
+	}
+	return runClaudeProbeFn(fallbackPath, arg)
 }
 
 func shouldSkipPatchFailure(configPath string, proxyVersion string, claudeVersion string, claudeSHA string) (bool, error) {
@@ -130,7 +156,8 @@ func shouldSkipPatchFailure(configPath string, proxyVersion string, claudeVersio
 			}
 		}
 	}
-	return cfg.HasPatchFailure(proxyVersion, claudeVersion, claudeSHA), nil
+	hostID := resolveHostID()
+	return cfg.HasPatchFailure(hostID, proxyVersion, claudeVersion, claudeSHA), nil
 }
 
 func recordPatchFailure(configPath string, outcome *patchOutcome, reason string) error {
@@ -139,11 +166,13 @@ func recordPatchFailure(configPath string, outcome *patchOutcome, reason string)
 	}
 	proxyVersion := currentProxyVersion()
 	claudeVersion := strings.TrimSpace(outcome.TargetVersion)
+	claudeSHA := resolvePatchFailureClaudeSHA(outcome)
 	entry := config.PatchFailure{
 		ProxyVersion:  proxyVersion,
 		ClaudeVersion: claudeVersion,
-		ClaudePath:    outcome.TargetPath,
-		ClaudeSHA256:  outcome.TargetSHA256,
+		HostID:        resolveHostID(),
+		ClaudePath:    firstNonEmpty(outcome.SourcePath, outcome.TargetPath),
+		ClaudeSHA256:  claudeSHA,
 		FailedAt:      time.Now(),
 		Reason:        strings.TrimSpace(reason),
 	}
@@ -155,6 +184,29 @@ func recordPatchFailure(configPath string, outcome *patchOutcome, reason string)
 		cfg.UpsertPatchFailure(entry)
 		return nil
 	})
+}
+
+func resolvePatchFailureClaudeSHA(outcome *patchOutcome) string {
+	if outcome == nil {
+		return ""
+	}
+	if sha := strings.TrimSpace(outcome.SourceSHA256); sha != "" {
+		return sha
+	}
+	sourcePath := strings.TrimSpace(outcome.SourcePath)
+	targetPath := strings.TrimSpace(outcome.TargetPath)
+	if sha := strings.TrimSpace(outcome.TargetSHA256); sha != "" {
+		return sha
+	}
+	for _, candidate := range []string{sourcePath, targetPath} {
+		if candidate == "" {
+			continue
+		}
+		if sha, err := hashFileSHA256Fn(candidate); err == nil && strings.TrimSpace(sha) != "" {
+			return strings.TrimSpace(sha)
+		}
+	}
+	return ""
 }
 
 func isYoloFailure(err error, output string) bool {
@@ -248,4 +300,53 @@ func hashFileSHA256(path string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func commandArgsForOutcome(outcome *patchOutcome, cmdArgs []string) []string {
+	if outcome == nil || len(outcome.LaunchArgsPrefix) == 0 {
+		return append([]string{}, cmdArgs...)
+	}
+	args := make([]string, 0, len(outcome.LaunchArgsPrefix)+max(0, len(cmdArgs)-1))
+	args = append(args, outcome.LaunchArgsPrefix...)
+	if len(cmdArgs) > 1 {
+		args = append(args, cmdArgs[1:]...)
+	}
+	return args
+}
+
+func probeArgsForOutcome(outcome *patchOutcome, arg string) []string {
+	arg = strings.TrimSpace(arg)
+	if arg == "" {
+		return nil
+	}
+	if outcome != nil && len(outcome.LaunchArgsPrefix) > 0 {
+		args := append([]string{}, outcome.LaunchArgsPrefix...)
+		args = append(args, arg)
+		return args
+	}
+	path := ""
+	if outcome != nil {
+		path = strings.TrimSpace(firstNonEmpty(outcome.TargetPath, outcome.SourcePath))
+	}
+	if path == "" {
+		return nil
+	}
+	return []string{path, arg}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func max(a int, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

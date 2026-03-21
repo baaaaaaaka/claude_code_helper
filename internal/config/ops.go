@@ -56,7 +56,8 @@ func (c *Config) RemoveInstance(id string) bool {
 	return false
 }
 
-func (c Config) HasPatchFailure(proxyVersion, claudeVersion, claudeSHA string) bool {
+func (c Config) HasPatchFailure(hostID, proxyVersion, claudeVersion, claudeSHA string) bool {
+	hostID = strings.TrimSpace(hostID)
 	proxyVersion = strings.TrimSpace(proxyVersion)
 	claudeVersion = strings.TrimSpace(claudeVersion)
 	claudeSHA = strings.TrimSpace(claudeSHA)
@@ -64,6 +65,10 @@ func (c Config) HasPatchFailure(proxyVersion, claudeVersion, claudeSHA string) b
 		return false
 	}
 	for _, entry := range c.PatchFailures {
+		entryHostID := strings.TrimSpace(entry.HostID)
+		if entryHostID != "" && hostID != entryHostID {
+			continue
+		}
 		if strings.TrimSpace(entry.ProxyVersion) != proxyVersion {
 			continue
 		}
@@ -114,6 +119,11 @@ func (c *Config) PurgeStalePatchFailures(currentVersion string) bool {
 }
 
 func samePatchFailureKey(a, b PatchFailure) bool {
+	aHostID := strings.TrimSpace(a.HostID)
+	bHostID := strings.TrimSpace(b.HostID)
+	if aHostID != "" && bHostID != "" && aHostID != bHostID {
+		return false
+	}
 	if strings.TrimSpace(a.ProxyVersion) != strings.TrimSpace(b.ProxyVersion) {
 		return false
 	}

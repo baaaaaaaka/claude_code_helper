@@ -49,12 +49,15 @@ type exePatchOptions struct {
 
 type patchOutcome struct {
 	Applied                  bool
+	SourcePath               string
+	SourceSHA256             string
 	TargetPath               string
 	BackupPath               string
 	SpecsHash                string
 	HistoryStore             *config.PatchHistoryStore
 	TargetSHA256             string
 	TargetVersion            string
+	LaunchArgsPrefix         []string
 	IsClaude                 bool
 	AlreadyPatched           bool
 	Verified                 bool
@@ -299,15 +302,41 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 	}
 
 	isClaude := isClaudeExecutable(cmdArgs[0], resolvedPath)
+	yoloRequested := hasYoloBypassPermissionsArg(cmdArgs)
+	glibcCompatHost := isClaude && glibcCompat && glibcCompatHostEligibleFn()
+	patchTargetPath := resolvedPath
+	var compatOutcome *patchOutcome
 	// Claude's built-in byte patches are only allowed for launches that
 	// explicitly request `--permission-mode bypassPermissions`. When that flag
 	// is absent, any previously-applied Claude byte patch must be restored
 	// before launch, but Linux glibc-compat rescue remains available below.
-	if isClaude && !hasYoloBypassPermissionsArg(cmdArgs) {
+	if isClaude && !yoloRequested {
 		if err := disableClaudeBytePatch(resolvedPath, configPath, log, opts.dryRun); err != nil {
 			return nil, err
 		}
 		builtinSpecs = nil
+	}
+	if glibcCompatHost {
+		prepared, _, compatErr := applyClaudeGlibcCompatPatchFn(resolvedPath, opts, log, opts.dryRun, &patchOutcome{
+			SourcePath:       resolvedPath,
+			TargetPath:       resolvedPath,
+			LaunchArgsPrefix: []string{resolvedPath},
+			IsClaude:         true,
+			ConfigPath:       configPath,
+			LogWriter:        log,
+		})
+		if compatErr != nil {
+			return nil, compatErr
+		}
+		compatOutcome = prepared
+		if compatOutcome != nil && strings.TrimSpace(compatOutcome.TargetPath) != "" {
+			patchTargetPath = compatOutcome.TargetPath
+		}
+		if isClaude && !yoloRequested && !config.PathsEqual(patchTargetPath, resolvedPath) {
+			if err := disableClaudeBytePatch(patchTargetPath, configPath, log, opts.dryRun); err != nil {
+				return nil, err
+			}
+		}
 	}
 	specs := append(builtinSpecs, customSpecs...)
 	if len(specs) == 0 && !glibcCompat {
@@ -330,13 +359,24 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 			} else {
 				_, _ = fmt.Fprintf(log, "exe-patch: skip (previous failure) for claude binary with proxy %s\n", proxyVersion)
 			}
-			return &patchOutcome{
-				TargetPath:    resolvedPath,
-				TargetVersion: targetVersion,
-				TargetSHA256:  targetSHA,
-				IsClaude:      true,
-				ConfigPath:    configPath,
-			}, nil
+			skipOutcome := compatOutcome
+			if skipOutcome == nil {
+				skipOutcome = &patchOutcome{
+					SourcePath:       resolvedPath,
+					TargetPath:       resolvedPath,
+					LaunchArgsPrefix: []string{resolvedPath},
+				}
+			}
+			skipOutcome.SourcePath = resolvedPath
+			skipOutcome.SourceSHA256 = targetSHA
+			skipOutcome.TargetVersion = targetVersion
+			skipOutcome.TargetSHA256 = targetSHA
+			skipOutcome.IsClaude = true
+			skipOutcome.ConfigPath = configPath
+			if len(skipOutcome.LaunchArgsPrefix) == 0 && strings.TrimSpace(skipOutcome.TargetPath) != "" {
+				skipOutcome.LaunchArgsPrefix = []string{skipOutcome.TargetPath}
+			}
+			return skipOutcome, nil
 		} else if skipErr != nil {
 			_, _ = fmt.Fprintf(log, "exe-patch: failed to read patch failure config: %v\n", skipErr)
 		}
@@ -350,16 +390,43 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 
 	var outcome *patchOutcome
 	if len(specs) > 0 {
-		outcome, err = patchExecutableFn(resolvedPath, specs, log, opts.preview, opts.dryRun, historyStore, proxyVersion)
+		outcome, err = patchExecutableFn(patchTargetPath, specs, log, opts.preview, opts.dryRun, historyStore, proxyVersion)
 		if err != nil {
 			return nil, err
 		}
 	}
 	if outcome == nil {
-		outcome = &patchOutcome{
-			TargetPath:   resolvedPath,
-			HistoryStore: historyStore,
+		if compatOutcome != nil {
+			outcome = compatOutcome
+			outcome.HistoryStore = historyStore
+		} else {
+			outcome = &patchOutcome{
+				SourcePath:   resolvedPath,
+				TargetPath:   patchTargetPath,
+				HistoryStore: historyStore,
+			}
 		}
+	}
+	if strings.TrimSpace(outcome.SourcePath) == "" {
+		outcome.SourcePath = resolvedPath
+	}
+	if outcome.SourceSHA256 == "" {
+		outcome.SourceSHA256 = targetSHA
+	}
+	if compatOutcome != nil {
+		if strings.TrimSpace(outcome.TargetPath) == "" {
+			outcome.TargetPath = compatOutcome.TargetPath
+		}
+		if outcome.SourceSHA256 == "" {
+			outcome.SourceSHA256 = compatOutcome.SourceSHA256
+		}
+		if len(outcome.LaunchArgsPrefix) == 0 {
+			outcome.LaunchArgsPrefix = append([]string{}, compatOutcome.LaunchArgsPrefix...)
+		}
+		outcome.Applied = outcome.Applied || compatOutcome.Applied
+	}
+	if len(outcome.LaunchArgsPrefix) == 0 && strings.TrimSpace(outcome.TargetPath) != "" {
+		outcome.LaunchArgsPrefix = []string{outcome.TargetPath}
 	}
 
 	outcome.TargetVersion = targetVersion
@@ -397,16 +464,19 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 		return outcome, nil
 	}
 	if needProbe {
-		out, probeErr := runClaudeProbeFn(resolvedPath, "--version")
+		out, probeErr := runClaudeProbeOutcome(outcome, resolvedPath, "--version")
 		if probeErr != nil && glibcCompat && isMissingGlibcSymbolError(out) {
 			patchedOutcome, compatApplied, compatErr := applyClaudeGlibcCompatPatchFn(resolvedPath, opts, log, opts.dryRun, outcome)
 			outcome = patchedOutcome
 			if compatErr != nil {
 				_, _ = fmt.Fprintf(log, "exe-patch: glibc compat patch failed: %v\n", compatErr)
 			} else if compatApplied {
+				if len(outcome.LaunchArgsPrefix) == 0 && strings.TrimSpace(outcome.TargetPath) != "" {
+					outcome.LaunchArgsPrefix = []string{outcome.TargetPath}
+				}
 				outcome.NeedsVerification = outcome.IsClaude && outcome.Applied
 				outcome.RollbackOnStartupFailure = outcome.RollbackOnStartupFailure || outcome.Applied
-				out, probeErr = runClaudeProbeFn(resolvedPath, "--version")
+				out, probeErr = runClaudeProbeOutcome(outcome, resolvedPath, "--version")
 			}
 		}
 		if probeErr != nil {
@@ -682,14 +752,21 @@ func backupExecutable(path string, perm os.FileMode) (string, error) {
 }
 
 func restoreExecutableFromBackup(outcome *patchOutcome) error {
-	if outcome == nil || outcome.TargetPath == "" || outcome.BackupPath == "" {
+	if outcome == nil || outcome.TargetPath == "" {
 		return fmt.Errorf("missing backup data for restore")
 	}
-	info, err := os.Stat(outcome.BackupPath)
+	restorePath := outcome.BackupPath
+	if strings.TrimSpace(restorePath) == "" && outcome.SourcePath != "" && !config.PathsEqual(outcome.SourcePath, outcome.TargetPath) {
+		restorePath = outcome.SourcePath
+	}
+	if strings.TrimSpace(restorePath) == "" {
+		return fmt.Errorf("missing backup data for restore")
+	}
+	info, err := os.Stat(restorePath)
 	if err != nil {
 		return fmt.Errorf("stat backup file: %w", err)
 	}
-	data, err := os.ReadFile(outcome.BackupPath)
+	data, err := os.ReadFile(restorePath)
 	if err != nil {
 		return fmt.Errorf("read backup file: %w", err)
 	}

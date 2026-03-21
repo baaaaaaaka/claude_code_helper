@@ -4,8 +4,9 @@ set -euo pipefail
 # End-to-end smoke for CentOS 7:
 # - starts local sshd
 # - runs claude-proxy run ... claude --version
-# - verifies claude-proxy auto-downloads and applies glibc compat patch via patchelf
-# - confirms the patched Claude process can enter its TUI by reusing the Go PTY probe
+# - verifies claude-proxy prepares a host-local glibc compat mirror
+# - confirms the shared Claude source binary remains unchanged
+# - confirms the compat launch path can still enter Claude's TUI
 
 CLAUDE_PROXY_BIN="${CLAUDE_PROXY_BIN:-/dist/claude-proxy}"
 CLAUDE_CLI_TEST_BIN="${CLAUDE_CLI_TEST_BIN:-/dist/claude_cli_test}"
@@ -15,6 +16,8 @@ TEST_USER="${TEST_USER:-testuser}"
 SSHD_PORT="${SSHD_PORT:-2222}"
 GLIBC_COMPAT_REPO="${GLIBC_COMPAT_REPO:-}"
 GLIBC_COMPAT_TAG="${GLIBC_COMPAT_TAG:-}"
+HOST_ID="${CLAUDE_PROXY_HOST_ID:-centos7-smoke}"
+CACHE_ROOT="${XDG_CACHE_HOME:-/tmp/claude-proxy-cache}"
 
 sshd_pid=""
 
@@ -140,7 +143,15 @@ run_clp_smoke() {
 }
 EOF
 
-  local -a run_env=("CLAUDE_PROXY_GLIBC_COMPAT=1")
+  local source_path="/tmp/claude/claude"
+  local source_sha_before
+  source_sha_before="$(sha256sum "$source_path" | awk '{print $1}')"
+
+  local -a run_env=(
+    "CLAUDE_PROXY_GLIBC_COMPAT=1"
+    "CLAUDE_PROXY_HOST_ID=${HOST_ID}"
+    "XDG_CACHE_HOME=${CACHE_ROOT}"
+  )
   if [[ -n "$GLIBC_COMPAT_REPO" ]]; then
     run_env+=("CLAUDE_PROXY_GLIBC_COMPAT_REPO=$GLIBC_COMPAT_REPO")
   fi
@@ -151,7 +162,7 @@ EOF
   set +e
   run_out="$(
     env "${run_env[@]}" \
-      timeout 180s "$CLAUDE_PROXY_BIN" --config /tmp/config.json run p1 -- /tmp/claude/claude --version 2>&1
+      timeout 180s "$CLAUDE_PROXY_BIN" --config /tmp/config.json run p1 -- "$source_path" --version 2>&1
   )"
   run_ec=$?
   set -e
@@ -172,10 +183,36 @@ EOF
     exit 1
   fi
 
-  interp="$(patchelf --print-interpreter /tmp/claude/claude)"
-  rpath="$(patchelf --print-rpath /tmp/claude/claude)"
-  echo "[patched interpreter] ${interp}"
-  echo "[patched rpath] ${rpath}"
+  local source_sha_after
+  source_sha_after="$(sha256sum "$source_path" | awk '{print $1}')"
+  echo "[source sha before] ${source_sha_before}"
+  echo "[source sha after ] ${source_sha_after}"
+  if [[ "$source_sha_before" != "$source_sha_after" ]]; then
+    echo "shared Claude source binary was modified" >&2
+    exit 1
+  fi
+  if [[ -e "${source_path}.claude-proxy.bak" ]]; then
+    echo "unexpected source-side backup file created at ${source_path}.claude-proxy.bak" >&2
+    exit 1
+  fi
+
+  local mirror_root="${CACHE_ROOT}/claude-proxy/hosts/${HOST_ID}/claude"
+  local mirror_path
+  mirror_path="$(find "$mirror_root" -type f -name "$(basename "$source_path")" | head -n 1 || true)"
+  if [[ -z "$mirror_path" ]]; then
+    echo "expected host-local glibc compat mirror under ${mirror_root}" >&2
+    exit 1
+  fi
+  if [[ "$mirror_path" == "$source_path" ]]; then
+    echo "mirror path unexpectedly points at the shared source binary" >&2
+    exit 1
+  fi
+
+  interp="$(patchelf --print-interpreter "$mirror_path")"
+  rpath="$(patchelf --print-rpath "$mirror_path")"
+  echo "[mirror path] ${mirror_path}"
+  echo "[mirror interpreter] ${interp}"
+  echo "[mirror rpath] ${rpath}"
 
   if [[ "$interp" != */glibc-2.31/lib/ld-linux-x86-64.so.2 ]]; then
     echo "unexpected patched interpreter: $interp" >&2
@@ -206,7 +243,7 @@ EOF
     CLAUDE_PATCH_BUCKET="$CLAUDE_BUCKET" \
     "$CLAUDE_CLI_TEST_BIN" -test.run TestClaudePatchIntegration -test.count=1 -test.v
 
-  echo "PASS: claude-proxy auto-downloaded and patched Claude glibc successfully on CentOS 7."
+  echo "PASS: claude-proxy used a host-local glibc compat mirror on CentOS 7."
 }
 
 cleanup() {

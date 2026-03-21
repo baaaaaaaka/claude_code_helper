@@ -10,14 +10,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/baaaaaaaka/claude_code_helper/internal/update"
+	"github.com/gofrs/flock"
 )
 
 const (
 	patchelfBinaryName = "patchelf"
+
+	claudeProxyHostIDEnv = "CLAUDE_PROXY_HOST_ID"
 
 	glibcCompatRepoEnv = "CLAUDE_PROXY_GLIBC_COMPAT_REPO"
 	glibcCompatTagEnv  = "CLAUDE_PROXY_GLIBC_COMPAT_TAG"
@@ -25,6 +29,7 @@ const (
 	glibcCompatDefaultTag      = "glibc-compat-v2.31"
 	glibcCompatExtractedDir    = "glibc-2.31"
 	glibcCompatDownloadTimeout = 2 * time.Minute
+	glibcCompatMirrorKeep      = 2
 )
 
 type glibcCompatLayout struct {
@@ -33,6 +38,19 @@ type glibcCompatLayout struct {
 	LoaderPath string
 }
 
+var (
+	glibcCompatHostEligibleFn = isEL7GlibcCompatHost
+	userCacheDirFn            = os.UserCacheDir
+	userHomeDirFn             = os.UserHomeDir
+	tempDirFn                 = os.TempDir
+	readLinuxOSReleaseFn      = func() ([]byte, error) { return os.ReadFile("/etc/os-release") }
+)
+
+const (
+	glibcCompatMirrorVariantPatched = "patched"
+	glibcCompatMirrorVariantWrapper = "wrapper"
+)
+
 func applyClaudeGlibcCompatPatch(path string, opts exePatchOptions, log io.Writer, dryRun bool, outcome *patchOutcome) (*patchOutcome, bool, error) {
 	if runtime.GOOS != "linux" || !opts.glibcCompatConfigured() {
 		return outcome, false, nil
@@ -40,57 +58,206 @@ func applyClaudeGlibcCompatPatch(path string, opts exePatchOptions, log io.Write
 	if log == nil {
 		log = io.Discard
 	}
+	if outcome == nil {
+		outcome = &patchOutcome{}
+	}
+	if strings.TrimSpace(outcome.SourcePath) == "" {
+		outcome.SourcePath = path
+	}
 
 	layout, err := resolveOrPrepareGlibcCompatLayout(opts, log)
 	if err != nil {
 		return outcome, false, err
 	}
-	if _, err := exec.LookPath(patchelfBinaryName); err != nil {
-		return outcome, false, fmt.Errorf("missing %s in PATH: %w", patchelfBinaryName, err)
-	}
-
-	currentInterpreter, err := readPatchelfValue(path, "--print-interpreter")
-	if err != nil {
-		return outcome, false, fmt.Errorf("read interpreter: %w", err)
-	}
-	currentRPath, err := readPatchelfValue(path, "--print-rpath")
-	if err != nil {
-		return outcome, false, fmt.Errorf("read rpath: %w", err)
-	}
-
-	targetRPath := mergeRPath(layout.LibDir, currentRPath)
-	if sameFilePath(currentInterpreter, layout.LoaderPath) && pathListContains(currentRPath, layout.LibDir) {
-		_, _ = fmt.Fprintf(log, "exe-patch: glibc compat already configured for %s\n", path)
-		return outcome, false, nil
-	}
 	if dryRun {
-		_, _ = fmt.Fprintf(log, "exe-patch: dry-run enabled; would apply glibc compat patch to %s\n", path)
+		_, _ = fmt.Fprintf(log, "exe-patch: dry-run enabled; would prepare host-local glibc compat launch path for %s\n", path)
 		return outcome, false, nil
 	}
-
-	info, err := os.Stat(path)
-	if err != nil {
-		return outcome, false, fmt.Errorf("stat executable for glibc patch: %w", err)
+	preparedOutcome, compatApplied, compatErr := prepareGlibcCompatMirror(path, layout, log, outcome)
+	if compatErr == nil {
+		return preparedOutcome, compatApplied, nil
 	}
+	_, _ = fmt.Fprintf(log, "exe-patch: host-local glibc compat mirror failed: %v\n", compatErr)
+	wrapperOutcome, wrapperErr := prepareGlibcCompatWrapper(path, layout, log, outcome)
+	if wrapperErr != nil {
+		return outcome, false, fmt.Errorf("prepare glibc compat mirror: %w; wrapper fallback failed: %v", compatErr, wrapperErr)
+	}
+	return wrapperOutcome, true, nil
+}
+
+func prepareGlibcCompatMirror(path string, layout glibcCompatLayout, log io.Writer, outcome *patchOutcome) (*patchOutcome, bool, error) {
+	return prepareGlibcCompatLaunchMirror(path, layout, log, outcome, glibcCompatMirrorVariantPatched, true)
+}
+
+func prepareGlibcCompatLaunchMirror(path string, layout glibcCompatLayout, log io.Writer, outcome *patchOutcome, variant string, patchELF bool) (*patchOutcome, bool, error) {
 	if outcome == nil {
-		outcome = &patchOutcome{TargetPath: path}
+		outcome = &patchOutcome{}
 	}
-	if strings.TrimSpace(outcome.BackupPath) == "" {
-		backupPath, err := backupExecutable(path, info.Mode().Perm())
-		if err != nil {
-			return outcome, false, fmt.Errorf("create backup for glibc patch: %w", err)
-		}
-		outcome.BackupPath = backupPath
+	if strings.TrimSpace(outcome.SourcePath) == "" {
+		outcome.SourcePath = path
 	}
-
-	if err := patchElfInterpreterAndRPath(path, layout.LoaderPath, targetRPath); err != nil {
+	hostRoot, _, err := resolveClaudeProxyHostRoot()
+	if err != nil {
 		return outcome, false, err
 	}
-
-	outcome.TargetPath = path
-	outcome.Applied = true
-	_, _ = fmt.Fprintf(log, "exe-patch: applied glibc compat patch to %s (loader=%s)\n", path, layout.LoaderPath)
+	claudeRoot := filepath.Join(hostRoot, "claude")
+	currentSHA, err := resolveGlibcCompatSourceSHA(path, outcome)
+	if err != nil {
+		return outcome, false, fmt.Errorf("hash glibc compat source: %w", err)
+	}
+	mirrorKey, err := glibcCompatMirrorKey(currentSHA, layout, variant)
+	if err != nil {
+		return outcome, false, fmt.Errorf("build glibc compat mirror key: %w", err)
+	}
+	mirrorDir := filepath.Join(claudeRoot, mirrorKey)
+	mirrorPath := filepath.Join(mirrorDir, filepath.Base(path))
+	lockPath := filepath.Join(claudeRoot, ".lock")
+	created := false
+	if err := withFileLock(lockPath, func() error {
+		if fileExists(mirrorPath) {
+			_ = touchPath(mirrorPath)
+			_ = touchPath(mirrorDir)
+			return pruneGlibcCompatMirrors(claudeRoot, mirrorKey)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("stat executable for glibc patch: %w", err)
+		}
+		if err := os.MkdirAll(mirrorDir, 0o755); err != nil {
+			return fmt.Errorf("create glibc compat mirror dir: %w", err)
+		}
+		stagePath, err := copyToTempFile(path, mirrorDir, filepath.Base(path), info.Mode().Perm())
+		if err != nil {
+			return err
+		}
+		defer func() { _ = os.Remove(stagePath) }()
+		if patchELF {
+			if _, err := exec.LookPath(patchelfBinaryName); err != nil {
+				return fmt.Errorf("missing %s in PATH: %w", patchelfBinaryName, err)
+			}
+			currentInterpreter, err := readPatchelfValue(stagePath, "--print-interpreter")
+			if err != nil {
+				return fmt.Errorf("read interpreter: %w", err)
+			}
+			currentRPath, err := readPatchelfValue(stagePath, "--print-rpath")
+			if err != nil {
+				return fmt.Errorf("read rpath: %w", err)
+			}
+			targetRPath := mergeRPath(layout.LibDir, currentRPath)
+			if !sameFilePath(currentInterpreter, layout.LoaderPath) || !pathListContains(currentRPath, layout.LibDir) {
+				if err := patchElfInterpreterAndRPath(stagePath, layout.LoaderPath, targetRPath); err != nil {
+					return err
+				}
+			}
+		}
+		if err := os.Rename(stagePath, mirrorPath); err != nil {
+			return fmt.Errorf("install glibc compat mirror: %w", err)
+		}
+		created = true
+		return pruneGlibcCompatMirrors(claudeRoot, mirrorKey)
+	}); err != nil {
+		return outcome, false, err
+	}
+	outcome.TargetPath = mirrorPath
+	outcome.LaunchArgsPrefix = []string{mirrorPath}
+	outcome.Applied = false
+	if created {
+		if patchELF {
+			_, _ = fmt.Fprintf(log, "exe-patch: prepared glibc compat mirror %s -> %s\n", path, mirrorPath)
+		} else {
+			_, _ = fmt.Fprintf(log, "exe-patch: prepared glibc compat wrapper mirror %s -> %s\n", path, mirrorPath)
+		}
+	} else {
+		if patchELF {
+			_, _ = fmt.Fprintf(log, "exe-patch: reusing glibc compat mirror %s\n", mirrorPath)
+		} else {
+			_, _ = fmt.Fprintf(log, "exe-patch: reusing glibc compat wrapper mirror %s\n", mirrorPath)
+		}
+	}
 	return outcome, true, nil
+}
+
+func resolveGlibcCompatSourceSHA(path string, outcome *patchOutcome) (string, error) {
+	sourcePath := strings.TrimSpace(path)
+	targetPath := sourcePath
+	if outcome != nil {
+		if sha := strings.ToLower(strings.TrimSpace(outcome.SourceSHA256)); sha != "" {
+			return sha, nil
+		}
+		if candidate := strings.TrimSpace(outcome.SourcePath); candidate != "" {
+			sourcePath = candidate
+		}
+		if candidate := strings.TrimSpace(outcome.TargetPath); candidate != "" {
+			targetPath = candidate
+		}
+		if sha := strings.ToLower(strings.TrimSpace(outcome.TargetSHA256)); sha != "" && sameFilePath(sourcePath, targetPath) {
+			return sha, nil
+		}
+	}
+	if sourcePath == "" {
+		return "", fmt.Errorf("source path is empty")
+	}
+	return sha256File(sourcePath)
+}
+
+func glibcCompatMirrorKey(sourceSHA string, layout glibcCompatLayout, variant string) (string, error) {
+	sourceSHA = strings.ToLower(strings.TrimSpace(sourceSHA))
+	if sourceSHA == "" {
+		return "", fmt.Errorf("source sha is empty")
+	}
+	variant = sanitizePathComponent(variant)
+	if variant == "" {
+		variant = "default"
+	}
+	fingerprint, err := glibcCompatLayoutFingerprint(layout)
+	if err != nil {
+		return "", err
+	}
+	return sanitizePathComponent(sourceSHA + "-" + variant + "-" + fingerprint), nil
+}
+
+func glibcCompatLayoutFingerprint(layout glibcCompatLayout) (string, error) {
+	loaderHash, err := sha256File(layout.LoaderPath)
+	if err != nil {
+		return "", fmt.Errorf("hash glibc loader: %w", err)
+	}
+	libcHash, err := sha256File(filepath.Join(layout.LibDir, "libc.so.6"))
+	if err != nil {
+		return "", fmt.Errorf("hash glibc libc: %w", err)
+	}
+	h := sha256.New()
+	for _, part := range []string{
+		filepath.Clean(layout.RootDir),
+		filepath.Clean(layout.LoaderPath),
+		filepath.Clean(layout.LibDir),
+		strings.ToLower(loaderHash),
+		strings.ToLower(libcHash),
+	} {
+		_, _ = io.WriteString(h, part)
+		_, _ = io.WriteString(h, "\x00")
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16], nil
+}
+
+func prepareGlibcCompatWrapper(path string, layout glibcCompatLayout, log io.Writer, outcome *patchOutcome) (*patchOutcome, error) {
+	if outcome == nil {
+		outcome = &patchOutcome{}
+	}
+	if strings.TrimSpace(outcome.SourcePath) == "" {
+		outcome.SourcePath = path
+	}
+	wrapperPath, err := resolveGlibcCompatWrapperPath(layout)
+	if err != nil {
+		return outcome, err
+	}
+	outcome, _, err = prepareGlibcCompatLaunchMirror(path, layout, log, outcome, glibcCompatMirrorVariantWrapper, false)
+	if err != nil {
+		return outcome, err
+	}
+	outcome.LaunchArgsPrefix = []string{wrapperPath, outcome.TargetPath}
+	outcome.Applied = false
+	_, _ = fmt.Fprintf(log, "exe-patch: using glibc compat wrapper %s for %s via %s\n", wrapperPath, path, outcome.TargetPath)
+	return outcome, nil
 }
 
 func resolveOrPrepareGlibcCompatLayout(opts exePatchOptions, log io.Writer) (glibcCompatLayout, error) {
@@ -117,25 +284,44 @@ func ensureDefaultGlibcCompatRuntime(log io.Writer) (string, error) {
 		return "", err
 	}
 
-	cacheBase, err := os.UserCacheDir()
-	if err != nil || strings.TrimSpace(cacheBase) == "" {
-		cacheBase = os.TempDir()
+	hostRoot, _, err := resolveClaudeProxyHostRoot()
+	if err != nil {
+		return "", err
 	}
-	cacheRoot := filepath.Join(cacheBase, "claude-proxy", "glibc-compat", sanitizePathComponent(tag))
+	cacheRoot := filepath.Join(hostRoot, "glibc-compat", sanitizePathComponent(tag))
 	runtimeRoot := filepath.Join(cacheRoot, "runtime")
 	if _, err := resolveGlibcCompatLayout(runtimeRoot); err == nil {
 		return runtimeRoot, nil
 	}
-	if err := os.MkdirAll(cacheRoot, 0o755); err != nil {
-		return "", fmt.Errorf("create glibc compat cache dir: %w", err)
-	}
-
-	bundlePath := filepath.Join(cacheRoot, asset)
-	checksumPath := bundlePath + ".sha256"
-	if err := ensureGlibcCompatBundle(cacheRoot, repo, tag, asset, bundlePath, checksumPath); err != nil {
-		return "", err
-	}
-	if err := extractGlibcCompatBundle(bundlePath, runtimeRoot); err != nil {
+	lockPath := filepath.Join(cacheRoot, ".runtime.lock")
+	if err := withFileLock(lockPath, func() error {
+		if _, err := resolveGlibcCompatLayout(runtimeRoot); err == nil {
+			return nil
+		}
+		if err := os.MkdirAll(cacheRoot, 0o755); err != nil {
+			return fmt.Errorf("create glibc compat cache dir: %w", err)
+		}
+		bundlePath := filepath.Join(cacheRoot, asset)
+		checksumPath := bundlePath + ".sha256"
+		if err := ensureGlibcCompatBundle(cacheRoot, repo, tag, asset, bundlePath, checksumPath); err != nil {
+			return err
+		}
+		stageDir, err := os.MkdirTemp(cacheRoot, "runtime-staging-")
+		if err != nil {
+			return fmt.Errorf("create glibc compat staging dir: %w", err)
+		}
+		defer func() { _ = os.RemoveAll(stageDir) }()
+		if err := extractGlibcCompatBundle(bundlePath, stageDir); err != nil {
+			return err
+		}
+		if _, err := resolveGlibcCompatLayout(stageDir); err != nil {
+			return err
+		}
+		if err := installPreparedGlibcCompatRuntime(stageDir, runtimeRoot); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
 		return "", err
 	}
 	if _, err := resolveGlibcCompatLayout(runtimeRoot); err != nil {
@@ -145,6 +331,233 @@ func ensureDefaultGlibcCompatRuntime(log io.Writer) (string, error) {
 		_, _ = fmt.Fprintf(log, "exe-patch: downloaded glibc compat bundle to %s\n", cacheRoot)
 	}
 	return runtimeRoot, nil
+}
+
+func installPreparedGlibcCompatRuntime(stageDir string, runtimeRoot string) error {
+	if _, err := resolveGlibcCompatLayout(runtimeRoot); err == nil {
+		return nil
+	}
+	if info, err := os.Stat(runtimeRoot); err == nil {
+		if !info.IsDir() {
+			if removeErr := os.Remove(runtimeRoot); removeErr != nil {
+				return fmt.Errorf("remove invalid glibc compat runtime file: %w", removeErr)
+			}
+		} else if removeErr := os.RemoveAll(runtimeRoot); removeErr != nil {
+			return fmt.Errorf("remove invalid glibc compat runtime dir: %w", removeErr)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat existing glibc compat runtime: %w", err)
+	}
+	if err := os.Rename(stageDir, runtimeRoot); err != nil {
+		if _, statErr := resolveGlibcCompatLayout(runtimeRoot); statErr == nil {
+			return nil
+		}
+		return fmt.Errorf("install glibc compat runtime: %w", err)
+	}
+	return nil
+}
+
+func resolveClaudeProxyHostRoot() (string, string, error) {
+	cacheBase, err := resolveStableCacheBase()
+	if err != nil {
+		return "", "", err
+	}
+	hostID := resolveHostID()
+	return filepath.Join(cacheBase, "claude-proxy", "hosts", hostID), hostID, nil
+}
+
+func resolveStableCacheBase() (string, error) {
+	if cacheBase, err := userCacheDirFn(); err == nil && strings.TrimSpace(cacheBase) != "" {
+		return cacheBase, nil
+	}
+	homeDir, err := userHomeDirFn()
+	if err != nil || strings.TrimSpace(homeDir) == "" {
+		if tempDir := strings.TrimSpace(tempDirFn()); tempDir != "" {
+			return tempDir, nil
+		}
+		return "", fmt.Errorf("resolve stable cache dir: %w", err)
+	}
+	return filepath.Join(homeDir, ".cache"), nil
+}
+
+func resolveHostID() string {
+	if v := strings.TrimSpace(os.Getenv(claudeProxyHostIDEnv)); v != "" {
+		return sanitizePathComponent(v)
+	}
+	for _, candidate := range []string{"/etc/machine-id", "/var/lib/dbus/machine-id"} {
+		raw, err := os.ReadFile(candidate)
+		if err != nil {
+			continue
+		}
+		if id := sanitizePathComponent(strings.TrimSpace(string(raw))); id != "" && id != "default" {
+			return id
+		}
+	}
+	if hostname, err := os.Hostname(); err == nil {
+		if id := sanitizePathComponent(hostname); id != "" {
+			return id
+		}
+	}
+	return "unknown-host"
+}
+
+func isEL7GlibcCompatHost() bool {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		return false
+	}
+	versionID := linuxOSReleaseField("VERSION_ID")
+	if !strings.HasPrefix(strings.Trim(versionID, "\""), "7") {
+		return false
+	}
+	switch linuxOSReleaseID() {
+	case "centos", "rhel":
+		return true
+	}
+	for _, field := range strings.Fields(strings.ReplaceAll(linuxOSReleaseField("ID_LIKE"), ",", " ")) {
+		switch strings.ToLower(strings.Trim(field, "\"")) {
+		case "centos", "rhel":
+			return true
+		}
+	}
+	return false
+}
+
+func linuxOSReleaseField(key string) string {
+	raw, err := readLinuxOSReleaseFn()
+	if err != nil {
+		return ""
+	}
+	prefix := key + "="
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		return strings.Trim(strings.TrimPrefix(line, prefix), "\"")
+	}
+	return ""
+}
+
+func withFileLock(lockPath string, fn func() error) error {
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		return fmt.Errorf("create lock dir: %w", err)
+	}
+	lock := flock.New(lockPath)
+	if err := lock.Lock(); err != nil {
+		return fmt.Errorf("lock %s: %w", lockPath, err)
+	}
+	defer func() { _ = lock.Unlock() }()
+	return fn()
+}
+
+func copyToTempFile(sourcePath string, dir string, prefix string, perm os.FileMode) (string, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("create glibc compat mirror dir: %w", err)
+	}
+	f, err := os.CreateTemp(dir, prefix+".tmp-*")
+	if err != nil {
+		return "", fmt.Errorf("create temp mirror: %w", err)
+	}
+	tmpPath := f.Name()
+	src, err := os.Open(sourcePath)
+	if err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("open executable for glibc mirror: %w", err)
+	}
+	if _, err := io.Copy(f, src); err != nil {
+		_ = src.Close()
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("copy executable for glibc mirror: %w", err)
+	}
+	_ = src.Close()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("close temp mirror: %w", err)
+	}
+	if err := os.Chmod(tmpPath, perm); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("chmod temp mirror: %w", err)
+	}
+	return tmpPath, nil
+}
+
+func touchPath(path string) error {
+	now := time.Now()
+	return os.Chtimes(path, now, now)
+}
+
+func pruneGlibcCompatMirrors(claudeRoot string, keepKey string) error {
+	entries, err := os.ReadDir(claudeRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read glibc compat mirror dir: %w", err)
+	}
+	type mirrorEntry struct {
+		name    string
+		modTime time.Time
+	}
+	mirrors := make([]mirrorEntry, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		mirrors = append(mirrors, mirrorEntry{name: entry.Name(), modTime: info.ModTime()})
+	}
+	if len(mirrors) <= glibcCompatMirrorKeep {
+		return nil
+	}
+	sort.Slice(mirrors, func(i, j int) bool {
+		return mirrors[i].modTime.After(mirrors[j].modTime)
+	})
+	keep := map[string]bool{}
+	if keepKey = sanitizePathComponent(keepKey); keepKey != "" {
+		keep[keepKey] = true
+	}
+	for _, entry := range mirrors {
+		if len(keep) >= glibcCompatMirrorKeep {
+			break
+		}
+		keep[entry.name] = true
+	}
+	for _, entry := range mirrors {
+		if keep[entry.name] {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(claudeRoot, entry.name)); err != nil {
+			return fmt.Errorf("remove stale glibc compat mirror %s: %w", entry.name, err)
+		}
+	}
+	return nil
+}
+
+func resolveGlibcCompatWrapperPath(layout glibcCompatLayout) (string, error) {
+	candidates := []string{
+		filepath.Join(filepath.Dir(layout.RootDir), "run-with-glibc-2.31.sh"),
+		filepath.Join(layout.RootDir, "run-with-glibc-2.31.sh"),
+	}
+	matches, _ := filepath.Glob(filepath.Join(filepath.Dir(layout.RootDir), "run-with-glibc-*.sh"))
+	candidates = append(candidates, matches...)
+	seen := map[string]bool{}
+	for _, candidate := range candidates {
+		candidate = filepath.Clean(candidate)
+		if candidate == "" || seen[candidate] {
+			continue
+		}
+		seen[candidate] = true
+		info, err := os.Stat(candidate)
+		if err == nil && info.Mode().IsRegular() {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("glibc compat wrapper not found near %s", layout.RootDir)
 }
 
 func ensureGlibcCompatBundle(cacheRoot string, repo string, tag string, asset string, bundlePath string, checksumPath string) error {
@@ -309,7 +722,6 @@ func extractGlibcCompatBundle(bundlePath string, runtimeRoot string) error {
 	if _, err := exec.LookPath("tar"); err != nil {
 		return fmt.Errorf("missing tar in PATH: %w", err)
 	}
-	_ = os.RemoveAll(runtimeRoot)
 	if err := os.MkdirAll(runtimeRoot, 0o755); err != nil {
 		return err
 	}

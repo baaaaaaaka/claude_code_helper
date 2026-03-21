@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
 )
@@ -39,6 +41,7 @@ func TestRecordPatchFailureAndSkip(t *testing.T) {
 	requireExePatchEnabled(t)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
+	t.Setenv(claudeProxyHostIDEnv, "host-a")
 	origVersion := version
 	version = "v9.9.9"
 	t.Cleanup(func() { version = origVersion })
@@ -64,7 +67,7 @@ func TestRecordPatchFailureAndSkip(t *testing.T) {
 		t.Fatalf("expected 1 patch failure, got %d", len(cfg.PatchFailures))
 	}
 	entry := cfg.PatchFailures[0]
-	if entry.ProxyVersion != "v9.9.9" || entry.ClaudeVersion != "2.1.19" || entry.ClaudeSHA256 != "abc123" {
+	if entry.ProxyVersion != "v9.9.9" || entry.HostID != "host-a" || entry.ClaudeVersion != "2.1.19" || entry.ClaudeSHA256 != "abc123" {
 		t.Fatalf("unexpected patch failure entry: %#v", entry)
 	}
 	if entry.Reason == "" {
@@ -79,6 +82,106 @@ func TestRecordPatchFailureAndSkip(t *testing.T) {
 	}
 	if skip, err := shouldSkipPatchFailure(configPath, "v9.9.8", "2.1.19", ""); err != nil || skip {
 		t.Fatalf("expected no skip for different proxy version, got skip=%v err=%v", skip, err)
+	}
+}
+
+func TestShouldSkipPatchFailureIsHostScoped(t *testing.T) {
+	requireExePatchEnabled(t)
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	t.Setenv(claudeProxyHostIDEnv, "host-a")
+	origVersion := version
+	version = "v9.9.9"
+	t.Cleanup(func() { version = origVersion })
+
+	outcome := &patchOutcome{
+		IsClaude:      true,
+		TargetVersion: "2.1.19",
+		TargetSHA256:  "abc123",
+		TargetPath:    "/shared/claude",
+	}
+	if err := recordPatchFailure(configPath, outcome, "boom"); err != nil {
+		t.Fatalf("recordPatchFailure error: %v", err)
+	}
+
+	t.Setenv(claudeProxyHostIDEnv, "host-b")
+	if skip, err := shouldSkipPatchFailure(configPath, "v9.9.9", "2.1.19", ""); err != nil || skip {
+		t.Fatalf("expected host-scoped skip miss, got skip=%v err=%v", skip, err)
+	}
+
+	t.Setenv(claudeProxyHostIDEnv, "host-a")
+	if skip, err := shouldSkipPatchFailure(configPath, "v9.9.9", "2.1.19", ""); err != nil || !skip {
+		t.Fatalf("expected host-scoped skip hit, got skip=%v err=%v", skip, err)
+	}
+}
+
+func TestRecordPatchFailureUsesSourceSHAForMirrorTargets(t *testing.T) {
+	requireExePatchEnabled(t)
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	t.Setenv(claudeProxyHostIDEnv, "host-a")
+	origVersion := version
+	version = "v9.9.9"
+	t.Cleanup(func() { version = origVersion })
+
+	sourcePath := filepath.Join(dir, "source-claude")
+	mirrorPath := filepath.Join(dir, "mirror-claude")
+	if err := os.WriteFile(sourcePath, []byte("source-bytes"), 0o700); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	if err := os.WriteFile(mirrorPath, []byte("mirror-bytes"), 0o700); err != nil {
+		t.Fatalf("write mirror: %v", err)
+	}
+	sourceSHA, err := hashFileSHA256(sourcePath)
+	if err != nil {
+		t.Fatalf("hash source: %v", err)
+	}
+	mirrorSHA, err := hashFileSHA256(mirrorPath)
+	if err != nil {
+		t.Fatalf("hash mirror: %v", err)
+	}
+
+	outcome := &patchOutcome{
+		IsClaude:      true,
+		SourcePath:    sourcePath,
+		SourceSHA256:  sourceSHA,
+		TargetPath:    mirrorPath,
+		TargetSHA256:  mirrorSHA,
+		TargetVersion: "",
+	}
+	if err := os.WriteFile(sourcePath, []byte("source-bytes-v2"), 0o700); err != nil {
+		t.Fatalf("rewrite source: %v", err)
+	}
+	newSourceSHA, err := hashFileSHA256(sourcePath)
+	if err != nil {
+		t.Fatalf("hash rewritten source: %v", err)
+	}
+	if err := recordPatchFailure(configPath, outcome, "boom"); err != nil {
+		t.Fatalf("recordPatchFailure error: %v", err)
+	}
+	store, err := config.NewStore(configPath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if len(cfg.PatchFailures) != 1 {
+		t.Fatalf("expected 1 patch failure, got %d", len(cfg.PatchFailures))
+	}
+	entry := cfg.PatchFailures[0]
+	if entry.ClaudePath != sourcePath {
+		t.Fatalf("expected source path %q, got %q", sourcePath, entry.ClaudePath)
+	}
+	if entry.ClaudeSHA256 != sourceSHA {
+		t.Fatalf("expected source sha %q, got %q", sourceSHA, entry.ClaudeSHA256)
+	}
+	if skip, err := shouldSkipPatchFailure(configPath, "v9.9.9", "", sourceSHA); err != nil || !skip {
+		t.Fatalf("expected skip by source sha, got skip=%v err=%v", skip, err)
+	}
+	if skip, err := shouldSkipPatchFailure(configPath, "v9.9.9", "", newSourceSHA); err != nil || skip {
+		t.Fatalf("expected rewritten source sha not to match old failure, got skip=%v err=%v", skip, err)
 	}
 }
 
@@ -196,6 +299,41 @@ func TestResolveClaudeVersion(t *testing.T) {
 	}
 }
 
+func TestRunClaudeProbeArgsAndOutcome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script probe test on windows")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "probe.sh")
+	content := "#!/bin/sh\nprintf '%s\\n' \"$@\"\n"
+	if err := os.WriteFile(script, []byte(content), 0o700); err != nil {
+		t.Fatalf("write probe script: %v", err)
+	}
+
+	out, err := runClaudeProbeArgs([]string{script, "--shim"}, "--version")
+	if err != nil {
+		t.Fatalf("runClaudeProbeArgs error: %v", err)
+	}
+	if out != "--shim\n--version\n" {
+		t.Fatalf("unexpected probe args output: %q", out)
+	}
+
+	outcome := &patchOutcome{LaunchArgsPrefix: []string{script, "--shim"}}
+	out, err = runClaudeProbeOutcome(outcome, "/ignored", "--help")
+	if err != nil {
+		t.Fatalf("runClaudeProbeOutcome error: %v", err)
+	}
+	if out != "--shim\n--help\n" {
+		t.Fatalf("unexpected probe outcome output: %q", out)
+	}
+}
+
+func TestRunClaudeProbeArgsWithContextMissingCommand(t *testing.T) {
+	if _, err := runClaudeProbeArgsWithContext(context.Background(), nil, "--version", time.Second); err == nil {
+		t.Fatalf("expected missing probe command error")
+	}
+}
+
 func TestHashFileSHA256(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "file.txt")
 	if err := os.WriteFile(path, []byte("hello"), 0o600); err != nil {
@@ -256,6 +394,7 @@ func TestPatchFailureHelpers(t *testing.T) {
 		requireExePatchEnabled(t)
 		dir := t.TempDir()
 		configPath := filepath.Join(dir, "config.json")
+		t.Setenv(claudeProxyHostIDEnv, "host-a")
 		outcome := &patchOutcome{
 			IsClaude:      true,
 			TargetVersion: "2.2.0",
@@ -288,6 +427,27 @@ func TestPatchFailureHelpers(t *testing.T) {
 			t.Fatalf("expected 1 patch failure entry, got %d", len(cfg.PatchFailures))
 		}
 	})
+
+	t.Run("probeArgsForOutcome handles fallback shapes", func(t *testing.T) {
+		if got := probeArgsForOutcome(nil, ""); got != nil {
+			t.Fatalf("expected nil args for empty probe arg, got %#v", got)
+		}
+		outcome := &patchOutcome{TargetPath: "/tmp/mirror"}
+		got := probeArgsForOutcome(outcome, "--version")
+		if len(got) != 2 || got[0] != "/tmp/mirror" || got[1] != "--version" {
+			t.Fatalf("unexpected target-path probe args: %#v", got)
+		}
+		outcome = &patchOutcome{SourcePath: "/tmp/source"}
+		got = probeArgsForOutcome(outcome, "--help")
+		if len(got) != 2 || got[0] != "/tmp/source" || got[1] != "--help" {
+			t.Fatalf("unexpected source-path probe args: %#v", got)
+		}
+		outcome = &patchOutcome{LaunchArgsPrefix: []string{"/tmp/wrapper", "--shim"}}
+		got = probeArgsForOutcome(outcome, "--help")
+		if len(got) != 3 || got[0] != "/tmp/wrapper" || got[1] != "--shim" || got[2] != "--help" {
+			t.Fatalf("unexpected launch-prefix probe args: %#v", got)
+		}
+	})
 }
 
 func TestShouldSkipPatchFailurePurgesStaleEntriesOnWindows(t *testing.T) {
@@ -297,6 +457,7 @@ func TestShouldSkipPatchFailurePurgesStaleEntriesOnWindows(t *testing.T) {
 		t.Helper()
 		dir := t.TempDir()
 		configPath := filepath.Join(dir, "config.json")
+		t.Setenv(claudeProxyHostIDEnv, "host-a")
 		store, err := config.NewStore(configPath)
 		if err != nil {
 			t.Fatalf("new store: %v", err)
@@ -304,6 +465,7 @@ func TestShouldSkipPatchFailurePurgesStaleEntriesOnWindows(t *testing.T) {
 		if err := store.Update(func(cfg *config.Config) error {
 			cfg.UpsertPatchFailure(config.PatchFailure{
 				ProxyVersion:  "v0.0.40",
+				HostID:        "host-a",
 				ClaudeVersion: "2.1.19",
 				ClaudeSHA256:  "abc",
 			})
