@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +18,67 @@ import (
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
 	"github.com/spf13/cobra"
 )
+
+func writeRunEnvStub(t *testing.T, outFile string) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	unix := "#!/bin/sh\nprintf \"%s\" \"$HTTP_PROXY\" > \"$OUT_FILE\"\n"
+	win := "@echo off\r\n<nul set /p =%HTTP_PROXY% > \"%OUT_FILE%\"\r\nexit /b 0\r\n"
+	writeStub(t, dir, "print-proxy-env", unix, win)
+
+	t.Setenv("OUT_FILE", outFile)
+
+	path := filepath.Join(dir, "print-proxy-env")
+	if runtime.GOOS == "windows" {
+		path += ".cmd"
+	}
+	return path
+}
+
+func startRunHealthServer(t *testing.T, instanceID string) int {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_claude_proxy/health", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprintf(w, `{"ok":true,"instanceId":%q}`, instanceID)
+	})
+
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		_ = ln.Close()
+	})
+
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("unexpected addr type %T", ln.Addr())
+	}
+	return addr.Port
+}
+
+func setRunTestStdin(t *testing.T, input string) {
+	t.Helper()
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	prevStdin := os.Stdin
+	os.Stdin = reader
+	t.Cleanup(func() { os.Stdin = prevStdin })
+
+	if _, err := writer.Write([]byte(input)); err != nil {
+		t.Fatalf("write stdin: %v", err)
+	}
+	_ = writer.Close()
+}
 
 func TestSelectProfile(t *testing.T) {
 	cfg := config.Config{
@@ -256,11 +320,274 @@ func TestRunLikeReleasesPatchPrepMemoryBeforeProfileSelection(t *testing.T) {
 			policySettings: true,
 		},
 	}
+	store, err := config.NewStore(root.configPath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	if err := store.Save(config.Config{
+		Version: config.CurrentVersion,
+		Profiles: []config.Profile{
+			{ID: "p1", Name: "one", Host: "proxy-1", Port: 22, User: "alice"},
+			{ID: "p2", Name: "two", Host: "proxy-2", Port: 22, User: "bob"},
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
 
 	if err := runLike(cmd, root, false); err == nil {
-		t.Fatalf("expected runLike to fail without profiles")
+		t.Fatalf("expected runLike to fail without explicit profile when multiple profiles exist")
 	}
 	if releaseCalls != 1 {
 		t.Fatalf("expected one release call, got %d", releaseCalls)
+	}
+}
+
+func TestRunLikeHonorsDisabledProxyPreference(t *testing.T) {
+	store := newTempStore(t)
+	disabled := false
+	if err := store.Save(config.Config{
+		Version:      config.CurrentVersion,
+		ProxyEnabled: &disabled,
+		Profiles: []config.Profile{
+			{ID: "p1", Name: "one", Host: "proxy-1", Port: 22, User: "alice"},
+			{ID: "p2", Name: "two", Host: "proxy-2", Port: 22, User: "bob"},
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	outFile := filepath.Join(t.TempDir(), "env.txt")
+	cmdPath := writeRunEnvStub(t, outFile)
+	t.Setenv("HTTP_PROXY", "http://example.com")
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := cmd.Flags().Parse([]string{"--", cmdPath}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+
+	root := &rootOptions{configPath: store.Path()}
+	if err := runLike(cmd, root, false); err != nil {
+		t.Fatalf("runLike error: %v", err)
+	}
+
+	got, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read env file: %v", err)
+	}
+	if string(got) != "http://example.com" {
+		t.Fatalf("expected direct run to preserve HTTP_PROXY, got %q", string(got))
+	}
+}
+
+func TestRunLikeUsesProxyWhenPreferenceEnabled(t *testing.T) {
+	store := newTempStore(t)
+	enabled := true
+	port := startRunHealthServer(t, "inst-1")
+	if err := store.Save(config.Config{
+		Version:      config.CurrentVersion,
+		ProxyEnabled: &enabled,
+		Profiles: []config.Profile{
+			{ID: "p1", Name: "one", Host: "proxy-1", Port: 22, User: "alice"},
+		},
+		Instances: []config.Instance{
+			{
+				ID:         "inst-1",
+				ProfileID:  "p1",
+				HTTPPort:   port,
+				DaemonPID:  os.Getpid(),
+				LastSeenAt: time.Now(),
+			},
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	outFile := filepath.Join(t.TempDir(), "env.txt")
+	cmdPath := writeRunEnvStub(t, outFile)
+	t.Setenv("HTTP_PROXY", "http://example.com")
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := cmd.Flags().Parse([]string{"--", cmdPath}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+
+	root := &rootOptions{configPath: store.Path()}
+	if err := runLike(cmd, root, false); err != nil {
+		t.Fatalf("runLike error: %v", err)
+	}
+
+	got, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read env file: %v", err)
+	}
+	want := fmt.Sprintf("http://127.0.0.1:%d", port)
+	if string(got) != want {
+		t.Fatalf("expected proxy run to set HTTP_PROXY=%q, got %q", want, string(got))
+	}
+}
+
+func TestRunLikeDirectPromptPersistsDisabledPreference(t *testing.T) {
+	store := newTempStore(t)
+	setRunTestStdin(t, "n\n")
+
+	outFile := filepath.Join(t.TempDir(), "env.txt")
+	cmdPath := writeRunEnvStub(t, outFile)
+	t.Setenv("HTTP_PROXY", "http://example.com")
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := cmd.Flags().Parse([]string{"--", cmdPath}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+
+	root := &rootOptions{configPath: store.Path()}
+	if err := runLike(cmd, root, true); err != nil {
+		t.Fatalf("runLike error: %v", err)
+	}
+
+	got, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read env file: %v", err)
+	}
+	if string(got) != "http://example.com" {
+		t.Fatalf("expected direct run to preserve HTTP_PROXY, got %q", string(got))
+	}
+
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.ProxyEnabled == nil || *cfg.ProxyEnabled {
+		t.Fatalf("expected ProxyEnabled=false to be persisted, got %#v", cfg.ProxyEnabled)
+	}
+	if len(cfg.Profiles) != 0 {
+		t.Fatalf("expected direct choice not to auto-create profiles, got %#v", cfg.Profiles)
+	}
+}
+
+func TestRunLikeProxyPromptFailureDoesNotPersistPreference(t *testing.T) {
+	store := newTempStore(t)
+	setRunTestStdin(t, "y\n")
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := cmd.Flags().Parse([]string{"--", "echo"}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+
+	root := &rootOptions{configPath: store.Path()}
+	if err := runLike(cmd, root, false); err == nil {
+		t.Fatalf("expected runLike to fail when proxy is chosen but no profile can be resolved")
+	}
+
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.ProxyEnabled != nil {
+		t.Fatalf("expected proxy preference not to persist on setup failure, got %#v", cfg.ProxyEnabled)
+	}
+}
+
+func TestRunLikeInfersProxyFromProfilesAndPersistsPreference(t *testing.T) {
+	store := newTempStore(t)
+	port := startRunHealthServer(t, "inst-1")
+	if err := store.Save(config.Config{
+		Version: config.CurrentVersion,
+		Profiles: []config.Profile{
+			{ID: "p1", Name: "one", Host: "proxy-1", Port: 22, User: "alice"},
+		},
+		Instances: []config.Instance{
+			{
+				ID:         "inst-1",
+				ProfileID:  "p1",
+				HTTPPort:   port,
+				DaemonPID:  os.Getpid(),
+				LastSeenAt: time.Now(),
+			},
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	outFile := filepath.Join(t.TempDir(), "env.txt")
+	cmdPath := writeRunEnvStub(t, outFile)
+	t.Setenv("HTTP_PROXY", "http://example.com")
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := cmd.Flags().Parse([]string{"--", cmdPath}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+
+	root := &rootOptions{configPath: store.Path()}
+	if err := runLike(cmd, root, false); err != nil {
+		t.Fatalf("runLike error: %v", err)
+	}
+
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.ProxyEnabled == nil || !*cfg.ProxyEnabled {
+		t.Fatalf("expected inferred proxy preference to be persisted as true, got %#v", cfg.ProxyEnabled)
+	}
+}
+
+func TestRunLikeExplicitProfileForcesProxy(t *testing.T) {
+	store := newTempStore(t)
+	disabled := false
+	port := startRunHealthServer(t, "inst-1")
+	if err := store.Save(config.Config{
+		Version:      config.CurrentVersion,
+		ProxyEnabled: &disabled,
+		Profiles: []config.Profile{
+			{ID: "p1", Name: "one", Host: "proxy-1", Port: 22, User: "alice"},
+		},
+		Instances: []config.Instance{
+			{
+				ID:         "inst-1",
+				ProfileID:  "p1",
+				HTTPPort:   port,
+				DaemonPID:  os.Getpid(),
+				LastSeenAt: time.Now(),
+			},
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	outFile := filepath.Join(t.TempDir(), "env.txt")
+	cmdPath := writeRunEnvStub(t, outFile)
+	t.Setenv("HTTP_PROXY", "http://example.com")
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := cmd.Flags().Parse([]string{"one", "--", cmdPath}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+
+	root := &rootOptions{configPath: store.Path()}
+	if err := runLike(cmd, root, false); err != nil {
+		t.Fatalf("runLike error: %v", err)
+	}
+
+	got, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read env file: %v", err)
+	}
+	want := fmt.Sprintf("http://127.0.0.1:%d", port)
+	if string(got) != want {
+		t.Fatalf("expected explicit profile to force proxy HTTP_PROXY=%q, got %q", want, string(got))
+	}
+
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.ProxyEnabled == nil || *cfg.ProxyEnabled {
+		t.Fatalf("expected explicit profile override not to mutate saved ProxyEnabled=false, got %#v", cfg.ProxyEnabled)
 	}
 }

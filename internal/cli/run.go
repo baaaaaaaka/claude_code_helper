@@ -31,7 +31,7 @@ var (
 func newRunCmd(root *rootOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run [profile] -- [cmd args...]",
-		Short: "Run a command through an SSH-backed local proxy",
+		Short: "Run a command using direct mode or an SSH-backed local proxy",
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Keep `run` working, but also auto-init when no profiles exist.
@@ -80,12 +80,46 @@ func runLike(cmd *cobra.Command, root *rootOptions, autoInit bool) error {
 		return err
 	}
 
-	profile, cfg, err := ensureProfile(ctx, store, profileRef, autoInit, cmd.OutOrStdout())
+	// An explicit positional profile keeps the historical "force proxy" behavior.
+	// Without a profile, `run` follows the saved direct/proxy preference just
+	// like the TUI and history commands.
+	if profileRef != "" {
+		profile, cfg, err := ensureProfile(ctx, store, profileRef, autoInit, cmd.OutOrStdout())
+		if err != nil {
+			return err
+		}
+		return runWithProfile(ctx, store, profile, cfg.Instances, after, patchOutcome)
+	}
+
+	pref, err := ensureProxyPreference(ctx, store, "", cmd.ErrOrStderr())
 	if err != nil {
 		return err
 	}
+	useProxy, cfg := pref.Enabled, pref.Cfg
 
-	return runWithProfile(ctx, store, profile, cfg.Instances, after, patchOutcome)
+	if useProxy {
+		profile, cfgWithProfile, err := ensureProfile(ctx, store, "", autoInit, cmd.OutOrStdout())
+		if err != nil {
+			return err
+		}
+		cfg = cfgWithProfile
+		if pref.NeedsPersist {
+			if err := persistProxyPreference(store, true); err != nil {
+				return err
+			}
+		}
+		return runWithProfile(ctx, store, profile, cfg.Instances, after, patchOutcome)
+	}
+
+	if pref.NeedsPersist {
+		if err := persistProxyPreference(store, false); err != nil {
+			return err
+		}
+	}
+
+	opts := defaultRunTargetOptions()
+	opts.UseProxy = false
+	return runTargetWithFallbackWithOptions(ctx, after, "", nil, patchOutcome, nil, opts)
 }
 
 func releasePatchPrepMemory(cmdArgs []string, opts exePatchOptions, outcome *patchOutcome) {

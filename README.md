@@ -49,9 +49,10 @@ tool create a dedicated key if needed. You can toggle proxy mode later with
 - Press Enter to open a Claude Code session.
 - If there is no history yet, Enter starts a new session in the current directory.
 - If you have multiple profiles, select one with `claude-proxy <profile>`.
-- Run any command through the proxy:
-  `claude-proxy run [profile] -- <cmd> [args...]`.
-- If only one profile exists, `[profile]` is optional.
+- Run any command using the current direct/proxy mode:
+  `claude-proxy run -- <cmd> [args...]`.
+- Force SSH proxy mode with a profile:
+  `claude-proxy run <profile> -- <cmd> [args...]`.
 - Example: `claude-proxy run pdx -- curl https://example.com`.
 
 ### Optional: preconfigure a proxy profile
