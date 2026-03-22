@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -375,8 +376,8 @@ func TestRunLikeHonorsDisabledProxyPreference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read env file: %v", err)
 	}
-	if string(got) != "http://example.com" {
-		t.Fatalf("expected direct run to preserve HTTP_PROXY, got %q", string(got))
+	if got := strings.TrimSpace(string(got)); got != "http://example.com" {
+		t.Fatalf("expected direct run to preserve HTTP_PROXY, got %q", got)
 	}
 }
 
@@ -423,8 +424,8 @@ func TestRunLikeUsesProxyWhenPreferenceEnabled(t *testing.T) {
 		t.Fatalf("read env file: %v", err)
 	}
 	want := fmt.Sprintf("http://127.0.0.1:%d", port)
-	if string(got) != want {
-		t.Fatalf("expected proxy run to set HTTP_PROXY=%q, got %q", want, string(got))
+	if got := strings.TrimSpace(string(got)); got != want {
+		t.Fatalf("expected proxy run to set HTTP_PROXY=%q, got %q", want, got)
 	}
 }
 
@@ -451,8 +452,8 @@ func TestRunLikeDirectPromptPersistsDisabledPreference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read env file: %v", err)
 	}
-	if string(got) != "http://example.com" {
-		t.Fatalf("expected direct run to preserve HTTP_PROXY, got %q", string(got))
+	if got := strings.TrimSpace(string(got)); got != "http://example.com" {
+		t.Fatalf("expected direct run to preserve HTTP_PROXY, got %q", got)
 	}
 
 	cfg, err := store.Load()
@@ -579,8 +580,8 @@ func TestRunLikeExplicitProfileForcesProxy(t *testing.T) {
 		t.Fatalf("read env file: %v", err)
 	}
 	want := fmt.Sprintf("http://127.0.0.1:%d", port)
-	if string(got) != want {
-		t.Fatalf("expected explicit profile to force proxy HTTP_PROXY=%q, got %q", want, string(got))
+	if got := strings.TrimSpace(string(got)); got != want {
+		t.Fatalf("expected explicit profile to force proxy HTTP_PROXY=%q, got %q", want, got)
 	}
 
 	cfg, err := store.Load()
