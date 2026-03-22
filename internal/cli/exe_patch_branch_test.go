@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
 )
@@ -245,6 +247,7 @@ func TestMaybePatchExecutableSkipsKnownFailure(t *testing.T) {
 func TestMaybePatchExecutableAlreadyPatchedSkipsVersionProbe(t *testing.T) {
 	requireExePatchEnabled(t)
 	withExePatchTestHooks(t)
+	runtimeGOOS = "linux"
 
 	dir := t.TempDir()
 	path := writeClaudeVersionStub(t, dir, "Claude Code 1.2.3")
@@ -288,6 +291,8 @@ func TestMaybePatchExecutableWindowsHistoricalVerificationPreservesTargetVersion
 	withExePatchTestHooks(t)
 
 	runtimeGOOS = "windows"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "claude")
@@ -321,14 +326,24 @@ func TestMaybePatchExecutableWindowsHistoricalVerificationPreservesTargetVersion
 		versionCalls++
 		return "2.1.3"
 	}
+	runClaudeTimedProbeFn = func(ctx context.Context, path string, arg string, timeout time.Duration) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
 
-	outcome, err := maybePatchExecutable(yoloClaudeArgs("claude"), exePatchOptions{
+	outcome, err := maybePatchExecutableWithContext(ctx, yoloClaudeArgs("claude"), exePatchOptions{
 		enabledFlag:    true,
 		policySettings: true,
 	}, filepath.Join(dir, "config.json"), io.Discard)
 	if err != nil {
 		t.Fatalf("maybePatchExecutable error: %v", err)
 	}
+	defer func() {
+		cancel()
+		if outcome != nil && outcome.readiness != nil {
+			<-outcome.readiness.done
+		}
+	}()
 	if outcome == nil {
 		t.Fatalf("expected non-nil outcome")
 	}
