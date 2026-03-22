@@ -56,4 +56,4 @@ Rows are added automatically after tests pass for a Claude Code release.
 | 2.1.78 | v0.0.44-rc.3 | pass | pass | pass | pass | pass |
 | 2.1.79 | v0.0.46 | pass | pass | pass | pass | pass |
 | 2.1.80 | v0.0.46 | pass | pass | pass | pass | pass |
-| 2.1.81 | v0.0.47 | pass | pass | fail | pass | pass |
+| 2.1.81 | v0.0.47-rc.1 | pass | pass | pass | pass | pass |
