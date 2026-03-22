@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
@@ -69,6 +70,27 @@ func TestBackupAndRestoreExecutable(t *testing.T) {
 
 	if _, err := os.Stat(backupPath); err != nil {
 		t.Fatalf("expected backup to remain: %v", err)
+	}
+}
+
+func TestShouldRetryWindowsRestore(t *testing.T) {
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	runtimeGOOS = "windows"
+	shareErr := &os.PathError{Op: "open", Path: `C:\claude.exe`, Err: syscall.Errno(32)}
+	if !shouldRetryWindowsRestore(shareErr) {
+		t.Fatalf("expected sharing violation to retry")
+	}
+
+	otherErr := &os.PathError{Op: "open", Path: `C:\claude.exe`, Err: syscall.Errno(2)}
+	if shouldRetryWindowsRestore(otherErr) {
+		t.Fatalf("did not expect unrelated error to retry")
+	}
+
+	runtimeGOOS = "linux"
+	if shouldRetryWindowsRestore(shareErr) {
+		t.Fatalf("did not expect retry outside windows")
 	}
 }
 

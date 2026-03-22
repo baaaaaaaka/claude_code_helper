@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
@@ -896,13 +898,36 @@ func restoreExecutableFromBackup(outcome *patchOutcome) error {
 	if err != nil {
 		return fmt.Errorf("stat backup file: %w", err)
 	}
-	src, err := os.Open(restorePath)
+	return restoreExecutableFileWithRetry(restorePath, outcome.TargetPath, info.Mode().Perm())
+}
+
+func restoreExecutableFileWithRetry(srcPath string, dstPath string, perm os.FileMode) error {
+	attempts := 1
+	if runtimeGOOS == "windows" {
+		attempts = 5
+	}
+	var err error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		err = restoreExecutableFile(srcPath, dstPath, perm)
+		if err == nil {
+			return nil
+		}
+		if !shouldRetryWindowsRestore(err) || attempt == attempts {
+			return err
+		}
+		time.Sleep(time.Duration(attempt) * 100 * time.Millisecond)
+	}
+	return err
+}
+
+func restoreExecutableFile(srcPath string, dstPath string, perm os.FileMode) error {
+	src, err := os.Open(srcPath)
 	if err != nil {
 		return fmt.Errorf("read backup file: %w", err)
 	}
 	defer src.Close()
 
-	dst, err := os.OpenFile(outcome.TargetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())
+	dst, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
 	if err != nil {
 		return fmt.Errorf("restore executable from backup: %w", err)
 	}
@@ -918,6 +943,13 @@ func restoreExecutableFromBackup(outcome *patchOutcome) error {
 		return fmt.Errorf("restore executable from backup: %w", err)
 	}
 	return nil
+}
+
+func shouldRetryWindowsRestore(err error) bool {
+	if runtimeGOOS != "windows" {
+		return false
+	}
+	return errors.Is(err, syscall.Errno(32)) || errors.Is(err, syscall.Errno(33))
 }
 
 // disableClaudeBytePatch removes Claude-specific built-in byte patch state for
