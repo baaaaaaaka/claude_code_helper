@@ -308,6 +308,9 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 	}
 
 	isClaude := isClaudeExecutable(cmdArgs[0], resolvedPath)
+	if !isClaude {
+		builtinSpecs = nil
+	}
 	yoloRequested := hasYoloBypassPermissionsArg(cmdArgs)
 	glibcCompatHost := isClaude && glibcCompat && glibcCompatHostEligibleFn()
 	patchTargetPath := resolvedPath
@@ -350,9 +353,27 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 	}
 
 	proxyVersion := currentProxyVersionFn()
+	var historyStore *config.PatchHistoryStore
+	if len(specs) > 0 {
+		historyStore = initPatchHistoryStore(configPath, log)
+		if isClaude {
+			if err := purgeStalePatchFailures(configPath, proxyVersion); err != nil {
+				_, _ = fmt.Fprintf(log, "exe-patch: failed to read patch failure config: %v\n", err)
+			}
+		}
+	}
+
+	var outcome *patchOutcome
+	if len(specs) > 0 {
+		outcome, err = findAlreadyPatchedExecutable(patchTargetPath, specs, log, historyStore, proxyVersion)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	targetVersion := ""
 	targetSHA := ""
-	if isClaude {
+	if outcome == nil && isClaude {
 		targetVersion = resolveClaudeVersionFn(resolvedPath)
 		if targetVersion == "" {
 			if sha, err := hashFileSHA256Fn(resolvedPath); err == nil {
@@ -388,14 +409,11 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 		}
 	}
 
-	historyStore, err := newPatchHistoryStoreFn(configPath)
-	if err != nil {
-		_, _ = fmt.Fprintf(log, "exe-patch: failed to init patch history: %v\n", err)
-		historyStore = nil
+	if historyStore == nil {
+		historyStore = initPatchHistoryStore(configPath, log)
 	}
 
-	var outcome *patchOutcome
-	if len(specs) > 0 {
+	if outcome == nil && len(specs) > 0 {
 		outcome, err = patchExecutableFn(patchTargetPath, specs, log, opts.preview, opts.dryRun, historyStore, proxyVersion)
 		if err != nil {
 			return nil, err
@@ -442,6 +460,14 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 	outcome.IsClaude = isClaude
 	outcome.ConfigPath = configPath
 	outcome.LogWriter = log
+	if runtimeGOOS == "windows" &&
+		outcome.IsClaude &&
+		outcome.AlreadyPatched &&
+		!outcome.Verified &&
+		outcome.BackupPath != "" &&
+		strings.TrimSpace(outcome.TargetVersion) == "" {
+		outcome.TargetVersion = resolveClaudeVersionFn(resolvedPath)
+	}
 
 	bytePatchApplied := outcome.Applied
 	if bytePatchApplied && outcome.IsClaude {
@@ -523,6 +549,77 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 	return outcome, nil
 }
 
+func initPatchHistoryStore(configPath string, log io.Writer) *config.PatchHistoryStore {
+	if log == nil {
+		log = io.Discard
+	}
+	historyStore, err := newPatchHistoryStoreFn(configPath)
+	if err != nil {
+		_, _ = fmt.Fprintf(log, "exe-patch: failed to init patch history: %v\n", err)
+		return nil
+	}
+	return historyStore
+}
+
+func loadPatchHistory(store *config.PatchHistoryStore, log io.Writer) (config.PatchHistory, bool) {
+	if store == nil {
+		return config.PatchHistory{}, false
+	}
+	if log == nil {
+		log = io.Discard
+	}
+	history, err := store.Load()
+	if err != nil {
+		_, _ = fmt.Fprintf(log, "exe-patch: failed to load patch history: %v\n", err)
+		return config.PatchHistory{}, false
+	}
+	return history, true
+}
+
+func findAlreadyPatchedExecutable(path string, specs []exePatchSpec, log io.Writer, historyStore *config.PatchHistoryStore, proxyVersion string) (*patchOutcome, error) {
+	if historyStore == nil || len(specs) == 0 {
+		return nil, nil
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat target executable %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("target executable %q is not a regular file", path)
+	}
+
+	currentHash, err := hashFileSHA256Fn(path)
+	if err != nil {
+		return nil, fmt.Errorf("hash target executable %q: %w", path, err)
+	}
+
+	specsHash := patchSpecsHash(specs)
+	history, historyLoaded := loadPatchHistory(historyStore, log)
+	if !historyLoaded || !history.IsPatched(path, specsHash, currentHash, proxyVersion) {
+		return nil, nil
+	}
+
+	outcome := &patchOutcome{
+		AlreadyPatched: true,
+		HistoryStore:   historyStore,
+		SpecsHash:      specsHash,
+		TargetPath:     path,
+		TargetSHA256:   currentHash,
+		Verified:       history.IsVerified(path, specsHash, currentHash, proxyVersion),
+	}
+	if runtimeGOOS != "windows" && !outcome.Verified {
+		outcome.Verified = true
+	}
+
+	backupPath := originalBackupPath(path)
+	if info, statErr := os.Stat(backupPath); statErr == nil && info.Mode().IsRegular() {
+		outcome.BackupPath = backupPath
+	}
+	logAlreadyPatched(log, path)
+	return outcome, nil
+}
+
 func usesGlibcCompatMirrorLaunch(outcome *patchOutcome, sourcePath string) bool {
 	if outcome == nil {
 		return false
@@ -550,30 +647,18 @@ func patchExecutable(path string, specs []exePatchSpec, log io.Writer, preview b
 		return nil, fmt.Errorf("target executable %q is not a regular file", path)
 	}
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read target executable %q: %w", path, err)
-	}
-
 	specsHash := patchSpecsHash(specs)
 	outcome := &patchOutcome{
 		TargetPath:   path,
 		SpecsHash:    specsHash,
 		HistoryStore: historyStore,
 	}
-	currentHash := hashBytes(data)
-	outcome.TargetSHA256 = currentHash
-	var history config.PatchHistory
-	historyLoaded := false
-	if historyStore != nil {
-		loaded, err := historyStore.Load()
-		if err != nil {
-			_, _ = fmt.Fprintf(log, "exe-patch: failed to load patch history: %v\n", err)
-		} else {
-			history = loaded
-			historyLoaded = true
-		}
+	currentHash, err := hashFileSHA256Fn(path)
+	if err != nil {
+		return nil, fmt.Errorf("hash target executable %q: %w", path, err)
 	}
+	outcome.TargetSHA256 = currentHash
+	history, historyLoaded := loadPatchHistory(historyStore, log)
 	if historyLoaded {
 		if history.IsPatched(path, specsHash, currentHash, proxyVersion) {
 			outcome.AlreadyPatched = true
@@ -602,9 +687,9 @@ func patchExecutable(path string, specs []exePatchSpec, log io.Writer, preview b
 		}
 	}
 
-	sourceData := data
+	sourcePath := path
 	backupPath := originalBackupPath(path)
-	if backupBytes, err := os.ReadFile(backupPath); err == nil {
+	if backupHash, err := hashFileSHA256Fn(backupPath); err == nil {
 		// Check if the backup is stale. If the current binary matches
 		// neither the backup (original) nor the stored patched hash, it
 		// means the target was replaced externally (e.g. Claude Code
@@ -612,7 +697,6 @@ func patchExecutable(path string, specs []exePatchSpec, log io.Writer, preview b
 		// version and must not be used as the patch source — doing so
 		// would overwrite the new binary with a patched copy of the old
 		// one, causing a version rollback.
-		backupHash := hashBytes(backupBytes)
 		storedPatchedHash := ""
 		if historyLoaded {
 			if entry, ok := history.Find(path, specsHash); ok {
@@ -628,14 +712,22 @@ func patchExecutable(path string, specs []exePatchSpec, log io.Writer, preview b
 				_, _ = fmt.Fprintf(log, "exe-patch: failed to remove stale backup: %v\n", err)
 			}
 		} else {
-			sourceData = backupBytes
+			sourcePath = backupPath
 			outcome.BackupPath = backupPath
 		}
 	} else if err != nil && !os.IsNotExist(err) {
 		_, _ = fmt.Fprintf(log, "exe-patch: failed to read backup %s: %v (using current binary)\n", backupPath, err)
 	}
 
-	patched, stats, err := applyExePatches(sourceData, specs, log, preview)
+	data, err := os.ReadFile(sourcePath)
+	if err != nil {
+		if sourcePath == path {
+			return nil, fmt.Errorf("read target executable %q: %w", path, err)
+		}
+		return nil, fmt.Errorf("read patch source %q: %w", sourcePath, err)
+	}
+
+	patched, stats, err := applyExePatches(data, specs, log, preview)
 	if err != nil {
 		return nil, fmt.Errorf("patch target executable %q: %w", path, err)
 	}
@@ -650,16 +742,15 @@ func patchExecutable(path string, specs []exePatchSpec, log io.Writer, preview b
 			touched = true
 		}
 	}
-	if changed && bytes.Equal(patched, data) {
-		changed = false
-		for i := range stats {
-			stats[i].Changed = 0
-		}
-	}
-
 	var patchedHash string
 	if changed {
 		patchedHash = hashBytes(patched)
+		if patchedHash == currentHash {
+			changed = false
+			for i := range stats {
+				stats[i].Changed = 0
+			}
+		}
 	}
 
 	backupReady := outcome.BackupPath != ""
@@ -805,11 +896,25 @@ func restoreExecutableFromBackup(outcome *patchOutcome) error {
 	if err != nil {
 		return fmt.Errorf("stat backup file: %w", err)
 	}
-	data, err := os.ReadFile(restorePath)
+	src, err := os.Open(restorePath)
 	if err != nil {
 		return fmt.Errorf("read backup file: %w", err)
 	}
-	if err := os.WriteFile(outcome.TargetPath, data, info.Mode().Perm()); err != nil {
+	defer src.Close()
+
+	dst, err := os.OpenFile(outcome.TargetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())
+	if err != nil {
+		return fmt.Errorf("restore executable from backup: %w", err)
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		_ = dst.Close()
+		return fmt.Errorf("restore executable from backup: %w", err)
+	}
+	if err := dst.Sync(); err != nil {
+		_ = dst.Close()
+		return fmt.Errorf("restore executable from backup: %w", err)
+	}
+	if err := dst.Close(); err != nil {
 		return fmt.Errorf("restore executable from backup: %w", err)
 	}
 	return nil
@@ -842,22 +947,47 @@ func disableClaudeBytePatch(resolvedPath string, configPath string, log io.Write
 		return fmt.Errorf("hash backup executable %q: %w", backupPath, err)
 	}
 
-	var historyStore *config.PatchHistoryStore
-	if store, err := newPatchHistoryStoreFn(configPath); err != nil {
-		_, _ = fmt.Fprintf(log, "exe-patch: failed to init patch history: %v\n", err)
-	} else {
-		historyStore = store
-	}
-
 	if currentHash == backupHash {
 		return nil
 	}
 
-	looksPatched, err := looksLikeClaudeBuiltInBytePatch(resolvedPath)
+	historyStore := initPatchHistoryStore(configPath, log)
+
+	specs, err := policySettingsSpecs()
 	if err != nil {
 		return err
 	}
-	if !looksPatched {
+	expectedPatched, expectedPatchedHash, touched, err := claudeBuiltInPatchedBytesFromBackup(backupPath, specs)
+	if err != nil {
+		return err
+	}
+
+	shouldRestore := touched && strings.EqualFold(currentHash, expectedPatchedHash)
+	matchedHistoryEntry := false
+	if historyStore != nil {
+		history, historyLoaded := loadPatchHistory(historyStore, log)
+		if historyLoaded {
+			specsHash := patchSpecsHash(specs)
+			if entry, ok := history.Find(resolvedPath, specsHash); ok && touched && strings.EqualFold(entry.PatchedSHA256, expectedPatchedHash) {
+				matchedHistoryEntry = true
+				if strings.EqualFold(currentHash, entry.PatchedSHA256) {
+					shouldRestore = true
+				} else {
+					shouldRestore, err = looksLikeClaudeBuiltInBytePatch(resolvedPath)
+					if err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+	if !shouldRestore && touched && !matchedHistoryEntry {
+		shouldRestore, err = fileHasStrictPrefix(resolvedPath, expectedPatched)
+		if err != nil {
+			return err
+		}
+	}
+	if !shouldRestore {
 		return nil
 	}
 
@@ -879,6 +1009,72 @@ func disableClaudeBytePatch(resolvedPath string, configPath string, log io.Write
 		_, _ = fmt.Fprintf(log, "exe-patch: failed to remove backup %s: %v\n", backupPath, err)
 	}
 	return nil
+}
+
+func claudeBuiltInPatchedBytesFromBackup(backupPath string, specs []exePatchSpec) ([]byte, string, bool, error) {
+	data, err := os.ReadFile(backupPath)
+	if err != nil {
+		return nil, "", false, fmt.Errorf("read backup executable %q: %w", backupPath, err)
+	}
+	patched, stats, err := applyExePatches(data, specs, io.Discard, false)
+	if err != nil {
+		return nil, "", false, nil
+	}
+	touched := false
+	for _, stat := range stats {
+		if stat.Eligible > 0 || stat.Replacements > 0 {
+			touched = true
+			break
+		}
+	}
+	if !touched {
+		return nil, "", false, nil
+	}
+	return patched, hashBytes(patched), true, nil
+}
+
+func fileHasStrictPrefix(path string, prefix []byte) (bool, error) {
+	if len(prefix) == 0 {
+		return false, nil
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, fmt.Errorf("stat target executable %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("target executable %q is not a regular file", path)
+	}
+	if info.Size() <= int64(len(prefix)) {
+		return false, nil
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return false, fmt.Errorf("read target executable %q: %w", path, err)
+	}
+	defer f.Close()
+
+	bufSize := 1 << 20
+	if len(prefix) < bufSize {
+		bufSize = len(prefix)
+	}
+	buf := make([]byte, bufSize)
+	offset := 0
+	for offset < len(prefix) {
+		n := len(buf)
+		if remaining := len(prefix) - offset; remaining < n {
+			n = remaining
+		}
+		if _, err := io.ReadFull(f, buf[:n]); err != nil {
+			return false, fmt.Errorf("read target executable %q: %w", path, err)
+		}
+		if !bytes.Equal(buf[:n], prefix[offset:offset+n]) {
+			return false, nil
+		}
+		offset += n
+	}
+	return true, nil
 }
 
 func looksLikeClaudeBuiltInBytePatch(path string) (bool, error) {

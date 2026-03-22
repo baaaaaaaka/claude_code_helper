@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -221,5 +222,45 @@ func TestRunLikePropagatesPatchError(t *testing.T) {
 	}
 	if err := runLike(cmd, root, false); err == nil {
 		t.Fatalf("expected runLike to return patch error")
+	}
+}
+
+func TestRunLikeReleasesPatchPrepMemoryBeforeProfileSelection(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := cmd.Flags().Parse([]string{"--", "echo"}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+
+	dir := t.TempDir()
+	releaseCalls := 0
+	releasePatchPrepMemoryFn = func(cmdArgs []string, opts exePatchOptions, outcome *patchOutcome) {
+		releaseCalls++
+		if len(cmdArgs) != 1 || cmdArgs[0] != "echo" {
+			t.Fatalf("unexpected command args: %#v", cmdArgs)
+		}
+		if outcome == nil || outcome.TargetPath != filepath.Join(dir, "claude") {
+			t.Fatalf("unexpected patch outcome: %#v", outcome)
+		}
+	}
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		return &patchOutcome{TargetPath: filepath.Join(dir, "claude")}, nil
+	}
+
+	root := &rootOptions{
+		configPath: filepath.Join(dir, "config.json"),
+		exePatch: exePatchOptions{
+			enabledFlag:    true,
+			policySettings: true,
+		},
+	}
+
+	if err := runLike(cmd, root, false); err == nil {
+		t.Fatalf("expected runLike to fail without profiles")
+	}
+	if releaseCalls != 1 {
+		t.Fatalf("expected one release call, got %d", releaseCalls)
 	}
 }

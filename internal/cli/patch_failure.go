@@ -160,6 +160,24 @@ func shouldSkipPatchFailure(configPath string, proxyVersion string, claudeVersio
 	return cfg.HasPatchFailure(hostID, proxyVersion, claudeVersion, claudeSHA), nil
 }
 
+func purgeStalePatchFailures(configPath string, proxyVersion string) error {
+	if runtimeGOOS != "windows" {
+		return nil
+	}
+	store, err := config.NewStore(configPath)
+	if err != nil {
+		return err
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		return err
+	}
+	if !cfg.PurgeStalePatchFailures(proxyVersion) {
+		return nil
+	}
+	return store.Save(cfg)
+}
+
 func recordPatchFailure(configPath string, outcome *patchOutcome, reason string) error {
 	if outcome == nil || !outcome.IsClaude {
 		return nil

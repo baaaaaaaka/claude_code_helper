@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -21,7 +23,10 @@ import (
 	"github.com/baaaaaaaka/claude_code_helper/internal/stack"
 )
 
-var stackStart = stack.Start
+var (
+	stackStart               = stack.Start
+	releasePatchPrepMemoryFn = releasePatchPrepMemory
+)
 
 func newRunCmd(root *rootOptions) *cobra.Command {
 	cmd := &cobra.Command{
@@ -65,6 +70,7 @@ func runLike(cmd *cobra.Command, root *rootOptions, autoInit bool) error {
 	if err != nil {
 		return err
 	}
+	releasePatchPrepMemoryFn(after, root.exePatch, patchOutcome)
 	if root.exePatch.dryRun && root.exePatch.enabled() {
 		return nil
 	}
@@ -80,6 +86,39 @@ func runLike(cmd *cobra.Command, root *rootOptions, autoInit bool) error {
 	}
 
 	return runWithProfile(ctx, store, profile, cfg.Instances, after, patchOutcome)
+}
+
+func releasePatchPrepMemory(cmdArgs []string, opts exePatchOptions, outcome *patchOutcome) {
+	if runtimeGOOS == "windows" || !opts.enabled() {
+		return
+	}
+
+	targetPath := ""
+	if outcome != nil {
+		targetPath = firstNonEmpty(outcome.SourcePath, outcome.TargetPath)
+	}
+	if targetPath == "" && len(cmdArgs) > 0 {
+		exePath, err := execLookPathFn(cmdArgs[0])
+		if err != nil {
+			return
+		}
+		resolvedPath, err := resolveExecutablePathFn(exePath)
+		if err != nil {
+			return
+		}
+		targetPath = resolvedPath
+	}
+	if targetPath == "" {
+		return
+	}
+
+	info, err := os.Stat(targetPath)
+	if err != nil || !info.Mode().IsRegular() || info.Size() < 64<<20 {
+		return
+	}
+
+	runtime.GC()
+	debug.FreeOSMemory()
 }
 
 func selectProfile(cfg config.Config, ref string) (config.Profile, error) {

@@ -187,6 +187,34 @@ func TestDisableClaudeBytePatchSkipsWhenCurrentIsNotBuiltInPatch(t *testing.T) {
 	}
 }
 
+func TestDisableClaudeBytePatchRestoresModifiedPatchedBackupWithoutHistory(t *testing.T) {
+	requireExePatchEnabled(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "claude")
+	original, patched := writeBuiltInPatchedClaudeBinary(t, path)
+	current := append(append([]byte{}, patched...), []byte("\ncustom-tail")...)
+
+	if err := os.WriteFile(path, current, 0o700); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+
+	if err := disableClaudeBytePatch(path, filepath.Join(dir, "config.json"), io.Discard, false); err != nil {
+		t.Fatalf("disableClaudeBytePatch error: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if string(data) != string(original) {
+		t.Fatalf("expected target to be restored, got %q", string(data))
+	}
+	if _, err := os.Stat(originalBackupPath(path)); !os.IsNotExist(err) {
+		t.Fatalf("expected backup to be removed after restore, got err=%v", err)
+	}
+}
+
 func TestDisableClaudeBytePatchRejectsNonRegularBackup(t *testing.T) {
 	requireExePatchEnabled(t)
 
@@ -450,21 +478,41 @@ func TestDisableClaudeBytePatchPropagatesLooksLikeError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "claude")
 	backupPath := originalBackupPath(path)
-	if err := os.WriteFile(backupPath, []byte("backup"), 0o700); err != nil {
-		t.Fatalf("write backup: %v", err)
+	_, patched := writeBuiltInPatchedClaudeBinary(t, path)
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove target: %v", err)
+	}
+
+	specs, err := policySettingsSpecs()
+	if err != nil {
+		t.Fatalf("policySettingsSpecs error: %v", err)
+	}
+	store, err := config.NewPatchHistoryStore(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatalf("new patch history store: %v", err)
+	}
+	if err := store.Update(func(h *config.PatchHistory) error {
+		h.Upsert(config.PatchHistoryEntry{
+			Path:          path,
+			SpecsSHA256:   patchSpecsHash(specs),
+			PatchedSHA256: hashBytes(patched),
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("seed history: %v", err)
 	}
 
 	hashFileSHA256Fn = func(gotPath string) (string, error) {
 		if gotPath == path {
-			return "target-hash", nil
+			return "modified-patched-hash", nil
 		}
 		if gotPath == backupPath {
-			return "backup-hash", nil
+			return hashBytes([]byte("unused-backup-hash-source")), nil
 		}
 		return "", errors.New("unexpected hash path")
 	}
 
-	err := disableClaudeBytePatch(path, filepath.Join(dir, "config.json"), io.Discard, false)
+	err = disableClaudeBytePatch(path, filepath.Join(dir, "config.json"), io.Discard, false)
 	if err == nil || !strings.Contains(err.Error(), "read target executable") {
 		t.Fatalf("expected looksLike read error, got %v", err)
 	}

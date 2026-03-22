@@ -35,8 +35,7 @@ func applyPolicySettingsDisablePatch(data []byte, startRe *regexp.Regexp, log io
 	}
 	stats.Segments = len(matches)
 
-	patched := make([]byte, len(data))
-	copy(patched, data)
+	var patched []byte
 
 	lastEnd := 0
 	for _, match := range matches {
@@ -66,7 +65,7 @@ func applyPolicySettingsDisablePatch(data []byte, startRe *regexp.Regexp, log io
 		}
 
 		repl := paddedLiteral("return null;", contentEnd-contentStart)
-		before := patched[contentStart:contentEnd]
+		before := data[contentStart:contentEnd]
 		if preview {
 			logPatchPreview(log, "policySettings-disable", before, repl)
 		}
@@ -76,12 +75,19 @@ func applyPolicySettingsDisablePatch(data []byte, startRe *regexp.Regexp, log io
 		stats.Replacements++
 		if !bytes.Equal(before, repl) {
 			stats.Changed++
+			if patched == nil {
+				patched = make([]byte, len(data))
+				copy(patched, data)
+			}
+			copy(patched[contentStart:contentEnd], repl)
 		}
-		copy(patched[contentStart:contentEnd], repl)
 		lastEnd = blockEnd
 	}
 
 	if stats.Eligible == 0 {
+		return data, stats, nil
+	}
+	if patched == nil {
 		return data, stats, nil
 	}
 	return patched, stats, nil
@@ -98,12 +104,19 @@ func applyBypassPermissionsGatePatch(data []byte, log io.Writer, preview bool) (
 		{[]byte(bypassPermissionsSettingKey), []byte(bypassPermissionsSettingPatched), "settings-key"},
 	}
 
-	changed := false
+	total := 0
+	for _, repl := range replacements {
+		total += bytes.Count(data, repl.before)
+	}
+	if total == 0 {
+		return data, stats, nil
+	}
+
 	patched := make([]byte, len(data))
 	copy(patched, data)
 
 	for _, repl := range replacements {
-		count := bytes.Count(patched, repl.before)
+		count := bytes.Count(data, repl.before)
 		if count == 0 {
 			continue
 		}
@@ -114,14 +127,10 @@ func applyBypassPermissionsGatePatch(data []byte, log io.Writer, preview bool) (
 		stats.Eligible += count
 		stats.Patched += count
 		stats.Replacements += count
-		patched = bytes.ReplaceAll(patched, repl.before, repl.after)
-		changed = true
 		stats.Changed += count
+		replaceAllFixedLengthInPlace(patched, repl.before, repl.after)
 	}
 
-	if !changed {
-		return data, stats, nil
-	}
 	return patched, stats, nil
 }
 
@@ -136,12 +145,19 @@ func applyRemoteSettingsDisablePatch(data []byte, log io.Writer, preview bool) (
 		{[]byte(remoteSettingsAPIPath), []byte(remoteSettingsAPIPathPatched), "api-path"},
 	}
 
-	changed := false
+	total := 0
+	for _, repl := range replacements {
+		total += bytes.Count(data, repl.before)
+	}
+	if total == 0 {
+		return data, stats, nil
+	}
+
 	patched := make([]byte, len(data))
 	copy(patched, data)
 
 	for _, repl := range replacements {
-		count := bytes.Count(patched, repl.before)
+		count := bytes.Count(data, repl.before)
 		if count == 0 {
 			continue
 		}
@@ -152,14 +168,10 @@ func applyRemoteSettingsDisablePatch(data []byte, log io.Writer, preview bool) (
 		stats.Eligible += count
 		stats.Patched += count
 		stats.Replacements += count
-		patched = bytes.ReplaceAll(patched, repl.before, repl.after)
-		changed = true
 		stats.Changed += count
+		replaceAllFixedLengthInPlace(patched, repl.before, repl.after)
 	}
 
-	if !changed {
-		return data, stats, nil
-	}
 	return patched, stats, nil
 }
 
@@ -230,6 +242,22 @@ func applyRootBypassGuardPatch(data []byte, log io.Writer, preview bool) ([]byte
 	stats.Replacements = len(indices)
 	stats.Changed = len(indices)
 	return patched, stats, nil
+}
+
+func replaceAllFixedLengthInPlace(data []byte, before []byte, after []byte) {
+	if len(before) == 0 || len(before) != len(after) {
+		return
+	}
+	searchStart := 0
+	for {
+		rel := bytes.Index(data[searchStart:], before)
+		if rel < 0 {
+			return
+		}
+		idx := searchStart + rel
+		copy(data[idx:idx+len(after)], after)
+		searchStart = idx + len(after)
+	}
 }
 
 func paddedLiteral(literal string, length int) []byte {

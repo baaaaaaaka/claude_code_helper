@@ -37,6 +37,7 @@ func withExePatchTestHooks(t *testing.T) {
 	prevWaitReady := waitPatchedExecutableReadyFn
 	prevRunWithProfileOptions := runWithProfileOptionsFn
 	prevRunTargetWithFallback := runTargetWithFallbackWithOptionsFn
+	prevReleasePatchPrepMemory := releasePatchPrepMemoryFn
 	t.Cleanup(func() {
 		execLookPathFn = prevLookPath
 		resolveExecutablePathFn = prevResolvePath
@@ -60,6 +61,7 @@ func withExePatchTestHooks(t *testing.T) {
 		waitPatchedExecutableReadyFn = prevWaitReady
 		runWithProfileOptionsFn = prevRunWithProfileOptions
 		runTargetWithFallbackWithOptionsFn = prevRunTargetWithFallback
+		releasePatchPrepMemoryFn = prevReleasePatchPrepMemory
 	})
 }
 
@@ -237,6 +239,107 @@ func TestMaybePatchExecutableSkipsKnownFailure(t *testing.T) {
 	}
 	if !strings.Contains(string(got), "Claude Code 1.2.3") {
 		t.Fatalf("expected executable to remain unchanged")
+	}
+}
+
+func TestMaybePatchExecutableAlreadyPatchedSkipsVersionProbe(t *testing.T) {
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	dir := t.TempDir()
+	path := writeClaudeVersionStub(t, dir, "Claude Code 1.2.3")
+	setStubPath(t, dir)
+
+	configPath := filepath.Join(dir, "config.json")
+	if _, err := maybePatchExecutable(yoloClaudeArgs("claude"), patchOptionsForVersionReplacement(`echo "Claude Code 9.9.9"`), configPath, io.Discard); err != nil {
+		t.Fatalf("initial patch error: %v", err)
+	}
+
+	resolveCalled := false
+	resolveClaudeVersionFn = func(path string) string {
+		resolveCalled = true
+		return "1.2.3"
+	}
+	skipCalled := false
+	shouldSkipPatchFailureFn = func(configPath string, proxyVersion string, claudeVersion string, claudeSHA string) (bool, error) {
+		skipCalled = true
+		return false, nil
+	}
+
+	outcome, err := maybePatchExecutable(yoloClaudeArgs("claude"), patchOptionsForVersionReplacement(`echo "Claude Code 9.9.9"`), configPath, io.Discard)
+	if err != nil {
+		t.Fatalf("maybePatchExecutable error: %v", err)
+	}
+	if outcome == nil || !outcome.AlreadyPatched {
+		t.Fatalf("expected already patched outcome, got %#v", outcome)
+	}
+	if resolveCalled {
+		t.Fatalf("expected fast path to skip version probe")
+	}
+	if skipCalled {
+		t.Fatalf("expected fast path to skip patch-failure lookup")
+	}
+	assertSameExistingPath(t, outcome.SourcePath, path)
+	assertSameExistingPath(t, outcome.TargetPath, path)
+}
+
+func TestMaybePatchExecutableWindowsHistoricalVerificationPreservesTargetVersion(t *testing.T) {
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	runtimeGOOS = "windows"
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "claude")
+	_, patched := writeBuiltInPatchedClaudeBinary(t, path)
+
+	execLookPathFn = func(file string) (string, error) { return path, nil }
+	resolveExecutablePathFn = func(path string) (string, error) { return path, nil }
+
+	specs, err := policySettingsSpecs()
+	if err != nil {
+		t.Fatalf("policySettingsSpecs error: %v", err)
+	}
+	store, err := config.NewPatchHistoryStore(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatalf("new patch history store: %v", err)
+	}
+	if err := store.Update(func(h *config.PatchHistory) error {
+		h.Upsert(config.PatchHistoryEntry{
+			Path:          path,
+			SpecsSHA256:   patchSpecsHash(specs),
+			PatchedSHA256: hashBytes(patched),
+			ProxyVersion:  currentProxyVersion(),
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("seed history: %v", err)
+	}
+
+	versionCalls := 0
+	resolveClaudeVersionFn = func(path string) string {
+		versionCalls++
+		return "2.1.3"
+	}
+
+	outcome, err := maybePatchExecutable(yoloClaudeArgs("claude"), exePatchOptions{
+		enabledFlag:    true,
+		policySettings: true,
+	}, filepath.Join(dir, "config.json"), io.Discard)
+	if err != nil {
+		t.Fatalf("maybePatchExecutable error: %v", err)
+	}
+	if outcome == nil {
+		t.Fatalf("expected non-nil outcome")
+	}
+	if !outcome.AlreadyPatched || !outcome.NeedsVerification {
+		t.Fatalf("expected historical verification outcome, got %#v", outcome)
+	}
+	if outcome.TargetVersion != "2.1.3" {
+		t.Fatalf("expected target version to be preserved, got %q", outcome.TargetVersion)
+	}
+	if versionCalls != 1 {
+		t.Fatalf("expected one version probe for windows historical verification, got %d", versionCalls)
 	}
 }
 
