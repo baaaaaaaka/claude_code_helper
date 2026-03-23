@@ -10,7 +10,7 @@ set -euo pipefail
 
 CLAUDE_PROXY_BIN="${CLAUDE_PROXY_BIN:-/dist/claude-proxy}"
 CLAUDE_CLI_TEST_BIN="${CLAUDE_CLI_TEST_BIN:-/dist/claude_cli_test}"
-CLAUDE_VERSION="${CLAUDE_VERSION:-2.1.38}"
+CLAUDE_VERSION="${CLAUDE_VERSION:-${CLAUDE_PATCH_VERSION:-2.1.38}}"
 CLAUDE_BUCKET="${CLAUDE_BUCKET:-https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases}"
 TEST_USER="${TEST_USER:-testuser}"
 SSHD_PORT="${SSHD_PORT:-2222}"

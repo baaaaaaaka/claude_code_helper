@@ -88,7 +88,8 @@ jobs:
           import re
           from pathlib import Path
 
-          platforms = ["linux", "mac", "windows", "rockylinux8", "ubuntu20.04"]
+          legacy_platforms = ["linux", "mac", "windows", "rockylinux8", "ubuntu20.04"]
+          latest_only_platforms = ["centos7"]
           versions = json.loads(os.environ["VERSIONS_JSON"])
           proxy_tag = os.environ["PROXY_TAG"]
 
@@ -112,20 +113,23 @@ jobs:
                   if re.match(r"^[0-9]+(\.[0-9]+)+$", version):
                       rows[version] = row
 
+          latest = versions[-1] if versions else ""
           missing = []
           for version in versions:
               row = rows.get(version)
               if not row:
                   missing.append(version)
                   continue
+              required_platforms = list(legacy_platforms)
+              if version == latest:
+                  required_platforms.extend(latest_only_platforms)
               status_ok = True
-              for platform in platforms:
+              for platform in required_platforms:
                   if row.get(platform, "").lower() != "pass":
                       status_ok = False
                       break
               if not status_ok:
                   missing.append(version)
-          latest = versions[-1] if versions else ""
 
           out_path = os.environ["GITHUB_OUTPUT"]
           with open(out_path, "a", encoding="utf-8") as output:
@@ -235,12 +239,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - platform: "centos7"
+            image: centos:7
+            skip_precheck: "1"
+            needs_patchelf: "1"
+            glibc_compat: "1"
           - platform: "rockylinux8"
             image: rockylinux:8
-            install_cmd: ":"
+            skip_precheck: "0"
+            needs_patchelf: "0"
+            glibc_compat: "0"
           - platform: "ubuntu20.04"
             image: ubuntu:20.04
-            install_cmd: ":"
+            skip_precheck: "0"
+            needs_patchelf: "0"
+            glibc_compat: "0"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -293,7 +306,9 @@ jobs:
           MISSING_VERSIONS_JSON: ${{ needs.detect.outputs.missing_versions }}
           PLATFORM_NAME: ${{ matrix.platform }}
           IMAGE: ${{ matrix.image }}
-          INSTALL_CMD: ${{ matrix.install_cmd }}
+          SKIP_PRECHECK: ${{ matrix.skip_precheck }}
+          NEEDS_PATCHELF: ${{ matrix.needs_patchelf }}
+          GLIBC_COMPAT: ${{ matrix.glibc_compat }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -306,9 +321,12 @@ jobs:
           versions = json.loads(os.environ["MISSING_VERSIONS_JSON"])
           platform = os.environ["PLATFORM_NAME"]
           image = os.environ["IMAGE"]
-          install_cmd = os.environ["INSTALL_CMD"]
+          skip_precheck = os.environ["SKIP_PRECHECK"] == "1"
+          needs_patchelf = os.environ["NEEDS_PATCHELF"] == "1"
+          glibc_compat = os.environ["GLIBC_COMPAT"] == "1"
           test_bin = os.environ["TEST_BIN_PATH"]
           bucket = os.environ["CLAUDE_PATCH_BUCKET"]
+          ci_scripts = os.path.join(os.environ["GITHUB_WORKSPACE"], "scripts", "ci")
           results = {}
           failed = False
 
@@ -327,17 +345,33 @@ jobs:
               cmd += [
                   "-v",
                   f"{test_bin}:/claude_patch_test:ro",
+                  "-v",
+                  f"{ci_scripts}:/ci:ro",
+                  "-e",
+                  "TEST_BIN_PATH=/claude_patch_test",
                   "-e",
                   "CLAUDE_PATCH_TEST=1",
+                  "-e",
+                  f"CLAUDE_PROXY_HOST_ID={platform}-{version.replace('.', '-')}",
                   "-e",
                   f"CLAUDE_PATCH_VERSION={version}",
                   "-e",
                   f"CLAUDE_PATCH_BUCKET={bucket}",
-                  image,
-                  "/bin/sh",
-                  "-c",
-                  f"{install_cmd} && /claude_patch_test -test.run TestClaudePatchIntegration -test.count=1",
               ]
+              if skip_precheck:
+                  cmd += ["-e", "CLAUDE_PATCH_SKIP_PRECHECK=1"]
+              if needs_patchelf:
+                  cmd += ["-e", "CLAUDE_PATCH_NEEDS_PATCHELF=1"]
+              if glibc_compat:
+                  cmd += [
+                      "-e",
+                      "CLAUDE_PROXY_GLIBC_COMPAT=1",
+                      "-e",
+                      "CLAUDE_PROXY_GLIBC_COMPAT_REPO=baaaaaaaka/claude_code_helper",
+                      "-e",
+                      "CLAUDE_PROXY_GLIBC_COMPAT_TAG=glibc-compat-v2.31",
+                  ]
+              cmd += [image, "bash", "/ci/container_claude_patch_smoke.sh"]
               proc = subprocess.run(cmd)
               results[version] = "pass" if proc.returncode == 0 else "fail"
               if proc.returncode != 0:

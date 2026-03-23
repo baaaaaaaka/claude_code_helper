@@ -8,6 +8,7 @@ PLATFORM_COLUMNS = [
     "linux",
     "mac",
     "windows",
+    "centos7",
     "rockylinux8",
     "ubuntu20.04",
 ]
@@ -64,6 +65,7 @@ def render_table(records: dict[str, dict[str, str]]) -> str:
         "# Claude Code compatibility",
         "",
         "Rows are added automatically after tests pass for a Claude Code release.",
+        "CentOS 7 is tracked for the latest Claude Code release only; older rows are not backfilled.",
         "",
         "| " + " | ".join(TABLE_HEADER) + " |",
         "| " + " | ".join("---" for _ in TABLE_HEADER) + " |",

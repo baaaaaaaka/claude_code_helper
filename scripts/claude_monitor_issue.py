@@ -8,6 +8,7 @@ PLATFORM_COLUMNS = [
     "linux",
     "mac",
     "windows",
+    "centos7",
     "rockylinux8",
     "ubuntu20.04",
 ]
@@ -122,8 +123,8 @@ def build_body(
             [
                 "## Version results",
                 "",
-                "| Claude Code version | linux | mac | windows | rockylinux8 | ubuntu20.04 |",
-                "| --- | --- | --- | --- | --- | --- |",
+                "| Claude Code version | linux | mac | windows | centos7 | rockylinux8 | ubuntu20.04 |",
+                "| --- | --- | --- | --- | --- | --- | --- |",
             ]
         )
         for version in sorted(failures, key=version_key):

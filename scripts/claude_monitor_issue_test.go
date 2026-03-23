@@ -66,7 +66,7 @@ func TestClaudeMonitorIssueRequiresProxyTag(t *testing.T) {
 func TestClaudeMonitorIssueSkipsWhenAllPlatformsPass(t *testing.T) {
 	resultsDir := t.TempDir()
 	version := "2.1.80"
-	for _, platform := range []string{"linux", "mac", "windows", "rockylinux8", "ubuntu20.04"} {
+	for _, platform := range []string{"linux", "mac", "windows", "centos7", "rockylinux8", "ubuntu20.04"} {
 		writeMonitorResult(t, resultsDir, platform, map[string]string{version: "pass"})
 	}
 
@@ -106,6 +106,7 @@ func TestClaudeMonitorIssueCreatesIssueForFailedResult(t *testing.T) {
 	writeMonitorResult(t, resultsDir, "linux", map[string]string{version: "pass"})
 	writeMonitorResult(t, resultsDir, "mac", map[string]string{version: "fail"})
 	writeMonitorResult(t, resultsDir, "windows", map[string]string{version: "pass"})
+	writeMonitorResult(t, resultsDir, "centos7", map[string]string{version: "pass"})
 	writeMonitorResult(t, resultsDir, "rockylinux8", map[string]string{version: "pass"})
 
 	outputDir := t.TempDir()
@@ -144,7 +145,7 @@ func TestClaudeMonitorIssueCreatesIssueForFailedResult(t *testing.T) {
 		t.Fatalf("read body: %v", err)
 	}
 	text := string(body)
-	if !strings.Contains(text, "| "+version+" | pass | fail | pass | pass | missing |") {
+	if !strings.Contains(text, "| "+version+" | pass | fail | pass | pass | pass | missing |") {
 		t.Fatalf("expected status table row, got:\n%s", text)
 	}
 	if !strings.Contains(text, "https://github.com/example/repo/actions/runs/123") {
@@ -155,7 +156,7 @@ func TestClaudeMonitorIssueCreatesIssueForFailedResult(t *testing.T) {
 func TestClaudeMonitorIssueCreatesIssueForFailedJobStatus(t *testing.T) {
 	resultsDir := t.TempDir()
 	version := "2.1.82"
-	for _, platform := range []string{"linux", "mac", "windows", "rockylinux8", "ubuntu20.04"} {
+	for _, platform := range []string{"linux", "mac", "windows", "centos7", "rockylinux8", "ubuntu20.04"} {
 		writeMonitorResult(t, resultsDir, platform, map[string]string{version: "pass"})
 	}
 

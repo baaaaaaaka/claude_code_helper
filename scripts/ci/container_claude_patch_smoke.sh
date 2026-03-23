@@ -2,17 +2,26 @@
 set -euo pipefail
 
 test_bin="${TEST_BIN_PATH:-/dist/claude_cli_test}"
+needs_patchelf="${CLAUDE_PATCH_NEEDS_PATCHELF:-0}"
 
 install_deps() {
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
+    pkgs=(ca-certificates)
+    if [[ "$needs_patchelf" == "1" ]]; then
+      pkgs+=(patchelf)
+    fi
     apt-get update
-    apt-get install -y --no-install-recommends ca-certificates
+    apt-get install -y --no-install-recommends "${pkgs[@]}"
     return
   fi
 
   if command -v dnf >/dev/null 2>&1; then
-    dnf -y install ca-certificates
+    pkgs=(ca-certificates)
+    if [[ "$needs_patchelf" == "1" ]]; then
+      pkgs+=(patchelf)
+    fi
+    dnf -y install "${pkgs[@]}"
     return
   fi
 
@@ -22,6 +31,10 @@ install_deps() {
       sed -i 's|^#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-Base.repo || true
     fi
     yum -y install ca-certificates
+    if [[ "$needs_patchelf" == "1" ]]; then
+      yum -y install epel-release
+      yum -y install patchelf
+    fi
     return
   fi
 
