@@ -81,6 +81,7 @@ func TestRunWithProfileUsesExistingInstance(t *testing.T) {
 	instances := []config.Instance{{
 		ID:         "inst-1",
 		ProfileID:  profile.ID,
+		Kind:       config.InstanceKindDaemon,
 		HTTPPort:   port,
 		DaemonPID:  os.Getpid(),
 		LastSeenAt: time.Now(),

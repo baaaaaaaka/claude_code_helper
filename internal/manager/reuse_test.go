@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -25,6 +26,7 @@ func TestFindReusableInstance_PicksMostRecentHealthy(t *testing.T) {
 		{
 			ID:         "inst-a",
 			ProfileID:  "prof-1",
+			Kind:       config.InstanceKindDaemon,
 			HTTPPort:   port1,
 			DaemonPID:  pid,
 			LastSeenAt: now.Add(-1 * time.Minute),
@@ -32,6 +34,7 @@ func TestFindReusableInstance_PicksMostRecentHealthy(t *testing.T) {
 		{
 			ID:         "inst-b",
 			ProfileID:  "prof-1",
+			Kind:       config.InstanceKindDaemon,
 			HTTPPort:   port2,
 			DaemonPID:  pid,
 			LastSeenAt: now,
@@ -55,6 +58,7 @@ func TestFindReusableInstance_IgnoresWrongInstanceID(t *testing.T) {
 		{
 			ID:         "inst-a",
 			ProfileID:  "prof-1",
+			Kind:       config.InstanceKindDaemon,
 			HTTPPort:   port,
 			DaemonPID:  os.Getpid(),
 			LastSeenAt: time.Now(),
@@ -82,6 +86,14 @@ func TestIsInstanceStale(t *testing.T) {
 }
 
 func TestFindReusableInstanceSkipsUnhealthy(t *testing.T) {
+	prevCmdline := procCommandLine
+	prevIsAlive := procIsAlive
+	t.Cleanup(func() {
+		procCommandLine = prevCmdline
+		procIsAlive = prevIsAlive
+	})
+	procIsAlive = func(pid int) bool { return pid == os.Getpid() }
+
 	t.Run("no instances", func(t *testing.T) {
 		if got := FindReusableInstance(nil, "prof-1", HealthClient{}); got != nil {
 			t.Fatalf("expected nil for empty instances")
@@ -99,6 +111,7 @@ func TestFindReusableInstanceSkipsUnhealthy(t *testing.T) {
 		instances := []config.Instance{{
 			ID:         "inst",
 			ProfileID:  "prof-1",
+			Kind:       config.InstanceKindDaemon,
 			HTTPPort:   1,
 			DaemonPID:  os.Getpid(),
 			LastSeenAt: time.Now(),
@@ -113,12 +126,86 @@ func TestFindReusableInstanceSkipsUnhealthy(t *testing.T) {
 		defer closeFn()
 		now := time.Now()
 		instances := []config.Instance{
-			{ID: "inst-1", ProfileID: "prof-1", HTTPPort: port, DaemonPID: os.Getpid(), LastSeenAt: now},
-			{ID: "inst-2", ProfileID: "prof-1", HTTPPort: port, DaemonPID: os.Getpid(), LastSeenAt: now},
+			{ID: "inst-1", ProfileID: "prof-1", Kind: config.InstanceKindDaemon, HTTPPort: port, DaemonPID: os.Getpid(), LastSeenAt: now},
+			{ID: "inst-2", ProfileID: "prof-1", Kind: config.InstanceKindDaemon, HTTPPort: port, DaemonPID: os.Getpid(), LastSeenAt: now},
 		}
 		got := FindReusableInstance(instances, "prof-1", HealthClient{Timeout: 500 * time.Millisecond})
 		if got == nil || got.ID != "inst-1" {
 			t.Fatalf("expected first instance to be chosen, got %#v", got)
+		}
+	})
+
+	t.Run("skips legacy instance when command line is not a daemon", func(t *testing.T) {
+		port, closeFn := startHealthServer(t, "inst-1")
+		defer closeFn()
+		procCommandLine = func(pid int) ([]string, error) {
+			return []string{"/usr/bin/claude-proxy", "run", "p1", "--", "echo", "proxy", "daemon"}, nil
+		}
+		instances := []config.Instance{{
+			ID:         "inst-1",
+			ProfileID:  "prof-1",
+			HTTPPort:   port,
+			DaemonPID:  os.Getpid(),
+			LastSeenAt: time.Now(),
+		}}
+		if got := FindReusableInstance(instances, "prof-1", HealthClient{Timeout: 500 * time.Millisecond}); got != nil {
+			t.Fatalf("expected nil for non-daemon instance, got %#v", got)
+		}
+	})
+
+	t.Run("skips legacy instance when command line lookup fails", func(t *testing.T) {
+		port, closeFn := startHealthServer(t, "inst-lookup-fail")
+		defer closeFn()
+		procCommandLine = func(pid int) ([]string, error) {
+			return nil, errors.New("lookup failed")
+		}
+		instances := []config.Instance{{
+			ID:         "inst-lookup-fail",
+			ProfileID:  "prof-1",
+			HTTPPort:   port,
+			DaemonPID:  os.Getpid(),
+			LastSeenAt: time.Now(),
+		}}
+		if got := FindReusableInstance(instances, "prof-1", HealthClient{Timeout: 500 * time.Millisecond}); got != nil {
+			t.Fatalf("expected nil when command line lookup fails, got %#v", got)
+		}
+	})
+
+	t.Run("skips explicit non-daemon kind", func(t *testing.T) {
+		port, closeFn := startHealthServer(t, "inst-ephemeral")
+		defer closeFn()
+		procCommandLine = func(pid int) ([]string, error) {
+			return []string{"/usr/bin/claude-proxy", "proxy", "daemon", "--instance-id", "inst-ephemeral"}, nil
+		}
+		instances := []config.Instance{{
+			ID:         "inst-ephemeral",
+			ProfileID:  "prof-1",
+			Kind:       "ephemeral",
+			HTTPPort:   port,
+			DaemonPID:  os.Getpid(),
+			LastSeenAt: time.Now(),
+		}}
+		if got := FindReusableInstance(instances, "prof-1", HealthClient{Timeout: 500 * time.Millisecond}); got != nil {
+			t.Fatalf("expected nil for explicit non-daemon kind, got %#v", got)
+		}
+	})
+
+	t.Run("reuses legacy daemon identified from command line", func(t *testing.T) {
+		port, closeFn := startHealthServer(t, "inst-legacy")
+		defer closeFn()
+		procCommandLine = func(pid int) ([]string, error) {
+			return []string{"/usr/bin/claude-proxy", "--config", "/tmp/config.json", "proxy", "daemon", "--instance-id", "inst-legacy"}, nil
+		}
+		instances := []config.Instance{{
+			ID:         "inst-legacy",
+			ProfileID:  "prof-1",
+			HTTPPort:   port,
+			DaemonPID:  os.Getpid(),
+			LastSeenAt: time.Now(),
+		}}
+		got := FindReusableInstance(instances, "prof-1", HealthClient{Timeout: 500 * time.Millisecond})
+		if got == nil || got.ID != "inst-legacy" {
+			t.Fatalf("expected legacy daemon instance, got %#v", got)
 		}
 	})
 }

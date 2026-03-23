@@ -302,6 +302,7 @@ func TestRunUpgradeClaudeWithProxyUsesProxyEnv(t *testing.T) {
 		Instances: []config.Instance{{
 			ID:        instanceID,
 			ProfileID: profile.ID,
+			Kind:      config.InstanceKindDaemon,
 			HTTPPort:  port,
 			DaemonPID: os.Getpid(),
 		}},
@@ -484,6 +485,7 @@ func TestRunUpgradeClaudeWithProfileFlag(t *testing.T) {
 		Instances: []config.Instance{{
 			ID:        instanceID,
 			ProfileID: "p2",
+			Kind:      config.InstanceKindDaemon,
 			HTTPPort:  port,
 			DaemonPID: os.Getpid(),
 		}},

@@ -3,6 +3,7 @@ package config
 import "time"
 
 const CurrentVersion = 1
+const InstanceKindDaemon = "daemon"
 
 type Config struct {
 	Version       int            `json:"version"`
@@ -36,6 +37,7 @@ type Profile struct {
 type Instance struct {
 	ID         string    `json:"id"`
 	ProfileID  string    `json:"profileId"`
+	Kind       string    `json:"kind,omitempty"`
 	HTTPPort   int       `json:"httpPort"`
 	SocksPort  int       `json:"socksPort"`
 	DaemonPID  int       `json:"daemonPid"`

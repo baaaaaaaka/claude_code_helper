@@ -99,6 +99,7 @@ func newProxyStartCmd(root *rootOptions) *cobra.Command {
 			inst := config.Instance{
 				ID:         instanceID,
 				ProfileID:  profile.ID,
+				Kind:       config.InstanceKindDaemon,
 				HTTPPort:   0,
 				SocksPort:  0,
 				DaemonPID:  0,
@@ -222,6 +223,7 @@ func runProxyDaemon(parentCtx context.Context, store *config.Store, instanceID s
 
 	now := time.Now()
 	inst.DaemonPID = os.Getpid()
+	inst.Kind = config.InstanceKindDaemon
 	inst.SocksPort = st.SocksPort
 	inst.HTTPPort = st.HTTPPort
 	if inst.StartedAt.IsZero() {

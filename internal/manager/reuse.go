@@ -7,6 +7,11 @@ import (
 	"github.com/baaaaaaaka/claude_code_helper/internal/proc"
 )
 
+var (
+	procCommandLine = proc.CommandLine
+	procIsAlive     = proc.IsAlive
+)
+
 func FindReusableInstance(instances []config.Instance, profileID string, hc HealthClient) *config.Instance {
 	var best *config.Instance
 	for i := range instances {
@@ -14,7 +19,10 @@ func FindReusableInstance(instances []config.Instance, profileID string, hc Heal
 		if inst.ProfileID != profileID {
 			continue
 		}
-		if inst.DaemonPID <= 0 || !proc.IsAlive(inst.DaemonPID) {
+		if inst.DaemonPID <= 0 || !procIsAlive(inst.DaemonPID) {
+			continue
+		}
+		if !isReusableDaemonInstance(*inst) {
 			continue
 		}
 		if err := hc.CheckHTTPProxy(inst.HTTPPort, inst.ID); err != nil {
@@ -27,6 +35,20 @@ func FindReusableInstance(instances []config.Instance, profileID string, hc Heal
 		}
 	}
 	return best
+}
+
+func isReusableDaemonInstance(inst config.Instance) bool {
+	if inst.Kind == config.InstanceKindDaemon {
+		return true
+	}
+	if inst.Kind != "" {
+		return false
+	}
+	args, err := procCommandLine(inst.DaemonPID)
+	if err != nil {
+		return false
+	}
+	return proc.LooksLikeProxyDaemon(args)
 }
 
 func IsInstanceStale(inst config.Instance, now time.Time, maxAge time.Duration) bool {

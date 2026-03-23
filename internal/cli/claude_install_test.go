@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
+	"github.com/baaaaaaaka/claude_code_helper/internal/stack"
 )
 
 func TestInstallerCandidatesLinux(t *testing.T) {
@@ -138,7 +139,7 @@ func TestRunClaudeInstallerUsesProxyEnv(t *testing.T) {
 	opts := installProxyOptions{
 		UseProxy:  true,
 		Profile:   profile,
-		Instances: []config.Instance{{ID: instanceID, ProfileID: profile.ID, HTTPPort: port, DaemonPID: os.Getpid()}},
+		Instances: []config.Instance{{ID: instanceID, ProfileID: profile.ID, Kind: config.InstanceKindDaemon, HTTPPort: port, DaemonPID: os.Getpid()}},
 	}
 
 	if err := runClaudeInstaller(context.Background(), io.Discard, opts); err != nil {
@@ -297,6 +298,7 @@ func TestResolveInstallerProxyUsesReusableInstance(t *testing.T) {
 		Instances: []config.Instance{{
 			ID:        "inst-1",
 			ProfileID: profile.ID,
+			Kind:      config.InstanceKindDaemon,
 			HTTPPort:  tcp.Port,
 			DaemonPID: os.Getpid(),
 		}},
@@ -311,6 +313,42 @@ func TestResolveInstallerProxyUsesReusableInstance(t *testing.T) {
 	want := fmt.Sprintf("http://127.0.0.1:%d", tcp.Port)
 	if url != want {
 		t.Fatalf("expected proxy URL %q, got %q", want, url)
+	}
+}
+
+func TestResolveInstallerProxySkipsNonDaemonInstance(t *testing.T) {
+	prevStart := claudeInstallStackStart
+	t.Cleanup(func() { claudeInstallStackStart = prevStart })
+
+	claudeInstallStackStart = func(profile config.Profile, instanceID string, opts stack.Options) (*stack.Stack, error) {
+		return stack.NewStackForTest(18765, 29876), nil
+	}
+
+	profile := &config.Profile{ID: "p1"}
+	opts := installProxyOptions{
+		UseProxy: true,
+		Profile:  profile,
+		Instances: []config.Instance{{
+			ID:        "inst-1",
+			ProfileID: profile.ID,
+			HTTPPort:  12345,
+			DaemonPID: os.Getpid(),
+		}},
+	}
+	url, cleanup, err := resolveInstallerProxy(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("resolveInstallerProxy error: %v", err)
+	}
+	if cleanup == nil {
+		t.Fatalf("expected cleanup for temporary stack")
+	}
+	t.Cleanup(func() {
+		if err := cleanup(); err != nil {
+			t.Fatalf("cleanup error: %v", err)
+		}
+	})
+	if url != "http://127.0.0.1:18765" {
+		t.Fatalf("expected temporary stack URL, got %q", url)
 	}
 }
 

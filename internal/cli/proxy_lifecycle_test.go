@@ -107,7 +107,7 @@ func TestProxyStartCmdBackgroundSuccess(t *testing.T) {
 		t.Fatalf("expected one instance, got %d", len(loaded.Instances))
 	}
 	inst := loaded.Instances[0]
-	if inst.ID != "inst-fixed" || inst.DaemonPID != 4242 || inst.ProfileID != "p1" {
+	if inst.ID != "inst-fixed" || inst.DaemonPID != 4242 || inst.ProfileID != "p1" || inst.Kind != config.InstanceKindDaemon {
 		t.Fatalf("unexpected instance: %#v", inst)
 	}
 }

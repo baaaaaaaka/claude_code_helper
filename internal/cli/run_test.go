@@ -395,6 +395,7 @@ func TestRunLikeUsesProxyWhenPreferenceEnabled(t *testing.T) {
 			{
 				ID:         "inst-1",
 				ProfileID:  "p1",
+				Kind:       config.InstanceKindDaemon,
 				HTTPPort:   port,
 				DaemonPID:  os.Getpid(),
 				LastSeenAt: time.Now(),
@@ -504,6 +505,7 @@ func TestRunLikeInfersProxyFromProfilesAndPersistsPreference(t *testing.T) {
 			{
 				ID:         "inst-1",
 				ProfileID:  "p1",
+				Kind:       config.InstanceKindDaemon,
 				HTTPPort:   port,
 				DaemonPID:  os.Getpid(),
 				LastSeenAt: time.Now(),
@@ -551,6 +553,7 @@ func TestRunLikeExplicitProfileForcesProxy(t *testing.T) {
 			{
 				ID:         "inst-1",
 				ProfileID:  "p1",
+				Kind:       config.InstanceKindDaemon,
 				HTTPPort:   port,
 				DaemonPID:  os.Getpid(),
 				LastSeenAt: time.Now(),

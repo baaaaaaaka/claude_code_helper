@@ -212,36 +212,6 @@ func runWithNewStackOptions(
 	}
 	defer func() { _ = st.Close(context.Background()) }()
 
-	now := time.Now()
-	inst := config.Instance{
-		ID:         instanceID,
-		ProfileID:  profile.ID,
-		HTTPPort:   st.HTTPPort,
-		SocksPort:  st.SocksPort,
-		DaemonPID:  os.Getpid(),
-		StartedAt:  now,
-		LastSeenAt: now,
-	}
-	if err := manager.RecordInstance(store, inst); err != nil {
-		return err
-	}
-	defer func() { _ = manager.RemoveInstance(store, instanceID) }()
-
-	hbStop := make(chan struct{})
-	go func() {
-		t := time.NewTicker(10 * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-hbStop:
-				return
-			case <-t.C:
-				_ = manager.Heartbeat(store, instanceID, time.Now())
-			}
-		}
-	}()
-	defer close(hbStop)
-
 	proxyURL := st.HTTPProxyURL()
 
 	if len(cmdArgs) == 0 {

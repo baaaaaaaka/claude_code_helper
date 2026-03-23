@@ -110,6 +110,15 @@ jobs:
         run: |
           go test -coverprofile=coverage.out ./...
 
+      - name: Proc cross-platform compile smoke (Linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp_dir="${RUNNER_TEMP:-/tmp}"
+          GOOS=windows GOARCH=amd64 go test -c -o "$tmp_dir/proc-windows.test.exe" ./internal/proc
+          GOOS=darwin GOARCH=amd64 go test -c -o "$tmp_dir/proc-darwin.test" ./internal/proc
+
       - name: Installer script matrix smoke (Unix)
         if: runner.os != 'Windows'
         shell: bash

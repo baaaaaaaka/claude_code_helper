@@ -24,6 +24,7 @@ var (
 	ensureWindowsGitBashFn      = ensureWindowsGitBash
 	claudeInstallLookPathFn     = exec.LookPath
 	claudeInstallSetenvFn       = os.Setenv
+	claudeInstallStackStart     = stack.Start
 )
 
 type installCmd struct {
@@ -408,7 +409,7 @@ func resolveInstallerProxy(ctx context.Context, opts installProxyOptions) (strin
 	if err != nil {
 		return "", nil, err
 	}
-	st, err := stack.Start(*opts.Profile, instanceID, stack.Options{})
+	st, err := claudeInstallStackStart(*opts.Profile, instanceID, stack.Options{})
 	if err != nil {
 		return "", nil, err
 	}
