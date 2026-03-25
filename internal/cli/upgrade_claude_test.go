@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -215,6 +216,14 @@ func TestRunUpgradeClaudePrewarmsPatchedClaude(t *testing.T) {
 	requireExePatchEnabled(t)
 	withExePatchTestHooks(t)
 
+	prevLookPath := claudeInstallLookPathFn
+	claudeInstallLookPathFn = func(file string) (string, error) {
+		return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
+	}
+	t.Cleanup(func() {
+		claudeInstallLookPathFn = prevLookPath
+	})
+
 	store := newTempStore(t)
 	disabled := false
 	if err := store.Save(config.Config{
@@ -262,6 +271,80 @@ func TestRunUpgradeClaudePrewarmsPatchedClaude(t *testing.T) {
 	}
 	if !prepareCalled {
 		t.Fatalf("expected upgrade-claude to prewarm patched claude")
+	}
+	if !waitCalled {
+		t.Fatalf("expected upgrade-claude to wait for readiness")
+	}
+}
+
+func TestRunUpgradeClaudePrewarmsInstalledLocationFromInstallerOutput(t *testing.T) {
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	prevLookPath := claudeInstallLookPathFn
+	claudeInstallLookPathFn = func(file string) (string, error) {
+		return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
+	}
+	t.Cleanup(func() {
+		claudeInstallLookPathFn = prevLookPath
+	})
+
+	store := newTempStore(t)
+	disabled := false
+	if err := store.Save(config.Config{
+		Version:      config.CurrentVersion,
+		ProxyEnabled: &disabled,
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	claudePath := filepath.Join(t.TempDir(), "recovered", "claude")
+	if err := os.MkdirAll(filepath.Dir(claudePath), 0o755); err != nil {
+		t.Fatalf("mkdir claude dir: %v", err)
+	}
+	if err := os.WriteFile(claudePath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write claude: %v", err)
+	}
+
+	prepareCalled := false
+	waitCalled := false
+	prevInstaller := runClaudeInstallerFn
+	runClaudeInstallerFn = func(ctx context.Context, out io.Writer, opts installProxyOptions) error {
+		_, _ = fmt.Fprintf(out, "Location: %s\n", claudePath)
+		return nil
+	}
+	t.Cleanup(func() {
+		runClaudeInstallerFn = prevInstaller
+	})
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		prepareCalled = true
+		if len(cmdArgs) != 1 || !config.PathsEqual(cmdArgs[0], claudePath) {
+			t.Fatalf("unexpected patch prep args: %v", cmdArgs)
+		}
+		return &patchOutcome{}, nil
+	}
+	waitPatchedExecutableReadyFn = func(ctx context.Context, outcome *patchOutcome) error {
+		waitCalled = true
+		return nil
+	}
+
+	root := &rootOptions{
+		configPath: store.Path(),
+		exePatch: exePatchOptions{
+			enabledFlag:    true,
+			policySettings: true,
+		},
+	}
+	cmd := newUpgradeClaudeCmd(root)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetContext(context.Background())
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("upgrade-claude error: %v", err)
+	}
+	if !prepareCalled {
+		t.Fatalf("expected upgrade-claude to prewarm patched installed location")
 	}
 	if !waitCalled {
 		t.Fatalf("expected upgrade-claude to wait for readiness")

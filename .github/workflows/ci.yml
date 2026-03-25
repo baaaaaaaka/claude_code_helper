@@ -318,6 +318,27 @@ jobs:
               "$img" bash /ci/container_claude_install_launch_smoke.sh
           done
 
+      - name: Smoke test in CentOS7 (Claude install recovery + glibc compat launch)
+        shell: bash
+        timeout-minutes: 20
+        env:
+          CLAUDE_PROXY_GLIBC_COMPAT_REPO: "baaaaaaaka/claude_code_helper"
+          CLAUDE_PROXY_GLIBC_COMPAT_TAG: "glibc-compat-v2.31"
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/dist:/dist:ro" \
+            -v "$PWD/scripts/ci:/ci:ro" \
+            -e CLAUDE_INSTALL_TEST=1 \
+            -e CLAUDE_INSTALL_TEST_EL7_GLIBC_RECOVERY=1 \
+            -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallEL7RecoveryIntegration \
+            -e CLAUDE_INSTALL_NEEDS_PATCHELF=1 \
+            -e CLAUDE_INSTALL_NEEDS_TAR=1 \
+            -e CLAUDE_PROXY_GLIBC_COMPAT_REPO \
+            -e CLAUDE_PROXY_GLIBC_COMPAT_TAG \
+            -e CI=true \
+            centos:7 bash /ci/container_claude_install_launch_smoke.sh
+
       - name: Smoke test in containers (Claude patch+TUI)
         shell: bash
         env:
@@ -360,3 +381,13 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/glibc/test_shared_storage_centos7_rocky8.sh
+
+      - name: Smoke test shared install recovery from CentOS7 to Rocky8
+        shell: bash
+        timeout-minutes: 25
+        env:
+          GLIBC_COMPAT_REPO: "baaaaaaaka/claude_code_helper"
+          GLIBC_COMPAT_TAG: "glibc-compat-v2.31"
+        run: |
+          set -euo pipefail
+          bash scripts/glibc/test_install_recovery_shared_storage_centos7_rocky8.sh

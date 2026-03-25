@@ -95,7 +95,7 @@ mkdir -p "$artifacts_dir"
 )
 chmod +x "$test_bin"
 
-images="${LOCAL_INSTALL_SMOKE_IMAGES:-rockylinux:8 ubuntu:20.04}"
+images="${LOCAL_INSTALL_SMOKE_IMAGES:-centos:7 rockylinux:8 ubuntu:20.04}"
 docker_network_args=()
 if [[ "${LOCAL_INSTALL_SMOKE_USE_HOST_NETWORK:-}" == "1" ]]; then
   docker_network_args+=(--network host)
@@ -104,12 +104,24 @@ else
 fi
 for img in $images; do
   echo "==> ${img}"
+  extra_env=()
+  if [[ "$img" == "centos:7" ]]; then
+    extra_env+=(
+      -e CLAUDE_INSTALL_TEST_EL7_GLIBC_RECOVERY=1
+      -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallEL7RecoveryIntegration
+      -e CLAUDE_INSTALL_NEEDS_PATCHELF=1
+      -e CLAUDE_INSTALL_NEEDS_TAR=1
+      -e CLAUDE_PROXY_GLIBC_COMPAT_REPO="${CLAUDE_PROXY_GLIBC_COMPAT_REPO:-baaaaaaaka/claude_code_helper}"
+      -e CLAUDE_PROXY_GLIBC_COMPAT_TAG="${CLAUDE_PROXY_GLIBC_COMPAT_TAG:-glibc-compat-v2.31}"
+    )
+  fi
   docker run --rm "${docker_network_args[@]}" \
     -v "${artifacts_dir}:/dist:ro" \
     -v "${repo_root}/scripts/ci:/ci:ro" \
     -e CLAUDE_INSTALL_TEST=1 \
     -e CLAUDE_INSTALL_TEST_ALLOW_LOCAL=1 \
     -e CLAUDE_INSTALL_TEST_PROXY_URL="${proxy_url}" \
+    "${extra_env[@]}" \
     "$img" bash /ci/container_claude_install_launch_smoke.sh
 done
 

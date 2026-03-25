@@ -130,6 +130,15 @@ patch test results (linux/mac/windows + linux distros).
 - When opening Claude Code from the TUI or history commands, if `claude` is
   missing, `claude-proxy` can install it automatically with the official
   installer.
+- On EL7/CentOS 7 hosts, if the official installer fails because the downloaded
+  Claude binary needs a newer glibc, `claude-proxy` can reuse that downloaded
+  binary through a private launcher and then continue with its glibc compat
+  launch flow.
+- On shared home/storage across multiple Linux hosts, those recovery launchers
+  and glibc compat artifacts are isolated under
+  `~/.cache/claude-proxy/hosts/<host-id>/...`; if your fleet can reuse the same
+  machine ID or hostname across nodes, set `CLAUDE_PROXY_HOST_ID` explicitly
+  per host.
 - On Windows, if that installer needs Git Bash, `claude-proxy` can bootstrap a
   private Git for Windows runtime and retry automatically.
 - When launching `claude` with `--permission-mode bypassPermissions`,

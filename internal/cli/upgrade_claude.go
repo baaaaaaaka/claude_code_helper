@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 
@@ -54,18 +56,28 @@ func runUpgradeClaude(cmd *cobra.Command, root *rootOptions, profileRef string) 
 
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
+	var installLog bytes.Buffer
+	installOut := io.Writer(&installLog)
+	if out != nil {
+		installOut = io.MultiWriter(out, &installLog)
+	}
 
-	if err := runClaudeInstallerFn(ctx, out, opts); err != nil {
+	if err := runClaudeInstallerFn(ctx, installOut, opts); err != nil {
 		return err
+	}
+
+	claudePath := "claude"
+	if path, ok := findInstalledClaudePath(claudeInstallGOOS, installLog.String(), os.Getenv); ok {
+		claudePath = path
 	}
 
 	// Remove stale exe-patch backup and history so the patch system treats
 	// the freshly-installed binary as new rather than re-patching the old
 	// backup over the top.
-	invalidateExePatchState("claude", root.configPath)
+	invalidateExePatchStatePath(claudePath, root.configPath)
 
 	if root.exePatch.enabled() {
-		patchOutcome, patchErr := maybePatchExecutableCtxFn(ctx, []string{"claude"}, root.exePatch, root.configPath, out)
+		patchOutcome, patchErr := maybePatchExecutableCtxFn(ctx, []string{claudePath}, root.exePatch, root.configPath, out)
 		if patchErr != nil {
 			return patchErr
 		}
@@ -85,7 +97,11 @@ func invalidateExePatchState(cmdName string, configPath string) {
 	if err != nil {
 		return
 	}
-	resolved, err := resolveExecutablePath(exePath)
+	invalidateExePatchStatePath(exePath, configPath)
+}
+
+func invalidateExePatchStatePath(path string, configPath string) {
+	resolved, err := resolveExecutablePath(path)
 	if err != nil {
 		return
 	}

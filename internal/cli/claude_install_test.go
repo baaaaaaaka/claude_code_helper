@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -209,6 +210,152 @@ func TestRunClaudeInstallerReportsAttemptDetails(t *testing.T) {
 	msg := err.Error()
 	if !strings.Contains(msg, "bash -c") || !strings.Contains(msg, "sh -c") {
 		t.Fatalf("expected attempt details in error, got %q", msg)
+	}
+}
+
+func TestRunClaudeInstallerRecoversEL7GlibcFailure(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("EL7 glibc recovery only applies on linux")
+	}
+
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	cacheRoot := filepath.Join(dir, "cache")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatalf("mkdir home: %v", err)
+	}
+	existingLauncher := filepath.Join(home, ".local", "bin", "claude")
+	if err := os.MkdirAll(filepath.Dir(existingLauncher), 0o755); err != nil {
+		t.Fatalf("mkdir existing launcher dir: %v", err)
+	}
+	if err := os.WriteFile(existingLauncher, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write existing launcher: %v", err)
+	}
+	writeEL7InstallerFailureScripts(t, dir)
+
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv("CLAUDE_PROXY_HOST_ID", "test-host")
+	t.Setenv("PATH", dir)
+	glibcCompatHostEligibleFn = func() bool { return true }
+	t.Cleanup(func() { glibcCompatHostEligibleFn = isEL7GlibcCompatHost })
+
+	var out bytes.Buffer
+	if err := runClaudeInstaller(context.Background(), &out, installProxyOptions{}); err != nil {
+		t.Fatalf("runClaudeInstaller: %v\noutput:\n%s", err, out.String())
+	}
+
+	wantBinary := filepath.Join(home, ".claude", "downloads", "claude-2.1.81-linux-x64")
+	gotLauncher := filepath.Join(cacheRoot, "claude-proxy", "hosts", "test-host", "install-recovery", "claude")
+	resolved, err := filepath.EvalSymlinks(gotLauncher)
+	if err != nil {
+		t.Fatalf("resolve launcher symlink: %v", err)
+	}
+	if !config.PathsEqual(resolved, wantBinary) {
+		t.Fatalf("expected launcher to point to %q, got %q", wantBinary, resolved)
+	}
+	if !strings.Contains(out.String(), "Location: "+gotLauncher) {
+		t.Fatalf("expected recovery output to report launcher location, got:\n%s", out.String())
+	}
+	if got := os.Getenv("PATH"); got != dir {
+		t.Fatalf("expected PATH to remain unchanged, got %q", got)
+	}
+	content, err := os.ReadFile(existingLauncher)
+	if err != nil {
+		t.Fatalf("read existing launcher: %v", err)
+	}
+	if string(content) != "#!/bin/sh\nexit 0\n" {
+		t.Fatalf("expected existing launcher to stay unchanged, got %q", string(content))
+	}
+}
+
+func TestEnsureClaudeInstalledRecoversEL7GlibcFailure(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("EL7 glibc recovery only applies on linux")
+	}
+
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	cacheRoot := filepath.Join(dir, "cache")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatalf("mkdir home: %v", err)
+	}
+	writeEL7InstallerFailureScripts(t, dir)
+
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv("CLAUDE_PROXY_HOST_ID", "test-host")
+	t.Setenv("PATH", dir)
+	glibcCompatHostEligibleFn = func() bool { return true }
+	t.Cleanup(func() { glibcCompatHostEligibleFn = isEL7GlibcCompatHost })
+
+	var out bytes.Buffer
+	got, err := ensureClaudeInstalled(context.Background(), "", &out, installProxyOptions{})
+	if err != nil {
+		t.Fatalf("ensureClaudeInstalled: %v\noutput:\n%s", err, out.String())
+	}
+
+	wantLauncher := filepath.Join(cacheRoot, "claude-proxy", "hosts", "test-host", "install-recovery", "claude")
+	if !config.PathsEqual(got, wantLauncher) {
+		t.Fatalf("expected launcher %q, got %q", wantLauncher, got)
+	}
+	resolved, err := filepath.EvalSymlinks(got)
+	if err != nil {
+		t.Fatalf("resolve launcher symlink: %v", err)
+	}
+	wantBinary := filepath.Join(home, ".claude", "downloads", "claude-2.1.81-linux-x64")
+	if !config.PathsEqual(resolved, wantBinary) {
+		t.Fatalf("expected launcher target %q, got %q", wantBinary, resolved)
+	}
+}
+
+func TestFindInstalledClaudePathDoesNotFallbackToUnixHomeBin(t *testing.T) {
+	prevLookPath := claudeInstallLookPathFn
+	t.Cleanup(func() { claudeInstallLookPathFn = prevLookPath })
+	claudeInstallLookPathFn = func(file string) (string, error) {
+		return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
+	}
+
+	home := t.TempDir()
+	claudePath := filepath.Join(home, ".local", "bin", "claude")
+	if err := os.MkdirAll(filepath.Dir(claudePath), 0o755); err != nil {
+		t.Fatalf("mkdir claude dir: %v", err)
+	}
+	if err := os.WriteFile(claudePath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write claude: %v", err)
+	}
+
+	getenv := func(key string) string {
+		if key == "HOME" {
+			return home
+		}
+		return ""
+	}
+
+	got, ok := findInstalledClaudePath("linux", "", getenv)
+	if ok {
+		t.Fatalf("expected linux install path discovery to ignore %q, got %q", claudePath, got)
+	}
+}
+
+func writeEL7InstallerFailureScripts(t *testing.T, dir string) {
+	t.Helper()
+
+	script := "#!/bin/sh\n" +
+		"bin=\"$HOME/.claude/downloads/claude-2.1.81-linux-x64\"\n" +
+		"\"/bin/mkdir\" -p \"${bin%/*}\"\n" +
+		": > \"$bin\"\n" +
+		"\"/bin/chmod\" 755 \"$bin\"\n" +
+		"echo \"Setting up Claude Code...\"\n" +
+		"echo \"$bin: /lib64/libc.so.6: version \\`GLIBC_2.18' not found (required by $bin)\" >&2\n" +
+		"echo \"$bin: /lib64/libc.so.6: version \\`GLIBC_2.24' not found (required by $bin)\" >&2\n" +
+		"echo \"$bin: /lib64/libc.so.6: version \\`GLIBC_2.25' not found (required by $bin)\" >&2\n" +
+		"exit 1\n"
+	for _, name := range []string{"bash", "sh"} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
 	}
 }
 

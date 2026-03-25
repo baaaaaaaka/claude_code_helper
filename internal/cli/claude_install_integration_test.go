@@ -15,14 +15,9 @@ import (
 const claudeInstallIntegrationTimeout = 8 * time.Minute
 
 func TestClaudeInstallLaunchIntegration(t *testing.T) {
-	if os.Getenv("CLAUDE_INSTALL_TEST") != "1" {
-		t.Skip("set CLAUDE_INSTALL_TEST=1 to run integration test")
-	}
-	if os.Getenv("CI") != "true" && os.Getenv("CLAUDE_INSTALL_TEST_ALLOW_LOCAL") != "1" {
-		t.Skip("integration test runs only in CI; set CLAUDE_INSTALL_TEST_ALLOW_LOCAL=1 for local runs")
-	}
+	requireClaudeInstallIntegration(t, "CLAUDE_INSTALL_TEST")
 
-	homeDir := t.TempDir()
+	homeDir := resolveClaudeInstallTestHome(t)
 	localBinDir, expectWindowsGitBashBootstrap := configureClaudeInstallTestEnv(t, homeDir)
 	if err := os.MkdirAll(localBinDir, 0o755); err != nil {
 		t.Fatalf("mkdir local bin: %v", err)
@@ -78,6 +73,130 @@ func TestClaudeInstallLaunchIntegration(t *testing.T) {
 			t.Fatalf("installer unexpectedly sourced login startup files:\n%s", string(data))
 		}
 	}
+}
+
+func TestClaudeInstallEL7RecoveryIntegration(t *testing.T) {
+	requireClaudeInstallIntegration(t, "CLAUDE_INSTALL_TEST_EL7_GLIBC_RECOVERY")
+	if runtime.GOOS != "linux" {
+		t.Skip("EL7 glibc recovery integration only applies on linux")
+	}
+	if _, err := exec.LookPath("patchelf"); err != nil {
+		t.Skip("patchelf required for EL7 glibc recovery integration")
+	}
+	if _, err := exec.LookPath("tar"); err != nil {
+		t.Skip("tar required for EL7 glibc recovery integration")
+	}
+
+	homeDir := resolveClaudeInstallTestHome(t)
+	localBinDir, _ := configureClaudeInstallTestEnv(t, homeDir)
+	if err := os.MkdirAll(localBinDir, 0o755); err != nil {
+		t.Fatalf("mkdir local bin: %v", err)
+	}
+	applyInstallProxyEnv(t)
+	cacheRoot := filepath.Join(homeDir, ".cache")
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	hostID := strings.TrimSpace(os.Getenv("CLAUDE_INSTALL_TEST_HOST_ID"))
+	if hostID == "" {
+		hostID = "install-recovery-test"
+	}
+	t.Setenv("CLAUDE_PROXY_HOST_ID", hostID)
+
+	if path, err := exec.LookPath("claude"); err == nil {
+		t.Fatalf("expected claude to be absent from PATH before installation, found %q", path)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), claudeInstallIntegrationTimeout)
+	defer cancel()
+
+	var installLog bytes.Buffer
+	path, err := ensureClaudeInstalled(ctx, "", &installLog, installProxyOptions{})
+	if err != nil {
+		t.Fatalf("ensureClaudeInstalled: %v\ninstaller output:\n%s", err, installLog.String())
+	}
+	if !strings.Contains(installLog.String(), "prepared a claude-proxy-managed launcher") {
+		t.Fatalf("expected EL7 recovery log, got:\n%s", installLog.String())
+	}
+
+	hostRoot, _, err := resolveClaudeProxyHostRoot()
+	if err != nil {
+		t.Fatalf("resolveClaudeProxyHostRoot: %v", err)
+	}
+	wantLauncher := filepath.Join(hostRoot, "install-recovery", "claude")
+	if samePath(path, wantLauncher) == false {
+		t.Fatalf("expected recovered launcher %q, got %q", wantLauncher, path)
+	}
+
+	sourcePath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("resolve recovered launcher symlink: %v", err)
+	}
+	sourceSHABefore, err := hashFileSHA256(sourcePath)
+	if err != nil {
+		t.Fatalf("hash recovered source before patch: %v", err)
+	}
+
+	configPath := filepath.Join(homeDir, ".config", "claude-proxy", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+
+	var patchLog bytes.Buffer
+	outcome, err := maybePatchExecutableWithContext(ctx, []string{path}, exePatchOptions{
+		enabledFlag:    true,
+		policySettings: false,
+		glibcCompat:    true,
+	}, configPath, &patchLog)
+	if err != nil {
+		t.Fatalf("maybePatchExecutableWithContext: %v\ninstall log:\n%s\npatch log:\n%s", err, installLog.String(), patchLog.String())
+	}
+
+	out, err := runClaudeProbeOutcome(outcome, path, "--version")
+	if err != nil {
+		t.Fatalf("runClaudeProbeOutcome: %v\noutput:\n%s\ninstall log:\n%s\npatch log:\n%s", err, out, installLog.String(), patchLog.String())
+	}
+	if got := extractVersion(out); got == "" {
+		t.Fatalf("failed to parse claude version from output %q", strings.TrimSpace(out))
+	}
+	if strings.Contains(out, "GLIBC_") {
+		t.Fatalf("unexpected GLIBC failure after recovery patch:\n%s", out)
+	}
+
+	sourceSHAAfter, err := hashFileSHA256(sourcePath)
+	if err != nil {
+		t.Fatalf("hash recovered source after patch: %v", err)
+	}
+	if sourceSHABefore != sourceSHAAfter {
+		t.Fatalf("expected recovered source binary to stay unchanged, before=%s after=%s", sourceSHABefore, sourceSHAAfter)
+	}
+	if outcome == nil || strings.TrimSpace(outcome.TargetPath) == "" {
+		t.Fatalf("expected patch outcome with target path")
+	}
+	if samePath(outcome.TargetPath, sourcePath) {
+		t.Fatalf("expected glibc compat launch path to differ from recovered source path %q", sourcePath)
+	}
+}
+
+func requireClaudeInstallIntegration(t *testing.T, envName string) {
+	t.Helper()
+	if os.Getenv(envName) != "1" {
+		t.Skipf("set %s=1 to run integration test", envName)
+	}
+	if os.Getenv("CI") != "true" && os.Getenv("CLAUDE_INSTALL_TEST_ALLOW_LOCAL") != "1" {
+		t.Skip("integration test runs only in CI; set CLAUDE_INSTALL_TEST_ALLOW_LOCAL=1 for local runs")
+	}
+}
+
+func resolveClaudeInstallTestHome(t *testing.T) string {
+	t.Helper()
+
+	homeDir := strings.TrimSpace(os.Getenv("CLAUDE_INSTALL_TEST_HOME"))
+	if homeDir == "" {
+		return t.TempDir()
+	}
+	if err := os.MkdirAll(homeDir, 0o755); err != nil {
+		t.Fatalf("mkdir install test home %s: %v", homeDir, err)
+	}
+	return homeDir
 }
 
 func configureClaudeInstallTestEnv(t *testing.T, homeDir string) (string, bool) {

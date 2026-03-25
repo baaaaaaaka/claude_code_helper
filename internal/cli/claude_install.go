@@ -279,10 +279,16 @@ func runClaudeInstallerWithEnv(ctx context.Context, out io.Writer, installOpts i
 		return fmt.Errorf("no supported installer available for %s", runtime.GOOS)
 	}
 	attemptErrors := make([]string, 0, len(candidates))
+	var combinedOutput bytes.Buffer
 	for _, cmd := range candidates {
 		if _, err := claudeInstallLookPathFn(cmd.path); err != nil {
 			attemptErrors = append(attemptErrors, fmt.Sprintf("%s: not found in PATH", installerAttemptLabel(cmd)))
 			continue
+		}
+		var attemptOutput bytes.Buffer
+		writer := io.Writer(&attemptOutput)
+		if out != nil {
+			writer = io.MultiWriter(out, &attemptOutput)
 		}
 		c := exec.CommandContext(ctx, cmd.path, cmd.args...)
 		envList := append([]string{}, os.Environ()...)
@@ -302,19 +308,118 @@ func runClaudeInstallerWithEnv(ctx context.Context, out io.Writer, installOpts i
 			envList = setInstallEnvValue(envList, key, value)
 		}
 		c.Env = envList
-		c.Stdout = out
-		c.Stderr = out
+		c.Stdout = writer
+		c.Stderr = writer
 		c.Stdin = os.Stdin
 		if err := c.Run(); err != nil {
+			appendInstallOutput(&combinedOutput, attemptOutput.String())
 			attemptErrors = append(attemptErrors, fmt.Sprintf("%s: %v", installerAttemptLabel(cmd), err))
 			continue
 		}
 		return nil
 	}
+	if recovered, recoverErr := maybeRecoverClaudeInstallOnEL7(combinedOutput.String(), out); recovered {
+		if recoverErr == nil {
+			return nil
+		}
+		attemptErrors = append(attemptErrors, fmt.Sprintf("el7 glibc fallback: %v", recoverErr))
+	}
 	if len(attemptErrors) == 0 {
 		return fmt.Errorf("no supported installer available for %s", runtime.GOOS)
 	}
 	return fmt.Errorf("failed to run Claude installer for %s (%s)", runtime.GOOS, strings.Join(attemptErrors, "; "))
+}
+
+func appendInstallOutput(dst *bytes.Buffer, text string) {
+	text = strings.TrimSpace(text)
+	if dst == nil || text == "" {
+		return
+	}
+	if dst.Len() > 0 {
+		_, _ = dst.WriteString("\n")
+	}
+	_, _ = dst.WriteString(text)
+}
+
+func maybeRecoverClaudeInstallOnEL7(installerOutput string, out io.Writer) (bool, error) {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		return false, nil
+	}
+	if !glibcCompatHostEligibleFn() || !isMissingGlibcSymbolError(installerOutput) {
+		return false, nil
+	}
+
+	binaryPath := parseInstallerDownloadedClaudeBinary(installerOutput)
+	if binaryPath == "" {
+		return true, fmt.Errorf("installer hit GLIBC compatibility failure but no downloaded Claude binary was found in the installer output")
+	}
+
+	launcherPath, err := installRecoveredClaudeLauncher(binaryPath)
+	if err != nil {
+		return true, err
+	}
+	if out != nil {
+		_, _ = fmt.Fprintln(out, "Claude installer hit GLIBC compatibility limits on this EL7 host; prepared a claude-proxy-managed launcher from the downloaded Claude binary.")
+		_, _ = fmt.Fprintf(out, "Location: %s\n", launcherPath)
+	}
+	return true, nil
+}
+
+func parseInstallerDownloadedClaudeBinary(output string) string {
+	const marker = ".claude/downloads/claude-"
+
+	var candidate string
+	for _, rawLine := range strings.Split(output, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if !strings.Contains(line, marker) || !isMissingGlibcSymbolError(line) {
+			continue
+		}
+		path, _, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		path = filepath.Clean(strings.TrimSpace(path))
+		if path == "" || !executableExists(path) {
+			continue
+		}
+		candidate = path
+	}
+	return candidate
+}
+
+func installRecoveredClaudeLauncher(binaryPath string) (string, error) {
+	if !executableExists(binaryPath) {
+		return "", fmt.Errorf("recovered Claude binary not found at %s", binaryPath)
+	}
+
+	hostRoot, _, err := resolveClaudeProxyHostRoot()
+	if err != nil {
+		return "", fmt.Errorf("resolve claude-proxy host root for recovered Claude launcher: %w", err)
+	}
+	launcherDir := filepath.Join(hostRoot, "install-recovery")
+	if err := os.MkdirAll(launcherDir, 0o755); err != nil {
+		return "", fmt.Errorf("create Claude launcher dir %s: %w", launcherDir, err)
+	}
+	launcherPath := filepath.Join(launcherDir, "claude")
+
+	if info, err := os.Lstat(launcherPath); err == nil {
+		if info.IsDir() {
+			return "", fmt.Errorf("existing Claude launcher path is a directory: %s", launcherPath)
+		}
+		if resolved, resolveErr := filepath.EvalSymlinks(launcherPath); resolveErr == nil && config.PathsEqual(resolved, binaryPath) {
+			return launcherPath, nil
+		}
+		if err := os.Remove(launcherPath); err != nil {
+			return "", fmt.Errorf("replace Claude launcher %s: %w", launcherPath, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("inspect Claude launcher %s: %w", launcherPath, err)
+	}
+
+	if err := os.Symlink(binaryPath, launcherPath); err != nil {
+		return "", fmt.Errorf("create Claude launcher symlink %s -> %s: %w", launcherPath, binaryPath, err)
+	}
+	return launcherPath, nil
 }
 
 func ensureWindowsGitBash(ctx context.Context, out io.Writer, installOpts installProxyOptions) (string, error) {

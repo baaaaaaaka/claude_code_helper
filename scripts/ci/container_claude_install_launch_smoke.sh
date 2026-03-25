@@ -2,17 +2,34 @@
 set -euo pipefail
 
 test_bin="${TEST_BIN_PATH:-/dist/claude_cli_test}"
+test_name="${CLAUDE_INSTALL_TEST_NAME:-TestClaudeInstallLaunchIntegration}"
+needs_patchelf="${CLAUDE_INSTALL_NEEDS_PATCHELF:-0}"
+needs_tar="${CLAUDE_INSTALL_NEEDS_TAR:-0}"
 
 install_deps() {
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
+    pkgs=(ca-certificates curl wget)
+    if [[ "$needs_patchelf" == "1" ]]; then
+      pkgs+=(patchelf)
+    fi
+    if [[ "$needs_tar" == "1" ]]; then
+      pkgs+=(tar)
+    fi
     apt-get update
-    apt-get install -y --no-install-recommends ca-certificates curl wget
+    apt-get install -y --no-install-recommends "${pkgs[@]}"
     return
   fi
 
   if command -v dnf >/dev/null 2>&1; then
-    dnf -y install ca-certificates curl wget
+    pkgs=(ca-certificates curl wget)
+    if [[ "$needs_patchelf" == "1" ]]; then
+      pkgs+=(patchelf)
+    fi
+    if [[ "$needs_tar" == "1" ]]; then
+      pkgs+=(tar)
+    fi
+    dnf -y install "${pkgs[@]}"
     return
   fi
 
@@ -22,7 +39,15 @@ install_deps() {
       sed -i 's/^mirrorlist=/#mirrorlist=/g' /etc/yum.repos.d/CentOS-Base.repo || true
       sed -i 's|^#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-Base.repo || true
     fi
-    yum -y install ca-certificates curl wget
+    pkgs=(ca-certificates curl wget)
+    if [[ "$needs_tar" == "1" ]]; then
+      pkgs+=(tar)
+    fi
+    yum -y install "${pkgs[@]}"
+    if [[ "$needs_patchelf" == "1" ]]; then
+      yum -y install epel-release
+      yum -y install patchelf
+    fi
     return
   fi
 
@@ -68,4 +93,4 @@ if [[ -z "${CI:-}" ]]; then
   export CI=true
 fi
 
-"$test_bin" -test.run TestClaudeInstallLaunchIntegration -test.count=1 -test.v
+"$test_bin" -test.run "$test_name" -test.count=1 -test.v
