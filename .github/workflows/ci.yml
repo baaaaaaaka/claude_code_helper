@@ -161,7 +161,7 @@ jobs:
         env:
           CLAUDE_PATCH_TEST: "1"
         run: |
-          go test ./internal/cli -run TestClaudePatchIntegration -count=1
+          go test ./internal/cli -run '^TestClaudePatchIntegration(|RetriesKnownFailure)$' -count=1
 
       - name: Claude patch smoke (Linux)
         if: runner.os == 'Linux'
@@ -169,7 +169,7 @@ jobs:
         env:
           CLAUDE_PATCH_TEST: "1"
         run: |
-          go test ./internal/cli -run TestClaudePatchIntegration -count=1
+          go test ./internal/cli -run '^TestClaudePatchIntegration(|RetriesKnownFailure)$' -count=1
 
       - name: Claude patch smoke (Windows)
         if: runner.os == 'Windows'
@@ -177,7 +177,7 @@ jobs:
         env:
           CLAUDE_PATCH_TEST: "1"
         run: |
-          go test ./internal/cli -run TestClaudePatchIntegration -count=1
+          go test ./internal/cli -run '^TestClaudePatchIntegration(|RetriesKnownFailure)$' -count=1
 
       - name: Claude install+launch smoke (Linux/macOS)
         if: runner.os != 'Windows'

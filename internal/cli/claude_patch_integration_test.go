@@ -25,6 +25,10 @@ const defaultClaudePatchVersion = "2.1.81"
 const defaultClaudeGCSBucket = "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases"
 const claudePatchSkipPrecheckEnv = "CLAUDE_PATCH_SKIP_PRECHECK"
 
+type claudePatchIntegrationOptions struct {
+	seedKnownFailure bool
+}
+
 func TestClaudePatchIntegration(t *testing.T) {
 	if os.Getenv("CLAUDE_PATCH_TEST") != "1" {
 		t.Skip("set CLAUDE_PATCH_TEST=1 to run integration test")
@@ -35,6 +39,20 @@ func TestClaudePatchIntegration(t *testing.T) {
 	}
 	installURL := strings.TrimSpace(os.Getenv("CLAUDE_PATCH_INSTALL_URL"))
 	runClaudePatchIntegrationCase(t, wantVersion, installURL)
+}
+
+func TestClaudePatchIntegrationRetriesKnownFailure(t *testing.T) {
+	if os.Getenv("CLAUDE_PATCH_TEST") != "1" {
+		t.Skip("set CLAUDE_PATCH_TEST=1 to run integration test")
+	}
+	wantVersion := strings.TrimSpace(os.Getenv("CLAUDE_PATCH_VERSION"))
+	if wantVersion == "" {
+		wantVersion = defaultClaudePatchVersion
+	}
+	installURL := strings.TrimSpace(os.Getenv("CLAUDE_PATCH_INSTALL_URL"))
+	runClaudePatchIntegrationCaseWithOptions(t, wantVersion, installURL, claudePatchIntegrationOptions{
+		seedKnownFailure: true,
+	})
 }
 
 func TestClaudePatchRegressionMatrix(t *testing.T) {
@@ -59,6 +77,10 @@ func TestClaudePatchRegressionMatrix(t *testing.T) {
 }
 
 func runClaudePatchIntegrationCase(t *testing.T, wantVersion string, installURL string) {
+	runClaudePatchIntegrationCaseWithOptions(t, wantVersion, installURL, claudePatchIntegrationOptions{})
+}
+
+func runClaudePatchIntegrationCaseWithOptions(t *testing.T, wantVersion string, installURL string, integrationOpts claudePatchIntegrationOptions) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -107,6 +129,16 @@ func runClaudePatchIntegrationCase(t *testing.T, wantVersion string, installURL 
 		glibcCompat:     exePatchGlibcCompatDefault(),
 		glibcCompatRoot: exePatchGlibcCompatRootDefault(),
 	}
+	if integrationOpts.seedKnownFailure {
+		if err := recordPatchFailure(configPath, &patchOutcome{
+			IsClaude:      true,
+			SourcePath:    path,
+			TargetPath:    path,
+			TargetVersion: wantVersion,
+		}, "seeded previous failure for integration retry"); err != nil {
+			t.Fatalf("recordPatchFailure (seed known failure): %v", err)
+		}
+	}
 	var log bytes.Buffer
 	outcome, err := maybePatchExecutable(yoloClaudeArgs(path), opts, configPath, &log)
 	if err != nil {
@@ -114,6 +146,9 @@ func runClaudePatchIntegrationCase(t *testing.T, wantVersion string, installURL 
 	}
 	if outcome == nil || (!outcome.Applied && !outcome.AlreadyPatched) {
 		t.Fatalf("expected patch outcome, got none")
+	}
+	if integrationOpts.seedKnownFailure && !strings.Contains(log.String(), "previous failure recorded") {
+		t.Fatalf("expected retry log after seeded failure, got:\n%s", log.String())
 	}
 	if outcome.Applied && outcome.BackupPath != "" {
 		t.Cleanup(func() {

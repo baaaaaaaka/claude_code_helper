@@ -203,7 +203,7 @@ func TestMaybePatchExecutablePropagatesDisableClaudeBytePatchError(t *testing.T)
 	}
 }
 
-func TestMaybePatchExecutableSkipsKnownFailure(t *testing.T) {
+func TestMaybePatchExecutableRetriesKnownFailure(t *testing.T) {
 	requireExePatchEnabled(t)
 	withExePatchTestHooks(t)
 
@@ -229,18 +229,18 @@ func TestMaybePatchExecutableSkipsKnownFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("maybePatchExecutable error: %v", err)
 	}
-	if outcome == nil || outcome.Applied {
-		t.Fatalf("expected skip outcome without applying patch, got %#v", outcome)
+	if outcome == nil || !outcome.Applied {
+		t.Fatalf("expected patch retry outcome, got %#v", outcome)
 	}
-	if !strings.Contains(log.String(), "skip (previous failure)") {
-		t.Fatalf("expected skip log, got %q", log.String())
+	if !strings.Contains(log.String(), "previous failure recorded") {
+		t.Fatalf("expected retry log, got %q", log.String())
 	}
 	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read stub: %v", err)
 	}
-	if !strings.Contains(string(got), "Claude Code 1.2.3") {
-		t.Fatalf("expected executable to remain unchanged")
+	if !strings.Contains(string(got), "Claude Code 9.9.9") {
+		t.Fatalf("expected executable to be patched, got %q", string(got))
 	}
 }
 
@@ -852,7 +852,7 @@ func TestMaybePatchExecutableReturnsCompatPreparationError(t *testing.T) {
 	}
 }
 
-func TestMaybePatchExecutableSkipWithoutCompatOutcomeUsesResolvedPath(t *testing.T) {
+func TestMaybePatchExecutableKnownFailureWithoutCompatOutcomeUsesResolvedPath(t *testing.T) {
 	requireExePatchEnabled(t)
 	withExePatchTestHooks(t)
 
@@ -869,6 +869,9 @@ func TestMaybePatchExecutableSkipWithoutCompatOutcomeUsesResolvedPath(t *testing
 	}
 	if outcome == nil {
 		t.Fatalf("expected non-nil outcome")
+	}
+	if !outcome.Applied {
+		t.Fatalf("expected retry to still apply patch, got %#v", outcome)
 	}
 	assertSameExistingPath(t, outcome.SourcePath, path)
 	assertSameExistingPath(t, outcome.TargetPath, path)
@@ -1230,7 +1233,7 @@ func TestMaybePatchExecutablePatchesMirrorInsteadOfSharedSourceOnEL7(t *testing.
 	}
 }
 
-func TestMaybePatchExecutableSkipUsesCompatLaunchPrefixOnEL7(t *testing.T) {
+func TestMaybePatchExecutableKnownFailureUsesCompatLaunchPrefixOnEL7(t *testing.T) {
 	requireExePatchEnabled(t)
 	withExePatchTestHooks(t)
 

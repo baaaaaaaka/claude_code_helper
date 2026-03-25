@@ -382,30 +382,15 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 				targetSHA = sha
 			}
 		}
-		if skip, skipErr := shouldSkipPatchFailureFn(configPath, proxyVersion, targetVersion, targetSHA); skipErr == nil && skip {
+		// Previous patch failures are advisory only. Probe and startup failures
+		// can be false negatives, so every launch should still retry patching at
+		// least once instead of hard-skipping future attempts.
+		if knownFailure, skipErr := shouldSkipPatchFailureFn(configPath, proxyVersion, targetVersion, targetSHA); skipErr == nil && knownFailure {
 			if targetVersion != "" {
-				_, _ = fmt.Fprintf(log, "exe-patch: skip (previous failure) for claude %s with proxy %s\n", targetVersion, proxyVersion)
+				_, _ = fmt.Fprintf(log, "exe-patch: previous failure recorded for claude %s with proxy %s; retrying patch\n", targetVersion, proxyVersion)
 			} else {
-				_, _ = fmt.Fprintf(log, "exe-patch: skip (previous failure) for claude binary with proxy %s\n", proxyVersion)
+				_, _ = fmt.Fprintf(log, "exe-patch: previous failure recorded for claude binary with proxy %s; retrying patch\n", proxyVersion)
 			}
-			skipOutcome := compatOutcome
-			if skipOutcome == nil {
-				skipOutcome = &patchOutcome{
-					SourcePath:       resolvedPath,
-					TargetPath:       resolvedPath,
-					LaunchArgsPrefix: []string{resolvedPath},
-				}
-			}
-			skipOutcome.SourcePath = resolvedPath
-			skipOutcome.SourceSHA256 = targetSHA
-			skipOutcome.TargetVersion = targetVersion
-			skipOutcome.TargetSHA256 = targetSHA
-			skipOutcome.IsClaude = true
-			skipOutcome.ConfigPath = configPath
-			if len(skipOutcome.LaunchArgsPrefix) == 0 && strings.TrimSpace(skipOutcome.TargetPath) != "" {
-				skipOutcome.LaunchArgsPrefix = []string{skipOutcome.TargetPath}
-			}
-			return skipOutcome, nil
 		} else if skipErr != nil {
 			_, _ = fmt.Fprintf(log, "exe-patch: failed to read patch failure config: %v\n", skipErr)
 		}
