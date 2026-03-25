@@ -1,0 +1,181 @@
+name: Claude Code Install Monitor
+
+on:
+  push:
+    branches: ["main"]
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: claude-code-install-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    name: Monitor Claude Code install entrypoints
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.12"
+          cache: true
+
+      - name: Resolve current Claude release info
+        id: release_info
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/claude_release_info.sh --json > current-release-info.json
+          cat current-release-info.json
+
+      - name: Run Claude install+launch smoke
+        id: install_smoke
+        continue-on-error: true
+        shell: bash
+        timeout-minutes: 15
+        env:
+          CLAUDE_INSTALL_TEST: "1"
+        run: |
+          set -euo pipefail
+          for attempt in 1 2; do
+            if go test ./internal/cli -run TestClaudeInstallLaunchIntegration -count=1 -v; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 2 ]; then
+              exit 1
+            fi
+            echo "Retrying Claude install+launch smoke after transient failure..."
+            sleep 3
+          done
+
+      - name: Build issue payload
+        id: payload
+        if: always()
+        shell: bash
+        env:
+          WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RELEASE_INFO_STATUS: ${{ steps.release_info.outcome }}
+          INSTALL_SMOKE_STATUS: ${{ steps.install_smoke.outcome }}
+        run: |
+          set -euo pipefail
+          current_args=()
+          if [ -f current-release-info.json ]; then
+            current_args+=(--current-path current-release-info.json)
+          fi
+          python3 scripts/claude_install_monitor.py \
+            --baseline-path scripts/claude_install_monitor_baseline.json \
+            "${current_args[@]}" \
+            --workflow-run-url "$WORKFLOW_RUN_URL" \
+            --resolve-status "$RELEASE_INFO_STATUS" \
+            --smoke-status "$INSTALL_SMOKE_STATUS" \
+            --output-json install-monitor.json \
+            --output-body install-monitor.md
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open("install-monitor.json", encoding="utf-8") as handle:
+              data = json.load(handle)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(
+                  f"should_create={'true' if data.get('should_create') else 'false'}\n"
+              )
+              output.write(
+                  f"should_fail={'true' if data.get('should_fail') else 'false'}\n"
+              )
+              if data.get("title"):
+                  output.write("title<<EOF\n")
+                  output.write(data["title"] + "\n")
+                  output.write("EOF\n")
+              if data.get("body_path"):
+                  output.write(f"body_path={data['body_path']}\n")
+          PY
+
+      - name: Upload monitor artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-code-install-monitor
+          path: |
+            current-release-info.json
+            install-monitor.json
+            install-monitor.md
+          if-no-files-found: ignore
+
+      - name: Create issue
+        if: github.event_name == 'schedule' && steps.payload.outputs.should_create == 'true'
+        uses: actions/github-script@v7
+        env:
+          ISSUE_TITLE: ${{ steps.payload.outputs.title }}
+          ISSUE_BODY_PATH: ${{ steps.payload.outputs.body_path }}
+        with:
+          script: |
+            const fs = require('fs');
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const title = process.env.ISSUE_TITLE;
+            const body = fs.readFileSync(process.env.ISSUE_BODY_PATH, 'utf8');
+            const labelName = 'claude-code-install-monitor';
+
+            try {
+              await github.rest.issues.getLabel({owner, repo, name: labelName});
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+              try {
+                await github.rest.issues.createLabel({
+                  owner,
+                  repo,
+                  name: labelName,
+                  color: 'D93F0B',
+                  description: 'Automated Claude Code install monitor alerts',
+                });
+              } catch (createError) {
+                if (createError.status !== 422) {
+                  throw createError;
+                }
+              }
+            }
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: 'open',
+              labels: labelName,
+              per_page: 100,
+            });
+            const existing = issues.find((issue) => !issue.pull_request && issue.title === title);
+            if (existing) {
+              core.notice(`Existing issue #${existing.number} already open for ${title}`);
+              return;
+            }
+
+            const created = await github.rest.issues.create({
+              owner,
+              repo,
+              title,
+              body,
+              labels: [labelName],
+            });
+            core.notice(`Created issue #${created.data.number}`);
+
+      - name: Fail on detected install entry changes
+        if: steps.payload.outputs.should_fail == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Claude Code install monitor detected an upstream change or smoke failure." >&2
+          exit 1

@@ -1,6 +1,8 @@
 package scripts_test
 
 import (
+	"encoding/json"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -46,6 +48,59 @@ func TestClaudeReleaseInfoFailsWithoutDownloader(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "Need curl or wget") {
 		t.Fatalf("unexpected output: %s", string(out))
+	}
+}
+
+func TestClaudeReleaseInfoJSONIncludesInstallCmdURL(t *testing.T) {
+	bashPath := requireBash(t)
+	repoRoot := repoRootFromScripts(t)
+	script := filepath.Join(repoRoot, "scripts", "claude_release_info.sh")
+
+	base := t.TempDir()
+	bucketDir := filepath.Join(base, "bucket")
+	if err := os.MkdirAll(bucketDir, 0o755); err != nil {
+		t.Fatalf("mkdir bucket: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bucketDir, "latest"), []byte("2.1.81\n"), 0o644); err != nil {
+		t.Fatalf("write latest: %v", err)
+	}
+
+	bucketURL := "file://" + filepath.ToSlash(bucketDir)
+	installSh := filepath.Join(base, "install.sh")
+	if err := os.WriteFile(installSh, []byte("GCS_BUCKET=\""+bucketURL+"\"\n"), 0o755); err != nil {
+		t.Fatalf("write install.sh: %v", err)
+	}
+	installPs1 := filepath.Join(base, "install.ps1")
+	if err := os.WriteFile(installPs1, []byte("$GCS_BUCKET = \""+bucketURL+"\"\n"), 0o644); err != nil {
+		t.Fatalf("write install.ps1: %v", err)
+	}
+
+	cmd := exec.Command(
+		bashPath,
+		script,
+		"--json",
+		"--install-sh", "file://"+filepath.ToSlash(installSh),
+		"--install-ps1", "file://"+filepath.ToSlash(installPs1),
+		"--install-cmd", "https://claude.ai/install.cmd",
+	)
+	cmd.Dir = repoRoot
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run script: %v\n%s", err, string(out))
+	}
+
+	var payload map[string]string
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("unmarshal output: %v\n%s", err, string(out))
+	}
+	if got := payload["install_cmd_url"]; got != "https://claude.ai/install.cmd" {
+		t.Fatalf("install_cmd_url=%q", got)
+	}
+	if got := payload["gcs_bucket"]; got != bucketURL {
+		t.Fatalf("gcs_bucket=%q", got)
+	}
+	if got := payload["latest_version"]; got != "2.1.81" {
+		t.Fatalf("latest_version=%q", got)
 	}
 }
 

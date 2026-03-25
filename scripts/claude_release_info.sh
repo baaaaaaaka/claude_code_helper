@@ -12,6 +12,7 @@ Options:
   --json                 Output JSON (default: text)
   --install-sh URL       Override install.sh URL
   --install-ps1 URL       Override install.ps1 URL
+  --install-cmd URL      Override install.cmd URL
   --proxy-bin PATH        Path to claude-proxy binary (default: claude-proxy)
   --proxy-config PATH     Config path for claude-proxy
   --proxy-profile ID      Profile id/name for claude-proxy
@@ -21,6 +22,7 @@ Options:
 Environment overrides:
   CLAUDE_INSTALL_SH_URL
   CLAUDE_INSTALL_PS1_URL
+  CLAUDE_INSTALL_CMD_URL
   CLAUDE_PROXY_BIN
   CLAUDE_PROXY_CONFIG
   CLAUDE_PROXY_PROFILE
@@ -31,6 +33,7 @@ EOF
 json=0
 install_sh_url="${CLAUDE_INSTALL_SH_URL:-https://claude.ai/install.sh}"
 install_ps1_url="${CLAUDE_INSTALL_PS1_URL:-https://claude.ai/install.ps1}"
+install_cmd_url="${CLAUDE_INSTALL_CMD_URL:-https://claude.ai/install.cmd}"
 proxy_bin="${CLAUDE_PROXY_BIN:-claude-proxy}"
 proxy_config="${CLAUDE_PROXY_CONFIG:-}"
 proxy_profile="${CLAUDE_PROXY_PROFILE:-}"
@@ -41,6 +44,7 @@ while [ $# -gt 0 ]; do
     --json) json=1; shift ;;
     --install-sh) install_sh_url="$2"; shift 2 ;;
     --install-ps1) install_ps1_url="$2"; shift 2 ;;
+    --install-cmd) install_cmd_url="$2"; shift 2 ;;
     --proxy-bin) proxy_bin="$2"; shift 2 ;;
     --proxy-config) proxy_config="$2"; shift 2 ;;
     --proxy-profile) proxy_profile="$2"; shift 2 ;;
@@ -275,6 +279,7 @@ if [ "$json" -eq 1 ]; then
 {
   "install_sh_url": "$(printf "%s" "$install_sh_url")",
   "install_ps1_url": "$(printf "%s" "$install_ps1_url")",
+  "install_cmd_url": "$(printf "%s" "$install_cmd_url")",
   "gcs_bucket": "$(printf "%s" "$bucket")",
   "latest_version": "$(printf "%s" "$latest_version")",
   "latest_manifest_url": "$(printf "%s/%s/manifest.json" "$bucket" "$latest_version")",
@@ -284,6 +289,7 @@ EOF
 else
   echo "install_sh_url=${install_sh_url}"
   echo "install_ps1_url=${install_ps1_url}"
+  echo "install_cmd_url=${install_cmd_url}"
   echo "gcs_bucket=${bucket}"
   if [ -n "$latest_version" ]; then
     echo "latest_version=${latest_version}"

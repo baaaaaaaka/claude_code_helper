@@ -1,0 +1,6 @@
+{
+  "install_sh_url": "https://claude.ai/install.sh",
+  "install_ps1_url": "https://claude.ai/install.ps1",
+  "install_cmd_url": "https://claude.ai/install.cmd",
+  "gcs_bucket": "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases"
+}
