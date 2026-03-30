@@ -55,7 +55,7 @@ jobs:
             fi
           fi
           git fetch --tags --force >/dev/null 2>&1 || true
-          proxy_tag="$(git tag -l 'v*' --sort=version:refname | tail -n 1)"
+          proxy_tag="$(git -c versionsort.suffix=-rc tag -l 'v*' --sort=version:refname | tail -n 1)"
           if [ -z "$proxy_tag" ]; then
             proxy_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
           fi
