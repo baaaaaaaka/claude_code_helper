@@ -164,6 +164,11 @@ func runClaudePatchIntegrationCaseWithOptions(t *testing.T, wantVersion string, 
 	if outcome.Applied {
 		for _, stat := range outcome.PatchStats {
 			if stat.Eligible == 0 && stat.Replacements == 0 {
+				// process.getuid() is Unix-only; Windows binaries don't contain the root guard.
+				if runtime.GOOS == "windows" && stat.Label == "root-bypass-guard" {
+					t.Logf("patch %q: 0 matches on Windows (expected — process.getuid is Unix-only)", stat.Label)
+					continue
+				}
 				t.Fatalf("patch %q found no matches in claude %s — the target pattern may have changed upstream\n%s",
 					stat.Label, wantVersion, log.String())
 			}
