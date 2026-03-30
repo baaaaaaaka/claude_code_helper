@@ -69,6 +69,7 @@ type patchOutcome struct {
 	ConfigPath               string
 	LogWriter                io.Writer
 	readiness                *patchReadiness
+	PatchStats               []exePatchStats
 }
 
 func (o exePatchOptions) enabled() bool {
@@ -210,7 +211,7 @@ func remoteSettingsDisablePatchSpec() (exePatchSpec, error) {
 func rootBypassGuardPatchSpec() (exePatchSpec, error) {
 	return exePatchSpec{
 		label:   "root-bypass-guard",
-		applyID: "root-bypass-guard-v1",
+		applyID: "root-bypass-guard-v2",
 		apply: func(data []byte, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
 			return applyRootBypassGuardPatch(data, log, preview)
 		},
@@ -812,6 +813,7 @@ func patchExecutable(path string, specs []exePatchSpec, log io.Writer, preview b
 	for _, stat := range stats {
 		logPatchSummary(log, path, stat)
 	}
+	outcome.PatchStats = stats
 	return outcome, nil
 }
 

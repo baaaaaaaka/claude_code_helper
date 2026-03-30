@@ -158,6 +158,18 @@ func runClaudePatchIntegrationCaseWithOptions(t *testing.T, wantVersion string, 
 		})
 	}
 
+	// Verify every built-in policy patch matched at least once.
+	// This catches silent pattern breakage (e.g. upstream code refactoring)
+	// that would otherwise go undetected until a user hits the issue.
+	if outcome.Applied {
+		for _, stat := range outcome.PatchStats {
+			if stat.Eligible == 0 && stat.Replacements == 0 {
+				t.Fatalf("patch %q found no matches in claude %s — the target pattern may have changed upstream\n%s",
+					stat.Label, wantVersion, log.String())
+			}
+		}
+	}
+
 	afterVersion, err := runClaudeVersion(ctx, path, outcome)
 	if err != nil {
 		t.Fatalf("claude --version (after): %v\n%s", err, log.String())

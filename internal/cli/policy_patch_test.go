@@ -181,6 +181,40 @@ func TestRootBypassGuardPatch_ContextFilter(t *testing.T) {
 	}
 }
 
+func TestRootBypassGuardPatch_NewUpstreamFormat(t *testing.T) {
+	requireExePatchEnabled(t)
+	// Claude 2.1.86+ refactored the BUBBLEWRAP check from a direct string
+	// comparison to a helper function. The shortened pattern must still match.
+	input := []byte(
+		`if(typeof process.getuid==="function"&&` +
+			rootBypassGuardCond +
+			`&&!lH(process.env.CLAUDE_CODE_BUBBLEWRAP))console.error("` +
+			rootBypassGuardErrorMessage +
+			`"),process.exit(1)`,
+	)
+
+	out, stats, err := applyRootBypassGuardPatch(input, nil, false)
+	if err != nil {
+		t.Fatalf("applyRootBypassGuardPatch error: %v", err)
+	}
+	if stats.Eligible != 1 || stats.Changed != 1 {
+		t.Fatalf("expected patch to match new upstream format: %+v", stats)
+	}
+	if bytes.Contains(out, []byte(rootBypassGuardCond)) {
+		t.Fatalf("expected original condition to be replaced")
+	}
+	if !bytes.Contains(out, []byte(rootBypassGuardCondPatched)) {
+		t.Fatalf("expected patched condition")
+	}
+	// The surrounding code (typeof check, lH() call) must be preserved.
+	if !bytes.Contains(out, []byte(`typeof process.getuid==="function"`)) {
+		t.Fatalf("expected typeof guard to be preserved")
+	}
+	if !bytes.Contains(out, []byte(`!lH(process.env.CLAUDE_CODE_BUBBLEWRAP)`)) {
+		t.Fatalf("expected lH() call to be preserved")
+	}
+}
+
 func TestPolicyPatchHelpers(t *testing.T) {
 	t.Run("findBlock handles nested braces", func(t *testing.T) {
 		data := []byte("function x(){if(true){return '{';}// comment { }\nreturn 1;}")

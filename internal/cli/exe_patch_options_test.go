@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -558,6 +559,79 @@ func TestPatchSpecsHashDiffers(t *testing.T) {
 	hashB := patchSpecsHash([]exePatchSpec{specB})
 	if hashA == hashB {
 		t.Fatalf("expected different hashes for different labels")
+	}
+}
+
+func TestPatchSpecsHashChangesWithApplyID(t *testing.T) {
+	requireExePatchEnabled(t)
+	makeSpec := func(id string) exePatchSpec {
+		return exePatchSpec{
+			label:   "same-label",
+			applyID: id,
+			apply: func(data []byte, _ io.Writer, _ bool) ([]byte, exePatchStats, error) {
+				return data, exePatchStats{}, nil
+			},
+			fixedLength: true,
+		}
+	}
+	hashV1 := patchSpecsHash([]exePatchSpec{makeSpec("root-bypass-guard-v1")})
+	hashV2 := patchSpecsHash([]exePatchSpec{makeSpec("root-bypass-guard-v2")})
+	if hashV1 == hashV2 {
+		t.Fatalf("expected different specsHash when applyID changes")
+	}
+}
+
+func TestPatchExecutablePopulatesPatchStats(t *testing.T) {
+	requireExePatchEnabled(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bin")
+	if err := os.WriteFile(path, []byte("foo baz"), 0o700); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
+
+	store, err := config.NewPatchHistoryStore(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatalf("NewPatchHistoryStore error: %v", err)
+	}
+
+	// Two built-in-style patches: one matches, one doesn't.
+	specs := []exePatchSpec{
+		{
+			label:   "match-spec",
+			applyID: "match-v1",
+			apply: func(data []byte, _ io.Writer, _ bool) ([]byte, exePatchStats, error) {
+				out := bytes.Replace(data, []byte("foo"), []byte("bar"), 1)
+				return out, exePatchStats{Label: "match-spec", Segments: 1, Eligible: 1, Changed: 1, Replacements: 1}, nil
+			},
+		},
+		{
+			label:   "miss-spec",
+			applyID: "miss-v1",
+			apply: func(data []byte, _ io.Writer, _ bool) ([]byte, exePatchStats, error) {
+				return data, exePatchStats{Label: "miss-spec"}, nil
+			},
+		},
+	}
+
+	log := &bytes.Buffer{}
+	outcome, err := patchExecutable(path, specs, log, false, false, store, "v1.0.0")
+	if err != nil {
+		t.Fatalf("patchExecutable error: %v", err)
+	}
+	if !outcome.Applied {
+		t.Fatalf("expected patch to be applied")
+	}
+	if len(outcome.PatchStats) != 2 {
+		t.Fatalf("expected 2 PatchStats entries, got %d", len(outcome.PatchStats))
+	}
+
+	// First spec matched.
+	if outcome.PatchStats[0].Label != "match-spec" || outcome.PatchStats[0].Changed == 0 {
+		t.Fatalf("expected match-spec to have changes: %+v", outcome.PatchStats[0])
+	}
+	// Second spec had zero matches — mirrors the root-bypass-guard failure scenario.
+	if outcome.PatchStats[1].Label != "miss-spec" || outcome.PatchStats[1].Eligible != 0 {
+		t.Fatalf("expected miss-spec to have no matches: %+v", outcome.PatchStats[1])
 	}
 }
 

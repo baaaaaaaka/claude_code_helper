@@ -13,8 +13,8 @@ const (
 	bypassPermissionsGateNamePatched = "tengu_disable_bypass_permissionX_mode"
 	bypassPermissionsSettingKey      = "disableBypassPermissionsMode"
 	bypassPermissionsSettingPatched  = "disableBypassPermissionsModE"
-	rootBypassGuardCond              = `process.getuid()===0&&process.env.IS_SANDBOX!=="1"&&process.env.CLAUDE_CODE_BUBBLEWRAP!=="1"`
-	rootBypassGuardCondPatched       = `process.getuid()===1&&process.env.IS_SANDBOX!=="1"&&process.env.CLAUDE_CODE_BUBBLEWRAP!=="1"`
+	rootBypassGuardCond              = `process.getuid()===0&&process.env.IS_SANDBOX!=="1"`
+	rootBypassGuardCondPatched       = `process.getuid()===1&&process.env.IS_SANDBOX!=="1"`
 	rootBypassGuardErrorMessage      = `--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons`
 	rootBypassGuardContextBytes      = 512
 	remoteSettingsFileName           = "remote-settings.json"
