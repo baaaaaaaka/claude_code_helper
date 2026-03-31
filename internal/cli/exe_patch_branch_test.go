@@ -530,7 +530,7 @@ func TestMaybePatchExecutableTracksBuiltInClaudePatchState(t *testing.T) {
 			return "Claude Code 1.2.3", nil
 		}
 
-		outcome, err := maybePatchExecutable(yoloClaudeArgs(path), exePatchOptions{
+		outcome, err := maybePatchExecutable(yoloClaudeArgs("claude"), exePatchOptions{
 			enabledFlag:    true,
 			policySettings: true,
 		}, filepath.Join(dir, "config.json"), io.Discard)
@@ -554,7 +554,7 @@ func TestMaybePatchExecutableTracksBuiltInClaudePatchState(t *testing.T) {
 			t.Fatalf("write unmatched claude: %v", err)
 		}
 
-		outcome, err := maybePatchExecutable([]string{path}, exePatchOptions{
+		outcome, err := maybePatchExecutable([]string{"claude"}, exePatchOptions{
 			enabledFlag:               true,
 			policySettings:            true,
 			allowBuiltInWithoutBypass: true,
