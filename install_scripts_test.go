@@ -172,7 +172,6 @@ func TestInstallShUsesTcshConfigs(t *testing.T) {
 	claudeBinDir := expectedClaudeBinDir(run.homeDir)
 	for _, path := range []string{
 		filepath.Join(run.homeDir, ".cshrc"),
-		filepath.Join(run.homeDir, ".tcshrc"),
 		filepath.Join(run.homeDir, ".login"),
 	} {
 		contents, err := os.ReadFile(path)
@@ -188,11 +187,33 @@ func TestInstallShUsesTcshConfigs(t *testing.T) {
 		}
 	}
 
-	tcshrc, err := os.ReadFile(filepath.Join(run.homeDir, ".tcshrc"))
+	if _, err := os.Stat(filepath.Join(run.homeDir, ".tcshrc")); !os.IsNotExist(err) {
+		t.Fatalf("expected .tcshrc to remain absent, got err=%v", err)
+	}
+}
+
+func TestInstallShUpdatesExistingTcshrc(t *testing.T) {
+	run := newInstallShRun(t, false, false)
+	run.env = overrideEnv(run.env, "SHELL", "/bin/tcsh")
+	tcshrcPath := filepath.Join(run.homeDir, ".tcshrc")
+	if err := os.WriteFile(tcshrcPath, []byte("# existing tcshrc\n"), 0o644); err != nil {
+		t.Fatalf("write .tcshrc: %v", err)
+	}
+
+	runInstallShRun(t, run)
+
+	tcshrc, err := os.ReadFile(tcshrcPath)
 	if err != nil {
 		t.Fatalf("read .tcshrc: %v", err)
 	}
-	if !strings.Contains(string(tcshrc), "alias clp claude-proxy") {
+	text := string(tcshrc)
+	if !hasPathMarker(text, expectedInstallDir(t, run.installDir)) {
+		t.Fatalf("missing install dir PATH update in .tcshrc")
+	}
+	if !hasPathMarker(text, expectedClaudeBinDir(run.homeDir)) {
+		t.Fatalf("missing claude PATH update in .tcshrc")
+	}
+	if !strings.Contains(text, "alias clp claude-proxy") {
 		t.Fatalf("missing clp alias in .tcshrc")
 	}
 }
@@ -297,6 +318,9 @@ func TestInstallShTcshConfigSources(t *testing.T) {
 
 	run := newInstallShRun(t, false, false)
 	run.env = overrideEnv(run.env, "SHELL", "/bin/tcsh")
+	if err := os.WriteFile(filepath.Join(run.homeDir, ".tcshrc"), []byte("# existing tcshrc\n"), 0o644); err != nil {
+		t.Fatalf("write .tcshrc: %v", err)
+	}
 	runInstallShRun(t, run)
 	installDir := expectedInstallDir(t, run.installDir)
 

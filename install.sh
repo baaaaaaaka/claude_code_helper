@@ -379,7 +379,7 @@ update_shell_config() {
       ensure_csh_path_targets "$HOME/.cshrc"
       ensure_line "$HOME/.cshrc" "alias clp claude-proxy"
     fi
-    if [ "$shell_name" = "tcsh" ] || [ -f "$HOME/.tcshrc" ]; then
+    if [ -f "$HOME/.tcshrc" ]; then
       ensure_csh_path_targets "$HOME/.tcshrc"
       ensure_line "$HOME/.tcshrc" "alias clp claude-proxy"
     fi
