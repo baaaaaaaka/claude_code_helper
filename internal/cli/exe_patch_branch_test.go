@@ -519,6 +519,9 @@ func TestMaybePatchExecutableTracksBuiltInClaudePatchState(t *testing.T) {
 		setStubPath(t, dir)
 
 		path := filepath.Join(dir, "claude")
+		if runtime.GOOS == "windows" {
+			path += ".cmd"
+		}
 		original := []byte("function FI(H){if(H===\"policySettings\"){let L=sqA();if(L&&Object.keys(L).length>0)return L}let $=L4(H);if(!$)return null;let{settings:A}=DmA($);return A}")
 		if err := os.WriteFile(path, original, 0o700); err != nil {
 			t.Fatalf("write original claude: %v", err)
@@ -544,6 +547,9 @@ func TestMaybePatchExecutableTracksBuiltInClaudePatchState(t *testing.T) {
 		setStubPath(t, dir)
 
 		path := filepath.Join(dir, "claude")
+		if runtime.GOOS == "windows" {
+			path += ".cmd"
+		}
 		if err := os.WriteFile(path, []byte("#!/bin/sh\necho not-claude\n"), 0o700); err != nil {
 			t.Fatalf("write unmatched claude: %v", err)
 		}
