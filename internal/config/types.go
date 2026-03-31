@@ -5,10 +5,19 @@ import "time"
 const CurrentVersion = 1
 const InstanceKindDaemon = "daemon"
 
+type YoloMode string
+
+const (
+	YoloModeOff    YoloMode = "off"
+	YoloModeBypass YoloMode = "bypass"
+	YoloModeRules  YoloMode = "rules"
+)
+
 type Config struct {
 	Version       int            `json:"version"`
 	ProxyEnabled  *bool          `json:"proxyEnabled,omitempty"`
 	YoloEnabled   *bool          `json:"yoloEnabled,omitempty"`
+	YoloMode      *string        `json:"yoloMode,omitempty"`
 	Profiles      []Profile      `json:"profiles"`
 	Instances     []Instance     `json:"instances"`
 	PatchFailures []PatchFailure `json:"patchFailures,omitempty"`

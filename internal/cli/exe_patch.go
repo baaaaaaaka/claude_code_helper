@@ -37,17 +37,18 @@ var (
 )
 
 type exePatchOptions struct {
-	enabledFlag              bool
-	regex1                   string
-	regex2                   []string
-	regex3                   []string
-	replace                  []string
-	preview                  bool
-	policySettings           bool
-	dryRun                   bool
-	glibcCompat              bool
-	glibcCompatRoot          string
-	glibcCompatPreferWrapper bool
+	enabledFlag               bool
+	regex1                    string
+	regex2                    []string
+	regex3                    []string
+	replace                   []string
+	preview                   bool
+	policySettings            bool
+	dryRun                    bool
+	glibcCompat               bool
+	glibcCompatRoot           string
+	glibcCompatPreferWrapper  bool
+	allowBuiltInWithoutBypass bool
 }
 
 type patchOutcome struct {
@@ -70,6 +71,7 @@ type patchOutcome struct {
 	LogWriter                io.Writer
 	readiness                *patchReadiness
 	PatchStats               []exePatchStats
+	BuiltInClaudePatchActive bool
 }
 
 func (o exePatchOptions) enabled() bool {
@@ -315,14 +317,18 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 		builtinSpecs = nil
 	}
 	yoloRequested := hasYoloBypassPermissionsArg(cmdArgs)
+	builtinPatchAllowed := (yoloRequested || opts.allowBuiltInWithoutBypass) && len(builtinSpecs) > 0
 	glibcCompatHost := isClaude && glibcCompat && glibcCompatHostEligibleFn()
 	patchTargetPath := resolvedPath
 	var compatOutcome *patchOutcome
-	// Claude's built-in byte patches are only allowed for launches that
-	// explicitly request `--permission-mode bypassPermissions`. When that flag
-	// is absent, any previously-applied Claude byte patch must be restored
-	// before launch, but Linux glibc-compat rescue remains available below.
-	if isClaude && !yoloRequested {
+	// Claude's built-in byte patches are only allowed when a launch both
+	// requests the built-in patch behavior and actually has built-in Claude
+	// specs available. Rules mode may keep the built-in byte patch active
+	// without passing the bypass flag, but only when the built-in policy patch
+	// is enabled for this launch. When built-in patching is not available, any
+	// previously-applied Claude byte patch must be restored before launch, but
+	// Linux glibc-compat rescue remains available below.
+	if isClaude && !builtinPatchAllowed {
 		if err := disableClaudeBytePatch(resolvedPath, configPath, log, opts.dryRun); err != nil {
 			return nil, err
 		}
@@ -344,7 +350,7 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 		if compatOutcome != nil && strings.TrimSpace(compatOutcome.TargetPath) != "" {
 			patchTargetPath = compatOutcome.TargetPath
 		}
-		if isClaude && !yoloRequested && !config.PathsEqual(patchTargetPath, resolvedPath) {
+		if isClaude && !builtinPatchAllowed && !config.PathsEqual(patchTargetPath, resolvedPath) {
 			if err := disableClaudeBytePatch(patchTargetPath, configPath, log, opts.dryRun); err != nil {
 				return nil, err
 			}
@@ -532,6 +538,17 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 				_, _ = fmt.Fprintf(log, "exe-patch: failed to persist patch verification: %v\n", markErr)
 			}
 		}
+	}
+	if outcome != nil && outcome.IsClaude && len(builtinSpecs) > 0 {
+		builtInTargetPath := strings.TrimSpace(outcome.TargetPath)
+		if builtInTargetPath == "" {
+			builtInTargetPath = patchTargetPath
+		}
+		active, activeErr := hasActiveClaudeBuiltInPatch(builtInTargetPath, builtinSpecs)
+		if activeErr != nil {
+			return nil, activeErr
+		}
+		outcome.BuiltInClaudePatchActive = active
 	}
 
 	return outcome, nil
@@ -1050,6 +1067,35 @@ func claudeBuiltInPatchedBytesFromBackup(backupPath string, specs []exePatchSpec
 		return nil, "", false, nil
 	}
 	return patched, hashBytes(patched), true, nil
+}
+
+func hasActiveClaudeBuiltInPatch(path string, specs []exePatchSpec) (bool, error) {
+	if strings.TrimSpace(path) == "" || len(specs) == 0 {
+		return false, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("read Claude executable %q for built-in patch validation: %w", path, err)
+	}
+	_, stats, err := applyExePatches(data, specs, io.Discard, false)
+	if err != nil {
+		return false, fmt.Errorf("inspect built-in Claude patch state for %q: %w", path, err)
+	}
+	return builtInClaudePatchActiveFromStats(stats), nil
+}
+
+func builtInClaudePatchActiveFromStats(stats []exePatchStats) bool {
+	touched := false
+	changed := false
+	for _, stat := range stats {
+		if stat.Eligible > 0 || stat.Replacements > 0 {
+			touched = true
+		}
+		if stat.Changed > 0 {
+			changed = true
+		}
+	}
+	return touched && !changed
 }
 
 func fileHasStrictPrefix(path string, prefix []byte) (bool, error) {

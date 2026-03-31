@@ -21,12 +21,13 @@ import (
 	"time"
 )
 
-const defaultClaudePatchVersion = "2.1.88"
+const defaultClaudePatchVersion = "2.1.87"
 const defaultClaudeGCSBucket = "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases"
 const claudePatchSkipPrecheckEnv = "CLAUDE_PATCH_SKIP_PRECHECK"
 
 type claudePatchIntegrationOptions struct {
 	seedKnownFailure bool
+	rulesMode        bool
 }
 
 func TestClaudePatchIntegration(t *testing.T) {
@@ -52,6 +53,20 @@ func TestClaudePatchIntegrationRetriesKnownFailure(t *testing.T) {
 	installURL := strings.TrimSpace(os.Getenv("CLAUDE_PATCH_INSTALL_URL"))
 	runClaudePatchIntegrationCaseWithOptions(t, wantVersion, installURL, claudePatchIntegrationOptions{
 		seedKnownFailure: true,
+	})
+}
+
+func TestClaudePatchRulesIntegration(t *testing.T) {
+	if os.Getenv("CLAUDE_PATCH_TEST") != "1" {
+		t.Skip("set CLAUDE_PATCH_TEST=1 to run integration test")
+	}
+	wantVersion := strings.TrimSpace(os.Getenv("CLAUDE_PATCH_VERSION"))
+	if wantVersion == "" {
+		wantVersion = defaultClaudePatchVersion
+	}
+	installURL := strings.TrimSpace(os.Getenv("CLAUDE_PATCH_INSTALL_URL"))
+	runClaudePatchIntegrationCaseWithOptions(t, wantVersion, installURL, claudePatchIntegrationOptions{
+		rulesMode: true,
 	})
 }
 
@@ -103,7 +118,9 @@ func runClaudePatchIntegrationCaseWithOptions(t *testing.T, wantVersion string, 
 			t.Fatalf("expected claude %s, got %q", wantVersion, strings.TrimSpace(beforeVersion))
 		}
 
-		if runtime.GOOS == "windows" {
+		if integrationOpts.rulesMode {
+			t.Log("skip root bypass probe in rules mode")
+		} else if runtime.GOOS == "windows" {
 			t.Log("skip root bypass probe on windows")
 		} else if !supportsYoloFlag(path) {
 			t.Log("skip root bypass probe: --permission-mode unsupported")
@@ -140,7 +157,12 @@ func runClaudePatchIntegrationCaseWithOptions(t *testing.T, wantVersion string, 
 		}
 	}
 	var log bytes.Buffer
-	outcome, err := maybePatchExecutable(yoloClaudeArgs(path), opts, configPath, &log)
+	cmdArgs := yoloClaudeArgs(path)
+	if integrationOpts.rulesMode {
+		opts.allowBuiltInWithoutBypass = true
+		cmdArgs = []string{path}
+	}
+	outcome, err := maybePatchExecutable(cmdArgs, opts, configPath, &log)
 	if err != nil {
 		t.Fatalf("maybePatchExecutable: %v\n%s", err, log.String())
 	}
@@ -149,6 +171,9 @@ func runClaudePatchIntegrationCaseWithOptions(t *testing.T, wantVersion string, 
 	}
 	if integrationOpts.seedKnownFailure && !strings.Contains(log.String(), "previous failure recorded") {
 		t.Fatalf("expected retry log after seeded failure, got:\n%s", log.String())
+	}
+	if !outcome.BuiltInClaudePatchActive {
+		t.Fatalf("expected built-in Claude patch to be active after patch preparation")
 	}
 	if outcome.Applied && outcome.BackupPath != "" {
 		t.Cleanup(func() {

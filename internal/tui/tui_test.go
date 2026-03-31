@@ -14,6 +14,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"github.com/baaaaaaaka/claude_code_helper/internal/claudehistory"
+	"github.com/baaaaaaaka/claude_code_helper/internal/config"
 	"github.com/baaaaaaaka/claude_code_helper/internal/update"
 )
 
@@ -1032,7 +1033,7 @@ func TestHandleKeyCtrlNStartsNewSessionInProject(t *testing.T) {
 	}
 	state := newTestState([]claudehistory.Project{project})
 	state.proxyEnabled = true
-	state.yoloEnabled = true
+	state.yoloMode = config.YoloModeBypass
 
 	selection, err := handleKey(context.Background(), screen, state, Options{}, tcell.NewEventKey(tcell.KeyCtrlN, 0, 0))
 	if err != nil {
@@ -1044,8 +1045,8 @@ func TestHandleKeyCtrlNStartsNewSessionInProject(t *testing.T) {
 	if !selection.UseProxy {
 		t.Fatalf("expected proxy enabled")
 	}
-	if !selection.UseYolo {
-		t.Fatalf("expected yolo enabled")
+	if selection.YoloMode != config.YoloModeBypass {
+		t.Fatalf("expected bypass yolo mode, got %q", selection.YoloMode)
 	}
 }
 
@@ -1097,7 +1098,6 @@ func TestHandleKeyProxyToggleDisablesProxy(t *testing.T) {
 func TestHandleKeyCtrlYTogglesYoloOn(t *testing.T) {
 	screen := newTestScreen(t, 80, 20)
 	state := newTestState([]claudehistory.Project{{Key: "one", Path: "/tmp"}})
-	state.yoloEnabled = false
 
 	_, err := handleKey(context.Background(), screen, state, Options{}, tcell.NewEventKey(tcell.KeyCtrlY, 0, 0))
 	if err != nil {
@@ -1106,15 +1106,16 @@ func TestHandleKeyCtrlYTogglesYoloOn(t *testing.T) {
 	if !state.yoloVisible {
 		t.Fatalf("expected yolo to become visible")
 	}
-	if !state.yoloEnabled {
-		t.Fatalf("expected yolo enabled")
+	if state.yoloMode != config.YoloModeBypass {
+		t.Fatalf("expected bypass yolo mode, got %q", state.yoloMode)
 	}
 }
 
-func TestHandleKeyCtrlYTogglesYoloOff(t *testing.T) {
+func TestHandleKeyCtrlYCyclesToRulesMode(t *testing.T) {
 	screen := newTestScreen(t, 80, 20)
 	state := newTestState([]claudehistory.Project{{Key: "one", Path: "/tmp"}})
-	state.yoloEnabled = true
+	state.yoloVisible = true
+	state.yoloMode = config.YoloModeBypass
 
 	_, err := handleKey(context.Background(), screen, state, Options{}, tcell.NewEventKey(tcell.KeyCtrlY, 0, 0))
 	if err != nil {
@@ -1123,8 +1124,26 @@ func TestHandleKeyCtrlYTogglesYoloOff(t *testing.T) {
 	if !state.yoloVisible {
 		t.Fatalf("expected yolo to stay visible")
 	}
-	if state.yoloEnabled {
-		t.Fatalf("expected yolo disabled")
+	if state.yoloMode != config.YoloModeRules {
+		t.Fatalf("expected rules yolo mode, got %q", state.yoloMode)
+	}
+}
+
+func TestHandleKeyCtrlYTogglesYoloOffAfterRulesMode(t *testing.T) {
+	screen := newTestScreen(t, 80, 20)
+	state := newTestState([]claudehistory.Project{{Key: "one", Path: "/tmp"}})
+	state.yoloVisible = true
+	state.yoloMode = config.YoloModeRules
+
+	_, err := handleKey(context.Background(), screen, state, Options{}, tcell.NewEventKey(tcell.KeyCtrlY, 0, 0))
+	if err != nil {
+		t.Fatalf("handleKey error: %v", err)
+	}
+	if !state.yoloVisible {
+		t.Fatalf("expected yolo to stay visible")
+	}
+	if state.yoloMode != config.YoloModeOff {
+		t.Fatalf("expected yolo disabled, got %q", state.yoloMode)
 	}
 }
 
@@ -1326,7 +1345,7 @@ func TestDrawShowsYoloWarningWhenEnabled(t *testing.T) {
 	screen := newTestScreen(t, 160, 20)
 	state := newTestState([]claudehistory.Project{})
 	state.yoloVisible = true
-	state.yoloEnabled = true
+	state.yoloMode = config.YoloModeBypass
 
 	previewCh := make(chan previewEvent, 1)
 	if err := draw(screen, state, Options{}, previewCh); err != nil {
@@ -1337,6 +1356,24 @@ func TestDrawShowsYoloWarningWhenEnabled(t *testing.T) {
 	line := readScreenLine(screen, h-1)
 	if !strings.Contains(line, "[!] YOLO mode (Ctrl+Y): on") {
 		t.Fatalf("expected yolo warning in status line, got %q", strings.TrimSpace(line))
+	}
+}
+
+func TestDrawShowsYoloRulesStatusWhenEnabled(t *testing.T) {
+	screen := newTestScreen(t, 160, 20)
+	state := newTestState([]claudehistory.Project{})
+	state.yoloVisible = true
+	state.yoloMode = config.YoloModeRules
+
+	previewCh := make(chan previewEvent, 1)
+	if err := draw(screen, state, Options{}, previewCh); err != nil {
+		t.Fatalf("draw error: %v", err)
+	}
+
+	_, h := screen.Size()
+	line := readScreenLine(screen, h-1)
+	if !strings.Contains(line, "YOLO rule mode (Ctrl+Y): on") {
+		t.Fatalf("expected yolo rules status line, got %q", strings.TrimSpace(line))
 	}
 }
 

@@ -200,7 +200,7 @@ jobs:
           version = os.environ["CLAUDE_PATCH_VERSION"]
           results = {}
           proc = subprocess.run(
-              ["go", "test", "./internal/cli", "-run", "^TestClaudePatchIntegration(|RetriesKnownFailure)$", "-count=1"],
+              ["go", "test", "./internal/cli", "-run", "^TestClaudePatch(Integration(|RetriesKnownFailure)|RulesIntegration)$", "-count=1"],
               env=os.environ.copy(),
           )
           results[version] = "pass" if proc.returncode == 0 else "fail"

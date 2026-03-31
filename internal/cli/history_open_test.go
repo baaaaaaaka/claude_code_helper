@@ -95,7 +95,7 @@ func TestHistoryOpenCmdResolvesAliasToCanonical(t *testing.T) {
 		path string,
 		dir string,
 		useProxy bool,
-		useYolo bool,
+		yoloMode config.YoloMode,
 		log io.Writer,
 	) error {
 		called = true
@@ -153,7 +153,7 @@ func TestHistoryOpenCmdReturnsAmbiguousAliasError(t *testing.T) {
 		path string,
 		dir string,
 		useProxy bool,
-		useYolo bool,
+		yoloMode config.YoloMode,
 		log io.Writer,
 	) error {
 		t.Fatalf("runClaudeSession should not be called for ambiguous alias")

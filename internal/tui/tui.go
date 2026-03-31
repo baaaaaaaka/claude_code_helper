@@ -13,6 +13,7 @@ import (
 	"github.com/mattn/go-runewidth"
 
 	"github.com/baaaaaaaka/claude_code_helper/internal/claudehistory"
+	"github.com/baaaaaaaka/claude_code_helper/internal/config"
 	"github.com/baaaaaaaka/claude_code_helper/internal/update"
 )
 
@@ -38,7 +39,7 @@ type Selection struct {
 	Session  claudehistory.Session
 	Cwd      string
 	UseProxy bool
-	UseYolo  bool
+	YoloMode config.YoloMode
 }
 
 type Options struct {
@@ -49,9 +50,9 @@ type Options struct {
 	ProxyEnabled    bool
 	ProxyConfigured bool
 	YoloVisible     bool
-	YoloEnabled     bool
+	YoloMode        config.YoloMode
 	RefreshInterval time.Duration
-	PersistYolo     func(bool) error
+	PersistYolo     func(config.YoloMode) error
 	DefaultCwd      string
 }
 
@@ -140,7 +141,7 @@ type uiState struct {
 	proxyEnabled    bool
 	proxyConfigured bool
 	yoloVisible     bool
-	yoloEnabled     bool
+	yoloMode        config.YoloMode
 
 	expandedSessions map[string]bool
 	previewCache     map[string]string
@@ -152,6 +153,28 @@ type uiState struct {
 	previewMatchIdx  int
 	previewSearchKey string
 	statusHeight     int
+}
+
+func normalizeYoloMode(mode config.YoloMode) config.YoloMode {
+	switch mode {
+	case config.YoloModeBypass, config.YoloModeRules:
+		return mode
+	default:
+		return config.YoloModeOff
+	}
+}
+
+func nextYoloMode(mode config.YoloMode) config.YoloMode {
+	switch normalizeYoloMode(mode) {
+	case config.YoloModeOff:
+		return config.YoloModeBypass
+	case config.YoloModeBypass:
+		return config.YoloModeRules
+	case config.YoloModeRules:
+		return config.YoloModeOff
+	default:
+		return config.YoloModeBypass
+	}
 }
 
 func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
@@ -167,8 +190,8 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 		lastListFocus:    "projects",
 		proxyEnabled:     opts.ProxyEnabled,
 		proxyConfigured:  opts.ProxyConfigured,
-		yoloVisible:      opts.YoloVisible || opts.YoloEnabled,
-		yoloEnabled:      opts.YoloEnabled,
+		yoloVisible:      opts.YoloVisible || opts.YoloMode != "",
+		yoloMode:         normalizeYoloMode(opts.YoloMode),
 		expandedSessions: map[string]bool{},
 		previewCache:     map[string]string{},
 		previewError:     map[string]string{},
@@ -396,14 +419,14 @@ func handleKey(
 		}
 		return nil, ProxyToggleRequested{Enable: enable}
 	case tcell.KeyCtrlY:
-		enable := !state.yoloEnabled
+		nextMode := nextYoloMode(state.yoloMode)
 		if opts.PersistYolo != nil {
-			if err := opts.PersistYolo(enable); err != nil {
+			if err := opts.PersistYolo(nextMode); err != nil {
 				return nil, err
 			}
 		}
 		state.yoloVisible = true
-		state.yoloEnabled = enable
+		state.yoloMode = nextMode
 		return nil, nil
 	case tcell.KeyCtrlR:
 		refreshState(ctx, state, opts)
@@ -539,7 +562,7 @@ func handleKey(
 
 	if ev.Key() == tcell.KeyCtrlN {
 		if cwd := newSessionCwd(selectedProject, opts.DefaultCwd); cwd != "" {
-			return &Selection{Project: selectedProject, Cwd: cwd, UseProxy: state.proxyEnabled, UseYolo: state.yoloEnabled}, nil
+			return &Selection{Project: selectedProject, Cwd: cwd, UseProxy: state.proxyEnabled, YoloMode: state.yoloMode}, nil
 		}
 		return nil, nil
 	}
@@ -552,11 +575,11 @@ func handleKey(
 	}
 	if enterPressed {
 		if selectedSession != nil {
-			return &Selection{Project: selectedProject, Session: *selectedSession, UseProxy: state.proxyEnabled, UseYolo: state.yoloEnabled}, nil
+			return &Selection{Project: selectedProject, Session: *selectedSession, UseProxy: state.proxyEnabled, YoloMode: state.yoloMode}, nil
 		}
 		if selectedIsNew {
 			if cwd := newSessionCwd(selectedProject, opts.DefaultCwd); cwd != "" {
-				return &Selection{Project: selectedProject, Cwd: cwd, UseProxy: state.proxyEnabled, UseYolo: state.yoloEnabled}, nil
+				return &Selection{Project: selectedProject, Cwd: cwd, UseProxy: state.proxyEnabled, YoloMode: state.yoloMode}, nil
 			}
 		}
 	}
@@ -708,15 +731,20 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 	if state.proxyEnabled {
 		proxyLabel = "Proxy mode (Ctrl+P): on"
 	}
-	showYolo := state.yoloVisible || state.yoloEnabled
+	currentYoloMode := normalizeYoloMode(state.yoloMode)
+	showYolo := state.yoloVisible || currentYoloMode != config.YoloModeOff
 	yoloLabel := "YOLO mode (Ctrl+Y): off"
-	if state.yoloEnabled {
+	if currentYoloMode == config.YoloModeBypass {
 		yoloLabel = "[!] YOLO mode (Ctrl+Y): on"
+	} else if currentYoloMode == config.YoloModeRules {
+		yoloLabel = "YOLO rule mode (Ctrl+Y): on"
 	}
 	baseStatusStyle := tcell.StyleDefault.Reverse(true)
 	yoloStatusStyle := baseStatusStyle
-	if state.yoloEnabled {
+	if currentYoloMode == config.YoloModeBypass {
 		yoloStatusStyle = baseStatusStyle.Foreground(tcell.ColorYellow)
+	} else if currentYoloMode == config.YoloModeRules {
+		yoloStatusStyle = baseStatusStyle.Foreground(tcell.ColorGreen)
 	}
 	appendYoloSegment := func(segments []statusSegment) []statusSegment {
 		if !showYolo {

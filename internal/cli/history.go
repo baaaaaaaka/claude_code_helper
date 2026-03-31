@@ -184,7 +184,7 @@ func newHistoryOpenCmd(root *rootOptions, claudeDir *string, claudePath *string,
 					return err
 				}
 			}
-			useYolo := resolveYoloEnabled(cfg)
+			yoloMode := resolveYoloMode(cfg)
 
 			projects, err := claudehistory.DiscoverProjects(*claudeDir)
 			if err != nil && len(projects) == 0 {
@@ -209,7 +209,7 @@ func newHistoryOpenCmd(root *rootOptions, claudeDir *string, claudePath *string,
 				*claudePath,
 				*claudeDir,
 				useProxy,
-				useYolo,
+				yoloMode,
 				cmd.ErrOrStderr(),
 			)
 		},
@@ -230,7 +230,7 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 			return err
 		}
 		useProxy, cfg := pref.Enabled, pref.Cfg
-		useYolo := resolveYoloEnabled(cfg)
+		yoloMode := resolveYoloMode(cfg)
 		showYolo := resolveYoloVisible(cfg)
 
 		var profile *config.Profile
@@ -267,11 +267,11 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 			ProxyEnabled:    useProxy,
 			ProxyConfigured: len(cfg.Profiles) > 0,
 			YoloVisible:     showYolo,
-			YoloEnabled:     useYolo,
+			YoloMode:        yoloMode,
 			RefreshInterval: refreshInterval,
 			DefaultCwd:      defaultCwd,
-			PersistYolo: func(enabled bool) error {
-				return persistYoloEnabled(store, enabled)
+			PersistYolo: func(mode config.YoloMode) error {
+				return persistYoloMode(store, mode)
 			},
 			CheckUpdate: func(ctx context.Context) update.Status {
 				return update.CheckForUpdate(ctx, update.CheckOptions{
@@ -316,7 +316,7 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 				claudePath,
 				claudeDir,
 				selection.UseProxy,
-				selection.UseYolo,
+				selection.YoloMode,
 				cmd.ErrOrStderr(),
 			)
 		}
@@ -331,7 +331,7 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 			claudePath,
 			claudeDir,
 			selection.UseProxy,
-			selection.UseYolo,
+			selection.YoloMode,
 			cmd.ErrOrStderr(),
 		)
 	}

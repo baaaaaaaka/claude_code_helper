@@ -48,7 +48,7 @@ func TestBuildClaudeResumeCommandUsesSessionPath(t *testing.T) {
 	session := claudehistory.Session{SessionID: "abc", ProjectPath: dir}
 	project := claudehistory.Project{Path: "/tmp/other"}
 
-	path, args, cwd, err := buildClaudeResumeCommand("/bin/claude", session, project, false)
+	path, args, cwd, err := buildClaudeResumeCommand("/bin/claude", session, project, config.YoloModeOff)
 	if err != nil {
 		t.Fatalf("buildClaudeResumeCommand error: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestBuildClaudeResumeCommandUsesProjectPath(t *testing.T) {
 	session := claudehistory.Session{SessionID: "abc"}
 	project := claudehistory.Project{Path: dir}
 
-	_, _, cwd, err := buildClaudeResumeCommand("/bin/claude", session, project, false)
+	_, _, cwd, err := buildClaudeResumeCommand("/bin/claude", session, project, config.YoloModeOff)
 	if err != nil {
 		t.Fatalf("buildClaudeResumeCommand error: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestBuildClaudeResumeCommandAddsYoloArgs(t *testing.T) {
 	session := claudehistory.Session{SessionID: "abc"}
 	project := claudehistory.Project{Path: dir}
 
-	_, args, _, err := buildClaudeResumeCommand("/bin/claude", session, project, true)
+	_, args, _, err := buildClaudeResumeCommand("/bin/claude", session, project, config.YoloModeBypass)
 	if err != nil {
 		t.Fatalf("buildClaudeResumeCommand error: %v", err)
 	}
@@ -97,12 +97,25 @@ func TestBuildClaudeResumeCommandAddsYoloArgs(t *testing.T) {
 	}
 }
 
+func TestBuildClaudeResumeCommandKeepsRulesModeArgFree(t *testing.T) {
+	dir := t.TempDir()
+	session := claudehistory.Session{SessionID: "abc"}
+	project := claudehistory.Project{Path: dir}
+
+	_, args, _, err := buildClaudeResumeCommand("/bin/claude", session, project, config.YoloModeRules)
+	if err != nil {
+		t.Fatalf("buildClaudeResumeCommand error: %v", err)
+	}
+	want := []string{"--resume", "abc"}
+	requireArgsEqual(t, args, want)
+}
+
 func TestBuildClaudeResumeCommandRejectsMissingSession(t *testing.T) {
 	dir := t.TempDir()
 	session := claudehistory.Session{}
 	project := claudehistory.Project{Path: dir}
 
-	_, _, _, err := buildClaudeResumeCommand("/bin/claude", session, project, false)
+	_, _, _, err := buildClaudeResumeCommand("/bin/claude", session, project, config.YoloModeOff)
 	if err == nil {
 		t.Fatalf("expected error for missing session id")
 	}
@@ -112,7 +125,7 @@ func TestBuildClaudeResumeCommandRejectsMissingCwd(t *testing.T) {
 	session := claudehistory.Session{SessionID: "abc", ProjectPath: filepath.Join(t.TempDir(), "missing")}
 	project := claudehistory.Project{}
 
-	_, _, _, err := buildClaudeResumeCommand("/bin/claude", session, project, false)
+	_, _, _, err := buildClaudeResumeCommand("/bin/claude", session, project, config.YoloModeOff)
 	if err == nil {
 		t.Fatalf("expected error for missing cwd")
 	}
@@ -172,7 +185,7 @@ func TestRunClaudeSessionSuccess(t *testing.T) {
 	session := claudehistory.Session{SessionID: "sess-1", ProjectPath: projectDir}
 	project := claudehistory.Project{Path: projectDir}
 
-	if err := runClaudeSession(context.Background(), root, store, nil, nil, session, project, claudePath, "", false, false, io.Discard); err != nil {
+	if err := runClaudeSession(context.Background(), root, store, nil, nil, session, project, claudePath, "", false, config.YoloModeOff, io.Discard); err != nil {
 		t.Fatalf("runClaudeSession error: %v", err)
 	}
 }
@@ -189,7 +202,7 @@ func TestRunClaudeNewSessionSuccess(t *testing.T) {
 	root := &rootOptions{configPath: store.Path()}
 
 	projectDir := t.TempDir()
-	if err := runClaudeNewSession(context.Background(), root, store, nil, nil, projectDir, claudePath, "", false, false, io.Discard); err != nil {
+	if err := runClaudeNewSession(context.Background(), root, store, nil, nil, projectDir, claudePath, "", false, config.YoloModeOff, io.Discard); err != nil {
 		t.Fatalf("runClaudeNewSession error: %v", err)
 	}
 }
@@ -209,7 +222,7 @@ func TestRunClaudeSessionRequiresProfileWhenProxyEnabled(t *testing.T) {
 	session := claudehistory.Session{SessionID: "sess-1", ProjectPath: projectDir}
 	project := claudehistory.Project{Path: projectDir}
 
-	if err := runClaudeSession(context.Background(), root, store, nil, nil, session, project, claudePath, "", true, false, io.Discard); err == nil {
+	if err := runClaudeSession(context.Background(), root, store, nil, nil, session, project, claudePath, "", true, config.YoloModeOff, io.Discard); err == nil {
 		t.Fatalf("expected proxy mode error")
 	}
 }
@@ -226,7 +239,7 @@ func TestRunClaudeNewSessionRequiresProfileWhenProxyEnabled(t *testing.T) {
 	root := &rootOptions{configPath: store.Path()}
 
 	projectDir := t.TempDir()
-	if err := runClaudeNewSession(context.Background(), root, store, nil, nil, projectDir, claudePath, "", true, false, io.Discard); err == nil {
+	if err := runClaudeNewSession(context.Background(), root, store, nil, nil, projectDir, claudePath, "", true, config.YoloModeOff, io.Discard); err == nil {
 		t.Fatalf("expected proxy mode error")
 	}
 }
@@ -258,7 +271,7 @@ func TestRunClaudeNewSessionUsesCwdDirect(t *testing.T) {
 		scriptPath,
 		"",
 		false,
-		false,
+		config.YoloModeOff,
 		io.Discard,
 	)
 	if err != nil {
@@ -302,7 +315,7 @@ func TestRunClaudeNewSessionAddsYoloArgs(t *testing.T) {
 		scriptPath,
 		"",
 		false,
-		true,
+		config.YoloModeBypass,
 		io.Discard,
 	)
 	if err != nil {
@@ -341,7 +354,7 @@ func TestRunClaudeNewSessionRejectsProxyWithoutProfile(t *testing.T) {
 		"/bin/claude",
 		"",
 		true,
-		false,
+		config.YoloModeOff,
 		io.Discard,
 	)
 	if err == nil {
@@ -389,7 +402,7 @@ func TestRunClaudeSessionWiresRunnerCallbacks(t *testing.T) {
 			return nil
 		}
 
-		if err := runClaudeSession(context.Background(), root, store, nil, nil, session, project, claudePath, "", false, true, io.Discard); err != nil {
+		if err := runClaudeSession(context.Background(), root, store, nil, nil, session, project, claudePath, "", false, config.YoloModeBypass, io.Discard); err != nil {
 			t.Fatalf("runClaudeSession error: %v", err)
 		}
 		if len(patchCalls) != 2 {
@@ -442,7 +455,7 @@ func TestRunClaudeSessionWiresRunnerCallbacks(t *testing.T) {
 			return nil
 		}
 
-		if err := runClaudeSession(context.Background(), root, store, &profile, nil, session, project, claudePath, "", true, true, io.Discard); err != nil {
+		if err := runClaudeSession(context.Background(), root, store, &profile, nil, session, project, claudePath, "", true, config.YoloModeBypass, io.Discard); err != nil {
 			t.Fatalf("runClaudeSession error: %v", err)
 		}
 		if len(patchCalls) != 2 {
@@ -451,6 +464,88 @@ func TestRunClaudeSessionWiresRunnerCallbacks(t *testing.T) {
 		requireArgsEqual(t, patchCalls[0], []string{claudePath, "--permission-mode", "bypassPermissions", "--resume", "sess-1"})
 		requireArgsEqual(t, patchCalls[1], []string{claudePath, "--resume", "sess-1"})
 	})
+}
+
+func TestRunClaudeSessionWiresRulesModePatchWithoutBypassArg(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	claudePath := writeClaudeHelpStub(t)
+	store := newTempStore(t)
+	root := &rootOptions{
+		configPath: store.Path(),
+		exePatch: exePatchOptions{
+			enabledFlag:    true,
+			policySettings: true,
+		},
+	}
+	projectDir := t.TempDir()
+	session := claudehistory.Session{SessionID: "sess-1", ProjectPath: projectDir}
+	project := claudehistory.Project{Path: projectDir}
+
+	var patchCalls [][]string
+	var patchOpts []exePatchOptions
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		patchCalls = append(patchCalls, cloneArgs(cmdArgs))
+		patchOpts = append(patchOpts, opts)
+		return &patchOutcome{TargetPath: "patch-rules", BuiltInClaudePatchActive: true}, nil
+	}
+	runTargetWithFallbackWithOptionsFn = func(ctx context.Context, cmdArgs []string, proxyURL string, healthCheck func() error, patchOutcome *patchOutcome, fatalCh <-chan error, opts runTargetOptions) error {
+		requireArgsEqual(t, cmdArgs, []string{claudePath, "--resume", "sess-1"})
+		if opts.Cwd != projectDir {
+			t.Fatalf("expected cwd %s, got %s", projectDir, opts.Cwd)
+		}
+		if opts.YoloEnabled {
+			t.Fatalf("expected rules mode not to enable bypass fallback logic")
+		}
+		if patchOutcome == nil || patchOutcome.TargetPath != "patch-rules" {
+			t.Fatalf("expected rules patch outcome, got %#v", patchOutcome)
+		}
+		return nil
+	}
+
+	if err := runClaudeSession(context.Background(), root, store, nil, nil, session, project, claudePath, "", false, config.YoloModeRules, io.Discard); err != nil {
+		t.Fatalf("runClaudeSession error: %v", err)
+	}
+	if len(patchCalls) != 1 {
+		t.Fatalf("expected 1 patch call, got %d", len(patchCalls))
+	}
+	requireArgsEqual(t, patchCalls[0], []string{claudePath, "--resume", "sess-1"})
+	if len(patchOpts) != 1 || !patchOpts[0].allowBuiltInWithoutBypass {
+		t.Fatalf("expected rules mode to force built-in patch without bypass, got %+v", patchOpts)
+	}
+}
+
+func TestRunClaudeSessionRejectsRulesModeWithoutActiveBuiltInPatch(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	claudePath := writeClaudeHelpStub(t)
+	store := newTempStore(t)
+	root := &rootOptions{
+		configPath: store.Path(),
+		exePatch: exePatchOptions{
+			enabledFlag:    true,
+			policySettings: true,
+		},
+	}
+	projectDir := t.TempDir()
+	session := claudehistory.Session{SessionID: "sess-1", ProjectPath: projectDir}
+	project := claudehistory.Project{Path: projectDir}
+
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		return &patchOutcome{TargetPath: claudePath}, nil
+	}
+	runTargetWithFallbackWithOptionsFn = func(ctx context.Context, cmdArgs []string, proxyURL string, healthCheck func() error, patchOutcome *patchOutcome, fatalCh <-chan error, opts runTargetOptions) error {
+		t.Fatalf("unexpected launch attempt without active built-in rules patch")
+		return nil
+	}
+
+	err := runClaudeSession(context.Background(), root, store, nil, nil, session, project, claudePath, "", false, config.YoloModeRules, io.Discard)
+	if err == nil {
+		t.Fatalf("expected rules mode active-patch validation error")
+	}
+	if !strings.Contains(err.Error(), "active built-in Claude patch") {
+		t.Fatalf("expected missing active patch error, got %v", err)
+	}
 }
 
 func TestRunClaudeNewSessionWiresRunnerCallbacks(t *testing.T) {
@@ -491,7 +586,7 @@ func TestRunClaudeNewSessionWiresRunnerCallbacks(t *testing.T) {
 			return nil
 		}
 
-		if err := runClaudeNewSession(context.Background(), root, store, nil, nil, projectDir, claudePath, "", false, true, io.Discard); err != nil {
+		if err := runClaudeNewSession(context.Background(), root, store, nil, nil, projectDir, claudePath, "", false, config.YoloModeBypass, io.Discard); err != nil {
 			t.Fatalf("runClaudeNewSession error: %v", err)
 		}
 		if len(patchCalls) != 2 {
@@ -542,7 +637,7 @@ func TestRunClaudeNewSessionWiresRunnerCallbacks(t *testing.T) {
 			return nil
 		}
 
-		if err := runClaudeNewSession(context.Background(), root, store, &profile, nil, projectDir, claudePath, "", true, true, io.Discard); err != nil {
+		if err := runClaudeNewSession(context.Background(), root, store, &profile, nil, projectDir, claudePath, "", true, config.YoloModeBypass, io.Discard); err != nil {
 			t.Fatalf("runClaudeNewSession error: %v", err)
 		}
 		if len(patchCalls) != 2 {
@@ -551,6 +646,150 @@ func TestRunClaudeNewSessionWiresRunnerCallbacks(t *testing.T) {
 		requireArgsEqual(t, patchCalls[0], []string{claudePath, "--permission-mode", "bypassPermissions"})
 		requireArgsEqual(t, patchCalls[1], []string{claudePath})
 	})
+}
+
+func TestRunClaudeNewSessionWiresRulesModePatchWithoutBypassArg(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	claudePath := writeClaudeHelpStub(t)
+	store := newTempStore(t)
+	root := &rootOptions{
+		configPath: store.Path(),
+		exePatch: exePatchOptions{
+			enabledFlag:    true,
+			policySettings: true,
+		},
+	}
+	projectDir := t.TempDir()
+
+	var patchCalls [][]string
+	var patchOpts []exePatchOptions
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		patchCalls = append(patchCalls, cloneArgs(cmdArgs))
+		patchOpts = append(patchOpts, opts)
+		return &patchOutcome{TargetPath: "patch-rules", BuiltInClaudePatchActive: true}, nil
+	}
+	runTargetWithFallbackWithOptionsFn = func(ctx context.Context, cmdArgs []string, proxyURL string, healthCheck func() error, patchOutcome *patchOutcome, fatalCh <-chan error, opts runTargetOptions) error {
+		requireArgsEqual(t, cmdArgs, []string{claudePath})
+		if opts.YoloEnabled {
+			t.Fatalf("expected rules mode not to enable bypass fallback logic")
+		}
+		if patchOutcome == nil || patchOutcome.TargetPath != "patch-rules" {
+			t.Fatalf("expected rules patch outcome, got %#v", patchOutcome)
+		}
+		return nil
+	}
+
+	if err := runClaudeNewSession(context.Background(), root, store, nil, nil, projectDir, claudePath, "", false, config.YoloModeRules, io.Discard); err != nil {
+		t.Fatalf("runClaudeNewSession error: %v", err)
+	}
+	if len(patchCalls) != 1 {
+		t.Fatalf("expected 1 patch call, got %d", len(patchCalls))
+	}
+	requireArgsEqual(t, patchCalls[0], []string{claudePath})
+	if len(patchOpts) != 1 || !patchOpts[0].allowBuiltInWithoutBypass {
+		t.Fatalf("expected rules mode to force built-in patch without bypass, got %+v", patchOpts)
+	}
+}
+
+func TestRunClaudeNewSessionRejectsRulesModeWhenBuiltinPatchDisabled(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	claudePath := writeClaudeHelpStub(t)
+	store := newTempStore(t)
+	root := &rootOptions{
+		configPath: store.Path(),
+		exePatch: exePatchOptions{
+			policySettings: true,
+		},
+	}
+	projectDir := t.TempDir()
+
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		t.Fatalf("unexpected patch attempt in invalid rules mode")
+		return nil, nil
+	}
+	runTargetWithFallbackWithOptionsFn = func(ctx context.Context, cmdArgs []string, proxyURL string, healthCheck func() error, patchOutcome *patchOutcome, fatalCh <-chan error, opts runTargetOptions) error {
+		t.Fatalf("unexpected launch attempt in invalid rules mode")
+		return nil
+	}
+
+	err := runClaudeNewSession(context.Background(), root, store, nil, nil, projectDir, claudePath, "", false, config.YoloModeRules, io.Discard)
+	if err == nil {
+		t.Fatalf("expected rules mode validation error")
+	}
+	if !strings.Contains(err.Error(), "--exe-patch-enabled") {
+		t.Fatalf("expected exe patch disabled error, got %v", err)
+	}
+}
+
+func TestRunClaudeNewSessionRejectsRulesModeForNonClaudePath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script execution on windows")
+	}
+	withExePatchTestHooks(t)
+
+	wrapperPath := filepath.Join(t.TempDir(), "claude-wrapper")
+	if err := os.WriteFile(wrapperPath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write wrapper: %v", err)
+	}
+	store := newTempStore(t)
+	root := &rootOptions{
+		configPath: store.Path(),
+		exePatch: exePatchOptions{
+			enabledFlag:    true,
+			policySettings: true,
+		},
+	}
+	projectDir := t.TempDir()
+
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		t.Fatalf("unexpected patch attempt for non-claude rules mode")
+		return nil, nil
+	}
+	runTargetWithFallbackWithOptionsFn = func(ctx context.Context, cmdArgs []string, proxyURL string, healthCheck func() error, patchOutcome *patchOutcome, fatalCh <-chan error, opts runTargetOptions) error {
+		t.Fatalf("unexpected launch attempt for non-claude rules mode")
+		return nil
+	}
+
+	err := runClaudeNewSession(context.Background(), root, store, nil, nil, projectDir, wrapperPath, "", false, config.YoloModeRules, io.Discard)
+	if err == nil {
+		t.Fatalf("expected rules mode validation error")
+	}
+	if !strings.Contains(err.Error(), "wrappers or renamed binaries") {
+		t.Fatalf("expected non-claude rules mode error, got %v", err)
+	}
+}
+
+func TestRunClaudeNewSessionRejectsRulesModeWithoutActiveBuiltInPatch(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	claudePath := writeClaudeHelpStub(t)
+	store := newTempStore(t)
+	root := &rootOptions{
+		configPath: store.Path(),
+		exePatch: exePatchOptions{
+			enabledFlag:    true,
+			policySettings: true,
+		},
+	}
+	projectDir := t.TempDir()
+
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		return &patchOutcome{TargetPath: claudePath}, nil
+	}
+	runTargetWithFallbackWithOptionsFn = func(ctx context.Context, cmdArgs []string, proxyURL string, healthCheck func() error, patchOutcome *patchOutcome, fatalCh <-chan error, opts runTargetOptions) error {
+		t.Fatalf("unexpected launch attempt without active built-in rules patch")
+		return nil
+	}
+
+	err := runClaudeNewSession(context.Background(), root, store, nil, nil, projectDir, claudePath, "", false, config.YoloModeRules, io.Discard)
+	if err == nil {
+		t.Fatalf("expected rules mode active-patch validation error")
+	}
+	if !strings.Contains(err.Error(), "active built-in Claude patch") {
+		t.Fatalf("expected missing active patch error, got %v", err)
+	}
 }
 
 func canonicalPath(t *testing.T, path string) string {

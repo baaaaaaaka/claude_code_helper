@@ -208,7 +208,7 @@ jobs:
               env = os.environ.copy()
               env["CLAUDE_PATCH_VERSION"] = version
               proc = subprocess.run(
-                  ["go", "test", "./internal/cli", "-run", "^TestClaudePatchIntegration(|RetriesKnownFailure)$", "-count=1"],
+                  ["go", "test", "./internal/cli", "-run", "^TestClaudePatch(Integration(|RetriesKnownFailure)|RulesIntegration)$", "-count=1"],
                   cwd=worktree,
                   env=env,
               )

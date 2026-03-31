@@ -23,7 +23,7 @@ func buildClaudeResumeCommand(
 	claudePath string,
 	session claudehistory.Session,
 	project claudehistory.Project,
-	yolo bool,
+	yoloMode config.YoloMode,
 ) (string, []string, string, error) {
 	if session.SessionID == "" {
 		return "", nil, "", fmt.Errorf("missing session id")
@@ -48,7 +48,7 @@ func buildClaudeResumeCommand(
 	}
 
 	args := []string{"--resume", session.SessionID}
-	if yolo {
+	if isBypassYoloMode(yoloMode) {
 		args = append([]string{"--permission-mode", "bypassPermissions"}, args...)
 	}
 	return path, args, cwd, nil
@@ -71,6 +71,41 @@ func normalizeWorkingDir(cwd string) (string, error) {
 	return cwd, nil
 }
 
+func validateRulesModeLaunch(claudePath string, patchOpts exePatchOptions) error {
+	if !patchOpts.enabledFlag {
+		return fmt.Errorf("YOLO rule mode requires --exe-patch-enabled")
+	}
+	if !patchOpts.policySettings {
+		return fmt.Errorf("YOLO rule mode requires --exe-patch-policy-settings")
+	}
+	builtinSpecs, err := patchOpts.compileBuiltinSpecs()
+	if err != nil {
+		return err
+	}
+	if len(builtinSpecs) == 0 {
+		return fmt.Errorf("YOLO rule mode requires built-in Claude patch support")
+	}
+	exePath, err := execLookPathFn(claudePath)
+	if err != nil {
+		return fmt.Errorf("resolve Claude executable %q: %w", claudePath, err)
+	}
+	resolvedPath, err := resolveExecutablePathFn(exePath)
+	if err != nil {
+		return err
+	}
+	if !isClaudeExecutable(claudePath, resolvedPath) {
+		return fmt.Errorf("YOLO rule mode requires the Claude executable; wrappers or renamed binaries are unsupported: %s", claudePath)
+	}
+	return nil
+}
+
+func validateRulesModePatchActive(outcome *patchOutcome) error {
+	if outcome != nil && outcome.BuiltInClaudePatchActive {
+		return nil
+	}
+	return fmt.Errorf("YOLO rule mode requires an active built-in Claude patch")
+}
+
 func runClaudeSession(
 	ctx context.Context,
 	root *rootOptions,
@@ -82,7 +117,7 @@ func runClaudeSession(
 	claudePath string,
 	claudeDir string,
 	useProxy bool,
-	useYolo bool,
+	yoloMode config.YoloMode,
 	log io.Writer,
 ) error {
 	claudePathResolved, err := ensureClaudeInstalled(ctx, claudePath, log, installProxyOptions{
@@ -95,22 +130,33 @@ func runClaudeSession(
 	}
 	claudePath = claudePathResolved
 
-	if useYolo && !supportsYoloFlag(claudePath) {
-		_ = persistYoloEnabled(store, false)
-		useYolo = false
+	if isBypassYoloMode(yoloMode) && !supportsYoloFlag(claudePath) {
+		_ = persistYoloMode(store, config.YoloModeOff)
+		yoloMode = config.YoloModeOff
 	}
-	path, args, cwd, err := buildClaudeResumeCommand(claudePath, session, project, useYolo)
+	patchOpts := withYoloModePatchOptions(root.exePatch, yoloMode)
+	if normalizeYoloMode(yoloMode) == config.YoloModeRules {
+		if err := validateRulesModeLaunch(claudePath, patchOpts); err != nil {
+			return err
+		}
+	}
+	path, args, cwd, err := buildClaudeResumeCommand(claudePath, session, project, yoloMode)
 	if err != nil {
 		return err
 	}
 
 	cmdArgs := append([]string{path}, args...)
-	exePatchOutcome, err := maybePatchExecutableCtxFn(ctx, cmdArgs, root.exePatch, root.configPath, log)
+	exePatchOutcome, err := maybePatchExecutableCtxFn(ctx, cmdArgs, patchOpts, root.configPath, log)
 	if err != nil {
 		return err
 	}
-	if root.exePatch.dryRun && root.exePatch.enabled() {
+	if patchOpts.dryRun && patchOpts.enabled() {
 		return nil
+	}
+	if normalizeYoloMode(yoloMode) == config.YoloModeRules {
+		if err := validateRulesModePatchActive(exePatchOutcome); err != nil {
+			return err
+		}
 	}
 
 	extraEnv := []string{}
@@ -123,12 +169,12 @@ func runClaudeSession(
 		ExtraEnv:    extraEnv,
 		UseProxy:    useProxy,
 		PreserveTTY: true,
-		YoloEnabled: useYolo,
+		YoloEnabled: isBypassYoloMode(yoloMode),
 		OnYoloFallback: func() error {
-			return persistYoloEnabled(store, false)
+			return persistYoloMode(store, config.YoloModeOff)
 		},
 		OnYoloRetryPrepare: func(nextArgs []string) (*patchOutcome, error) {
-			return maybePatchExecutableCtxFn(ctx, nextArgs, root.exePatch, root.configPath, log)
+			return maybePatchExecutableCtxFn(ctx, nextArgs, patchOpts, root.configPath, log)
 		},
 	}
 	if useProxy {
@@ -150,7 +196,7 @@ func runClaudeNewSession(
 	claudePath string,
 	claudeDir string,
 	useProxy bool,
-	useYolo bool,
+	yoloMode config.YoloMode,
 	log io.Writer,
 ) error {
 	cwd, err := normalizeWorkingDir(cwd)
@@ -167,21 +213,32 @@ func runClaudeNewSession(
 		return err
 	}
 	claudePath = claudePathResolved
-	if useYolo && !supportsYoloFlag(claudePath) {
-		_ = persistYoloEnabled(store, false)
-		useYolo = false
+	if isBypassYoloMode(yoloMode) && !supportsYoloFlag(claudePath) {
+		_ = persistYoloMode(store, config.YoloModeOff)
+		yoloMode = config.YoloModeOff
+	}
+	patchOpts := withYoloModePatchOptions(root.exePatch, yoloMode)
+	if normalizeYoloMode(yoloMode) == config.YoloModeRules {
+		if err := validateRulesModeLaunch(claudePath, patchOpts); err != nil {
+			return err
+		}
 	}
 	cmdArgs := []string{claudePath}
-	if useYolo {
+	if isBypassYoloMode(yoloMode) {
 		cmdArgs = append(cmdArgs, "--permission-mode", "bypassPermissions")
 	}
 
-	exePatchOutcome, err := maybePatchExecutableCtxFn(ctx, cmdArgs, root.exePatch, root.configPath, log)
+	exePatchOutcome, err := maybePatchExecutableCtxFn(ctx, cmdArgs, patchOpts, root.configPath, log)
 	if err != nil {
 		return err
 	}
-	if root.exePatch.dryRun && root.exePatch.enabled() {
+	if patchOpts.dryRun && patchOpts.enabled() {
 		return nil
+	}
+	if normalizeYoloMode(yoloMode) == config.YoloModeRules {
+		if err := validateRulesModePatchActive(exePatchOutcome); err != nil {
+			return err
+		}
 	}
 
 	extraEnv := []string{}
@@ -194,12 +251,12 @@ func runClaudeNewSession(
 		ExtraEnv:    extraEnv,
 		UseProxy:    useProxy,
 		PreserveTTY: true,
-		YoloEnabled: useYolo,
+		YoloEnabled: isBypassYoloMode(yoloMode),
 		OnYoloFallback: func() error {
-			return persistYoloEnabled(store, false)
+			return persistYoloMode(store, config.YoloModeOff)
 		},
 		OnYoloRetryPrepare: func(nextArgs []string) (*patchOutcome, error) {
-			return maybePatchExecutableCtxFn(ctx, nextArgs, root.exePatch, root.configPath, log)
+			return maybePatchExecutableCtxFn(ctx, nextArgs, patchOpts, root.configPath, log)
 		},
 	}
 	if useProxy {

@@ -72,11 +72,11 @@ func TestRunHistoryTuiRunsNewSession(t *testing.T) {
 	selectSession = func(ctx context.Context, opts tui.Options) (*tui.Selection, error) {
 		return &tui.Selection{Cwd: t.TempDir()}, nil
 	}
-	runClaudeNewSessionFn = func(ctx context.Context, root *rootOptions, store *config.Store, profile *config.Profile, instances []config.Instance, cwd string, path string, dir string, useProxy bool, useYolo bool, log io.Writer) error {
+	runClaudeNewSessionFn = func(ctx context.Context, root *rootOptions, store *config.Store, profile *config.Profile, instances []config.Instance, cwd string, path string, dir string, useProxy bool, yoloMode config.YoloMode, log io.Writer) error {
 		calledNew = true
 		return nil
 	}
-	runClaudeSessionFunc = func(ctx context.Context, root *rootOptions, store *config.Store, profile *config.Profile, instances []config.Instance, session claudehistory.Session, project claudehistory.Project, path string, dir string, useProxy bool, useYolo bool, log io.Writer) error {
+	runClaudeSessionFunc = func(ctx context.Context, root *rootOptions, store *config.Store, profile *config.Profile, instances []config.Instance, session claudehistory.Session, project claudehistory.Project, path string, dir string, useProxy bool, yoloMode config.YoloMode, log io.Writer) error {
 		t.Fatalf("unexpected runClaudeSession call")
 		return nil
 	}
@@ -130,11 +130,11 @@ func TestRunHistoryTuiRunsSession(t *testing.T) {
 			Project: claudehistory.Project{Path: t.TempDir()},
 		}, nil
 	}
-	runClaudeNewSessionFn = func(ctx context.Context, root *rootOptions, store *config.Store, profile *config.Profile, instances []config.Instance, cwd string, path string, dir string, useProxy bool, useYolo bool, log io.Writer) error {
+	runClaudeNewSessionFn = func(ctx context.Context, root *rootOptions, store *config.Store, profile *config.Profile, instances []config.Instance, cwd string, path string, dir string, useProxy bool, yoloMode config.YoloMode, log io.Writer) error {
 		t.Fatalf("unexpected runClaudeNewSession call")
 		return nil
 	}
-	runClaudeSessionFunc = func(ctx context.Context, root *rootOptions, store *config.Store, profile *config.Profile, instances []config.Instance, session claudehistory.Session, project claudehistory.Project, path string, dir string, useProxy bool, useYolo bool, log io.Writer) error {
+	runClaudeSessionFunc = func(ctx context.Context, root *rootOptions, store *config.Store, profile *config.Profile, instances []config.Instance, session claudehistory.Session, project claudehistory.Project, path string, dir string, useProxy bool, yoloMode config.YoloMode, log io.Writer) error {
 		called = true
 		if session.SessionID != "sess-1" {
 			t.Fatalf("unexpected session id %q", session.SessionID)

@@ -394,6 +394,177 @@ func TestMaybePatchExecutableSkipsBuiltInClaudePatchWhenPermissionModeDisabled(t
 	}
 }
 
+func TestMaybePatchExecutableAllowsBuiltInClaudePatchWithoutBypassWhenForced(t *testing.T) {
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	dir := t.TempDir()
+	path := writeClaudeVersionStub(t, dir, "Claude Code 1.2.3")
+	setStubPath(t, dir)
+
+	patchCalled := false
+	patchExecutableFn = func(path string, specs []exePatchSpec, log io.Writer, preview bool, dryRun bool, historyStore *config.PatchHistoryStore, proxyVersion string) (*patchOutcome, error) {
+		patchCalled = true
+		return nil, nil
+	}
+
+	outcome, err := maybePatchExecutable([]string{"claude"}, exePatchOptions{
+		enabledFlag:               true,
+		policySettings:            true,
+		allowBuiltInWithoutBypass: true,
+	}, filepath.Join(dir, "config.json"), io.Discard)
+	if err != nil {
+		t.Fatalf("maybePatchExecutable error: %v", err)
+	}
+	if outcome == nil {
+		t.Fatalf("expected non-nil outcome after forced built-in patch preparation")
+	}
+	if !patchCalled {
+		t.Fatalf("expected built-in patcher to run when forced without bypass flag")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read stub: %v", err)
+	}
+	if !strings.Contains(string(got), "Claude Code 1.2.3") {
+		t.Fatalf("expected executable to remain unchanged with stub patcher")
+	}
+}
+
+func TestMaybePatchExecutableRestoresClaudeWhenRulesModeCannotApplyBuiltins(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("restore semantics are covered on non-windows targets")
+	}
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	cases := []struct {
+		name string
+		opts exePatchOptions
+	}{
+		{
+			name: "exe patch disabled",
+			opts: exePatchOptions{
+				allowBuiltInWithoutBypass: true,
+			},
+		},
+		{
+			name: "policy patch disabled",
+			opts: exePatchOptions{
+				enabledFlag:               true,
+				allowBuiltInWithoutBypass: true,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			setStubPath(t, dir)
+
+			path := filepath.Join(dir, "claude")
+			original := []byte("function FI(H){if(H===\"policySettings\"){let L=sqA();if(L&&Object.keys(L).length>0)return L}let $=L4(H);if(!$)return null;let{settings:A}=DmA($);return A}")
+			if err := os.WriteFile(path, original, 0o700); err != nil {
+				t.Fatalf("write original claude: %v", err)
+			}
+			runClaudeProbeFn = func(path string, arg string) (string, error) {
+				return "Claude Code 1.2.3", nil
+			}
+
+			configPath := filepath.Join(dir, "config.json")
+			if _, err := maybePatchExecutable(yoloClaudeArgs("claude"), exePatchOptions{
+				enabledFlag:    true,
+				policySettings: true,
+			}, configPath, io.Discard); err != nil {
+				t.Fatalf("apply yolo patch: %v", err)
+			}
+
+			patched, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read patched claude: %v", err)
+			}
+			if string(patched) == string(original) {
+				t.Fatalf("expected executable to be patched before restore")
+			}
+
+			var log bytes.Buffer
+			outcome, err := maybePatchExecutable([]string{"claude"}, tc.opts, configPath, &log)
+			if err != nil {
+				t.Fatalf("maybePatchExecutable error: %v", err)
+			}
+			if outcome != nil {
+				t.Fatalf("expected nil outcome when built-in rules patch is unavailable, got %#v", outcome)
+			}
+			if !strings.Contains(log.String(), "yolo disabled; restoring original Claude executable") {
+				t.Fatalf("expected restore log, got %q", log.String())
+			}
+
+			restored, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read restored claude: %v", err)
+			}
+			if string(restored) != string(original) {
+				t.Fatalf("expected executable to be restored")
+			}
+		})
+	}
+}
+
+func TestMaybePatchExecutableTracksBuiltInClaudePatchState(t *testing.T) {
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	t.Run("active after built-in patch", func(t *testing.T) {
+		dir := t.TempDir()
+		setStubPath(t, dir)
+
+		path := filepath.Join(dir, "claude")
+		original := []byte("function FI(H){if(H===\"policySettings\"){let L=sqA();if(L&&Object.keys(L).length>0)return L}let $=L4(H);if(!$)return null;let{settings:A}=DmA($);return A}")
+		if err := os.WriteFile(path, original, 0o700); err != nil {
+			t.Fatalf("write original claude: %v", err)
+		}
+		runClaudeProbeFn = func(path string, arg string) (string, error) {
+			return "Claude Code 1.2.3", nil
+		}
+
+		outcome, err := maybePatchExecutable(yoloClaudeArgs("claude"), exePatchOptions{
+			enabledFlag:    true,
+			policySettings: true,
+		}, filepath.Join(dir, "config.json"), io.Discard)
+		if err != nil {
+			t.Fatalf("maybePatchExecutable error: %v", err)
+		}
+		if outcome == nil || !outcome.BuiltInClaudePatchActive {
+			t.Fatalf("expected built-in Claude patch to be active, got %#v", outcome)
+		}
+	})
+
+	t.Run("inactive when built-in patch misses", func(t *testing.T) {
+		dir := t.TempDir()
+		setStubPath(t, dir)
+
+		path := filepath.Join(dir, "claude")
+		if err := os.WriteFile(path, []byte("#!/bin/sh\necho not-claude\n"), 0o700); err != nil {
+			t.Fatalf("write unmatched claude: %v", err)
+		}
+
+		outcome, err := maybePatchExecutable([]string{"claude"}, exePatchOptions{
+			enabledFlag:               true,
+			policySettings:            true,
+			allowBuiltInWithoutBypass: true,
+		}, filepath.Join(dir, "config.json"), io.Discard)
+		if err != nil {
+			t.Fatalf("maybePatchExecutable error: %v", err)
+		}
+		if outcome == nil {
+			t.Fatalf("expected non-nil outcome")
+		}
+		if outcome.BuiltInClaudePatchActive {
+			t.Fatalf("expected built-in Claude patch to remain inactive, got %#v", outcome)
+		}
+	})
+}
+
 func TestMaybePatchExecutableAppliesCustomClaudePatchWhenPermissionModeDisabled(t *testing.T) {
 	requireExePatchEnabled(t)
 	withExePatchTestHooks(t)
