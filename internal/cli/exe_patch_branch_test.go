@@ -511,6 +511,9 @@ func TestMaybePatchExecutableRestoresClaudeWhenRulesModeCannotApplyBuiltins(t *t
 }
 
 func TestMaybePatchExecutableTracksBuiltInClaudePatchState(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("windows PE patch state is covered by integration smoke tests")
+	}
 	requireExePatchEnabled(t)
 	withExePatchTestHooks(t)
 
