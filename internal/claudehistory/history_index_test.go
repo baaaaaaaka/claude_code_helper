@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"testing"
 	"time"
@@ -123,20 +122,34 @@ func TestLoadHistoryIndexPersistentCacheWarmStartMatchesColdLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadHistoryIndex warm: %v", err)
 	}
-	if !reflect.DeepEqual(historyIndexValue(coldIdx), historyIndexValue(warmIdx)) {
+	if !equalHistoryIndexValue(coldIdx, warmIdx) {
 		t.Fatalf("expected warm history index load to match cold load\ncold=%#v\nwarm=%#v", coldIdx, warmIdx)
 	}
 }
 
-func historyIndexValue(idx historyIndex) map[string]historySessionInfo {
-	out := make(map[string]historySessionInfo, len(idx.sessions))
-	for sessionID, info := range idx.sessions {
-		if info == nil {
+func equalHistoryIndexValue(a, b historyIndex) bool {
+	if len(a.sessions) != len(b.sessions) {
+		return false
+	}
+	for sessionID, left := range a.sessions {
+		if left == nil {
+			if b.sessions[sessionID] != nil {
+				return false
+			}
 			continue
 		}
-		out[sessionID] = *info
+		right := b.sessions[sessionID]
+		if right == nil {
+			return false
+		}
+		if left.ProjectPath != right.ProjectPath || left.FirstPrompt != right.FirstPrompt {
+			return false
+		}
+		if !left.FirstPromptTime.Equal(right.FirstPromptTime) {
+			return false
+		}
 	}
-	return out
+	return true
 }
 
 func TestLoadHistoryIndexPersistentCacheIgnoresCorruptFile(t *testing.T) {
