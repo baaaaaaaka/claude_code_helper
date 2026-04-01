@@ -1,14 +1,21 @@
 package claudehistory
 
-import "strings"
+import (
+	"context"
+	"strings"
+)
 
 func filterEmptySessions(sessions []Session) []Session {
+	return filterEmptySessionsContext(context.Background(), sessions)
+}
+
+func filterEmptySessionsContext(ctx context.Context, sessions []Session) []Session {
 	if len(sessions) == 0 {
 		return sessions
 	}
 	out := make([]Session, 0, len(sessions))
 	for _, sess := range sessions {
-		if isEmptySession(sess) {
+		if isEmptySessionContext(ctx, sess) {
 			continue
 		}
 		out = append(out, sess)
@@ -17,8 +24,12 @@ func filterEmptySessions(sessions []Session) []Session {
 }
 
 func isEmptySession(session Session) bool {
+	return isEmptySessionContext(context.Background(), session)
+}
+
+func isEmptySessionContext(ctx context.Context, session Session) bool {
 	if isFile(session.FilePath) {
-		meta, err := readSessionFileMetaCached(session.FilePath)
+		meta, err := readSessionFileMetaCachedContext(ctx, session.FilePath)
 		if err == nil && meta.SnapshotOnly {
 			return true
 		}

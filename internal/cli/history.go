@@ -22,9 +22,14 @@ var (
 	selectSession         = tui.SelectSession
 	runClaudeSessionFunc  = runClaudeSession
 	runClaudeNewSessionFn = runClaudeNewSession
+	discoverHistoryFunc   = claudehistory.DiscoverProjectsContext
 )
 
 const defaultRefreshInterval = 5 * time.Second
+
+func isHistoryDiscoveryAbort(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
 
 func ambiguousSessionError(sessionID string, projects []claudehistory.Project) error {
 	matches := claudehistory.FindSessionAliasMatches(projects, sessionID)
@@ -100,7 +105,10 @@ func newHistoryListCmd(claudeDir *string) *cobra.Command {
 		Short: "List discovered projects and sessions as JSON",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			projects, err := claudehistory.DiscoverProjects(*claudeDir)
+			projects, err := discoverHistoryFunc(cmd.Context(), *claudeDir)
+			if isHistoryDiscoveryAbort(err) {
+				return err
+			}
 			if err != nil && len(projects) == 0 {
 				return err
 			}
@@ -129,7 +137,10 @@ func newHistoryShowCmd(claudeDir *string) *cobra.Command {
 		Short: "Print full history for a session",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			projects, err := claudehistory.DiscoverProjects(*claudeDir)
+			projects, err := discoverHistoryFunc(cmd.Context(), *claudeDir)
+			if isHistoryDiscoveryAbort(err) {
+				return err
+			}
 			if err != nil && len(projects) == 0 {
 				return err
 			}
@@ -186,7 +197,10 @@ func newHistoryOpenCmd(root *rootOptions, claudeDir *string, claudePath *string,
 			}
 			yoloMode := resolveYoloMode(cfg)
 
-			projects, err := claudehistory.DiscoverProjects(*claudeDir)
+			projects, err := discoverHistoryFunc(cmd.Context(), *claudeDir)
+			if isHistoryDiscoveryAbort(err) {
+				return err
+			}
 			if err != nil && len(projects) == 0 {
 				return err
 			}
@@ -261,7 +275,7 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 		defaultCwd, _ := os.Getwd()
 		selection, err := selectSession(ctx, tui.Options{
 			LoadProjects: func(ctx context.Context) ([]claudehistory.Project, error) {
-				return claudehistory.DiscoverProjects(claudeDir)
+				return discoverHistoryFunc(ctx, claudeDir)
 			},
 			Version:         version,
 			ProxyEnabled:    useProxy,

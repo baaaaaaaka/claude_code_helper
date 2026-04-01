@@ -60,6 +60,26 @@ func newTestState(projects []claudehistory.Project) *uiState {
 	}
 }
 
+type flakyPostScreen struct {
+	tcell.Screen
+	mu       sync.Mutex
+	failures int
+}
+
+func (s *flakyPostScreen) PostEvent(ev tcell.Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failures > 0 {
+		s.failures--
+		return tcell.ErrEventQFull
+	}
+	return s.Screen.PostEvent(ev)
+}
+
+func drawForTest(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- previewEvent) error {
+	return draw(context.Background(), make(chan struct{}), screen, state, opts, previewCh)
+}
+
 func TestHandleKeyQuit(t *testing.T) {
 	screen := newTestScreen(t, 120, 40)
 	state := newTestState([]claudehistory.Project{{Key: "one", Path: "/tmp"}})
@@ -794,7 +814,7 @@ func TestEnsurePreview(t *testing.T) {
 	session := &claudehistory.Session{FilePath: path}
 	previewCh := make(chan previewEvent, 1)
 
-	ensurePreview(screen, state, Options{PreviewMessages: 1}, session, nil, previewCh)
+	ensurePreview(context.Background(), make(chan struct{}), screen, state, Options{PreviewMessages: 1}, session, nil, previewCh)
 	cacheKey := previewCacheKey(session, nil)
 	if !state.previewLoading[cacheKey] {
 		t.Fatalf("expected preview loading to be set")
@@ -815,9 +835,291 @@ func TestEnsurePreview(t *testing.T) {
 	}
 
 	state.previewCache[cacheKey] = "cached"
-	ensurePreview(screen, state, Options{}, session, nil, previewCh)
+	ensurePreview(context.Background(), make(chan struct{}), screen, state, Options{}, session, nil, previewCh)
 	if !state.previewLoading[cacheKey] {
 		t.Fatalf("expected preview loading to remain set")
+	}
+}
+
+func TestPostUIEventWithRetryRetriesQueueFull(t *testing.T) {
+	screen := &flakyPostScreen{Screen: newTestScreen(t, 80, 24), failures: 2}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	defer close(done)
+
+	postUIEventWithRetry(ctx, done, screen, &uiEvent{when: time.Now(), kind: "retry"})
+
+	eventCh := make(chan tcell.Event, 1)
+	go func() {
+		eventCh <- screen.PollEvent()
+	}()
+
+	select {
+	case ev := <-eventCh:
+		ui, ok := ev.(*uiEvent)
+		if !ok || ui.kind != "retry" {
+			t.Fatalf("unexpected event: %#v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timeout waiting for queued event")
+	}
+}
+
+func TestHandleKeyIgnoresActionsWhileProjectsLoading(t *testing.T) {
+	screen := newTestScreen(t, 120, 40)
+	dir := t.TempDir()
+	project := claudehistory.Project{
+		Key:  "one",
+		Path: dir,
+		Sessions: []claudehistory.Session{
+			{SessionID: "sess-1", Summary: "hello"},
+		},
+	}
+	state := newTestState([]claudehistory.Project{project})
+	state.loadingProjects = true
+	state.focus = "sessions"
+	state.lastListFocus = "sessions"
+	state.sessionState.selected = 1
+
+	loadCalls := 0
+	opts := Options{
+		DefaultCwd: dir,
+		LoadProjects: func(context.Context) ([]claudehistory.Project, error) {
+			loadCalls++
+			return nil, nil
+		},
+	}
+
+	if selection, err := handleKey(context.Background(), screen, state, opts, tcell.NewEventKey(tcell.KeyCtrlR, 0, 0)); err != nil || selection != nil {
+		t.Fatalf("expected Ctrl+R to be ignored, got selection=%#v err=%v", selection, err)
+	}
+	if selection, err := handleKey(context.Background(), screen, state, opts, tcell.NewEventKey(tcell.KeyRune, 'r', 0)); err != nil || selection != nil {
+		t.Fatalf("expected r to be ignored, got selection=%#v err=%v", selection, err)
+	}
+	if selection, err := handleKey(context.Background(), screen, state, opts, tcell.NewEventKey(tcell.KeyCtrlN, 0, 0)); err != nil || selection != nil {
+		t.Fatalf("expected Ctrl+N to be ignored, got selection=%#v err=%v", selection, err)
+	}
+	if selection, err := handleKey(context.Background(), screen, state, opts, tcell.NewEventKey(tcell.KeyEnter, 0, 0)); err != nil || selection != nil {
+		t.Fatalf("expected Enter to be ignored, got selection=%#v err=%v", selection, err)
+	}
+	if loadCalls != 0 {
+		t.Fatalf("expected no refresh loads while loading, got %d", loadCalls)
+	}
+}
+
+func TestSelectSessionLoadsProjectsAsync(t *testing.T) {
+	screen := tcell.NewSimulationScreen("UTF-8")
+	initDone := make(chan struct{})
+	prevNewScreen := newScreen
+	newScreen = func() (tcell.Screen, error) {
+		return &sizedScreen{Screen: screen, initDone: initDone}, nil
+	}
+	t.Cleanup(func() { newScreen = prevNewScreen })
+
+	loadStarted := make(chan struct{})
+	releaseLoad := make(chan struct{})
+	selectDone := make(chan error, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	go func() {
+		_, err := SelectSession(ctx, Options{
+			LoadProjects: func(loadCtx context.Context) ([]claudehistory.Project, error) {
+				close(loadStarted)
+				select {
+				case <-releaseLoad:
+					return nil, nil
+				case <-loadCtx.Done():
+					return nil, loadCtx.Err()
+				}
+			},
+		})
+		selectDone <- err
+	}()
+
+	select {
+	case <-initDone:
+	case <-time.After(time.Second):
+		t.Fatalf("screen init blocked on initial project load")
+	}
+
+	select {
+	case <-loadStarted:
+	case <-time.After(time.Second):
+		t.Fatalf("LoadProjects did not start")
+	}
+
+	select {
+	case err := <-selectDone:
+		t.Fatalf("SelectSession returned early: %v", err)
+	default:
+	}
+
+	screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'q', 0))
+
+	select {
+	case err := <-selectDone:
+		if err != nil {
+			t.Fatalf("SelectSession error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timeout waiting for SelectSession to exit")
+	}
+
+	close(releaseLoad)
+}
+
+func TestSelectSessionKeepsPartialProjectsOnInitialLoadError(t *testing.T) {
+	screen := tcell.NewSimulationScreen("UTF-8")
+	initDone := make(chan struct{})
+	prevNewScreen := newScreen
+	newScreen = func() (tcell.Screen, error) {
+		return &sizedScreen{Screen: screen, initDone: initDone}, nil
+	}
+	t.Cleanup(func() { newScreen = prevNewScreen })
+
+	projectPath := t.TempDir()
+	projects := []claudehistory.Project{{
+		Key:  "proj-1",
+		Path: projectPath,
+		Sessions: []claudehistory.Session{{
+			SessionID:   "sess-1",
+			ProjectPath: projectPath,
+			FilePath:    filepath.Join(projectPath, "sess-1.jsonl"),
+		}},
+	}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	readyErr := make(chan error, 1)
+	go func() {
+		<-initDone
+		if !waitForScreenText(screen, "sess-1", time.Second) {
+			readyErr <- errors.New("partial project list never rendered")
+			screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'q', 0))
+			return
+		}
+		screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'l', 0))
+		screen.PostEvent(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+		screen.PostEvent(tcell.NewEventKey(tcell.KeyEnter, 0, 0))
+	}()
+
+	selection, err := SelectSession(ctx, Options{
+		LoadProjects: func(context.Context) ([]claudehistory.Project, error) {
+			return projects, errors.New("partial history failure")
+		},
+	})
+	if err != nil {
+		t.Fatalf("SelectSession error: %v", err)
+	}
+	select {
+	case err := <-readyErr:
+		if err != nil {
+			t.Fatal(err)
+		}
+	default:
+	}
+	if selection == nil || selection.Session.SessionID != "sess-1" {
+		t.Fatalf("unexpected selection: %#v", selection)
+	}
+}
+
+func TestSelectSessionStartsRefreshAfterInitialLoadCompletes(t *testing.T) {
+	screen := tcell.NewSimulationScreen("UTF-8")
+	initDone := make(chan struct{})
+	prevNewScreen := newScreen
+	newScreen = func() (tcell.Screen, error) {
+		return &sizedScreen{Screen: screen, initDone: initDone}, nil
+	}
+	t.Cleanup(func() { newScreen = prevNewScreen })
+
+	projectPath := t.TempDir()
+	projects := []claudehistory.Project{{
+		Key:  "proj-1",
+		Path: projectPath,
+		Sessions: []claudehistory.Session{{
+			SessionID:   "sess-1",
+			ProjectPath: projectPath,
+			FilePath:    filepath.Join(projectPath, "sess-1.jsonl"),
+		}},
+	}}
+
+	var mu sync.Mutex
+	calls := 0
+	loadStarted := make(chan struct{})
+	releaseLoad := make(chan struct{})
+	unexpectedRefresh := make(chan struct{}, 1)
+	selectDone := make(chan error, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	go func() {
+		_, err := SelectSession(ctx, Options{
+			LoadProjects: func(loadCtx context.Context) ([]claudehistory.Project, error) {
+				mu.Lock()
+				calls++
+				callNum := calls
+				mu.Unlock()
+				if callNum == 1 {
+					close(loadStarted)
+					select {
+					case <-releaseLoad:
+						return projects, nil
+					case <-loadCtx.Done():
+						return nil, loadCtx.Err()
+					}
+				}
+				select {
+				case unexpectedRefresh <- struct{}{}:
+				default:
+				}
+				return projects, nil
+			},
+			RefreshInterval: 200 * time.Millisecond,
+		})
+		selectDone <- err
+	}()
+
+	select {
+	case <-initDone:
+	case <-time.After(time.Second):
+		t.Fatalf("screen init blocked on initial load")
+	}
+	select {
+	case <-loadStarted:
+	case <-time.After(time.Second):
+		t.Fatalf("initial load did not start")
+	}
+
+	time.Sleep(300 * time.Millisecond)
+	close(releaseLoad)
+	if !waitForScreenText(screen, "sess-1", time.Second) {
+		t.Fatalf("project list never rendered after initial load")
+	}
+
+	select {
+	case <-unexpectedRefresh:
+		t.Fatalf("refresh started before initial load completed interval elapsed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'q', 0))
+	select {
+	case err := <-selectDone:
+		if err != nil {
+			t.Fatalf("SelectSession error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timeout waiting for SelectSession to exit")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("expected exactly one load before quit, got %d", calls)
 	}
 }
 
@@ -843,8 +1145,14 @@ func TestSelectSessionReturnsSelectionOnEnter(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+	readyErr := make(chan error, 1)
 	go func() {
 		<-initDone
+		if !waitForScreenText(screen, "sess-1", time.Second) {
+			readyErr <- errors.New("initial session list never rendered")
+			screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'q', 0))
+			return
+		}
 		screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'l', 0))
 		screen.PostEvent(tcell.NewEventKey(tcell.KeyDown, 0, 0))
 		screen.PostEvent(tcell.NewEventKey(tcell.KeyEnter, 0, 0))
@@ -857,6 +1165,13 @@ func TestSelectSessionReturnsSelectionOnEnter(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("SelectSession error: %v", err)
+	}
+	select {
+	case err := <-readyErr:
+		if err != nil {
+			t.Fatal(err)
+		}
+	default:
 	}
 	if selection == nil || selection.Session.SessionID != "sess-1" {
 		t.Fatalf("unexpected selection: %#v", selection)
@@ -990,9 +1305,15 @@ func TestSelectSessionAutoRefreshPreservesSelection(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+	readyErr := make(chan error, 1)
 
 	go func() {
 		<-initDone
+		if !waitForScreenText(screen, "sess-1", time.Second) {
+			readyErr <- errors.New("initial project list never rendered")
+			screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'q', 0))
+			return
+		}
 		screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'j', 0))
 		screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'l', 0))
 		screen.PostEvent(tcell.NewEventKey(tcell.KeyDown, 0, 0))
@@ -1015,6 +1336,13 @@ func TestSelectSessionAutoRefreshPreservesSelection(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("SelectSession error: %v", err)
+	}
+	select {
+	case err := <-readyErr:
+		if err != nil {
+			t.Fatal(err)
+		}
+	default:
 	}
 	if selection == nil || selection.Session.SessionID != "sess-2" {
 		t.Fatalf("unexpected selection: %#v", selection)
@@ -1216,7 +1544,7 @@ func TestPreviewSearchMatches(t *testing.T) {
 	}
 
 	previewCh := make(chan previewEvent, 1)
-	if err := draw(screen, state, Options{}, previewCh); err != nil {
+	if err := drawForTest(screen, state, Options{}, previewCh); err != nil {
 		t.Fatalf("draw error: %v", err)
 	}
 	if len(state.previewMatches) != 2 {
@@ -1252,7 +1580,7 @@ func TestDrawShowsUpdateHintWhenAvailable(t *testing.T) {
 	state.updateStatus = &update.Status{Supported: true, UpdateAvailable: true}
 
 	previewCh := make(chan previewEvent, 1)
-	if err := draw(screen, state, Options{Version: "1.0.0"}, previewCh); err != nil {
+	if err := drawForTest(screen, state, Options{Version: "1.0.0"}, previewCh); err != nil {
 		t.Fatalf("draw error: %v", err)
 	}
 
@@ -1270,7 +1598,7 @@ func TestDrawShowsUpdateErrorWhenCheckFails(t *testing.T) {
 	state.updateErrorUntil = time.Now().Add(updateErrorDisplayDuration)
 
 	previewCh := make(chan previewEvent, 1)
-	if err := draw(screen, state, Options{Version: "1.0.0"}, previewCh); err != nil {
+	if err := drawForTest(screen, state, Options{Version: "1.0.0"}, previewCh); err != nil {
 		t.Fatalf("draw error: %v", err)
 	}
 
@@ -1284,6 +1612,31 @@ func TestDrawShowsUpdateErrorWhenCheckFails(t *testing.T) {
 	}
 }
 
+func TestDrawKeepsLoadingStatusOverUpdateError(t *testing.T) {
+	screen := newTestScreen(t, 160, 20)
+	state := newTestState([]claudehistory.Project{})
+	state.loadingProjects = true
+	state.updateStatus = &update.Status{Supported: false, Error: "network timeout"}
+	state.updateErrorUntil = time.Now().Add(updateErrorDisplayDuration)
+
+	previewCh := make(chan previewEvent, 1)
+	if err := drawForTest(screen, state, Options{Version: "1.0.0"}, previewCh); err != nil {
+		t.Fatalf("draw error: %v", err)
+	}
+
+	_, h := screen.Size()
+	line := readScreenLine(screen, h-1)
+	if !strings.Contains(line, "Loading history...") {
+		t.Fatalf("expected loading status line, got %q", strings.TrimSpace(line))
+	}
+	if strings.Contains(line, "Update check failed") {
+		t.Fatalf("expected update error to stay hidden while loading, got %q", strings.TrimSpace(line))
+	}
+	if strings.Contains(line, "update failed") {
+		t.Fatalf("expected update failed hint to stay hidden while loading, got %q", strings.TrimSpace(line))
+	}
+}
+
 func TestDrawHidesUpdateErrorAfterTimeout(t *testing.T) {
 	screen := newTestScreen(t, 160, 20)
 	state := newTestState([]claudehistory.Project{{Key: "one", Path: "/tmp"}})
@@ -1291,7 +1644,7 @@ func TestDrawHidesUpdateErrorAfterTimeout(t *testing.T) {
 	state.updateErrorUntil = time.Now().Add(-time.Second)
 
 	previewCh := make(chan previewEvent, 1)
-	if err := draw(screen, state, Options{Version: "1.0.0"}, previewCh); err != nil {
+	if err := drawForTest(screen, state, Options{Version: "1.0.0"}, previewCh); err != nil {
 		t.Fatalf("draw error: %v", err)
 	}
 
@@ -1310,7 +1663,7 @@ func TestDrawHidesYoloStatusWithoutEvidence(t *testing.T) {
 	state := newTestState([]claudehistory.Project{})
 
 	previewCh := make(chan previewEvent, 1)
-	if err := draw(screen, state, Options{}, previewCh); err != nil {
+	if err := drawForTest(screen, state, Options{}, previewCh); err != nil {
 		t.Fatalf("draw error: %v", err)
 	}
 
@@ -1330,7 +1683,7 @@ func TestDrawShowsYoloStatusAfterPriorUse(t *testing.T) {
 	state.yoloVisible = true
 
 	previewCh := make(chan previewEvent, 1)
-	if err := draw(screen, state, Options{}, previewCh); err != nil {
+	if err := drawForTest(screen, state, Options{}, previewCh); err != nil {
 		t.Fatalf("draw error: %v", err)
 	}
 
@@ -1348,7 +1701,7 @@ func TestDrawShowsYoloWarningWhenEnabled(t *testing.T) {
 	state.yoloMode = config.YoloModeBypass
 
 	previewCh := make(chan previewEvent, 1)
-	if err := draw(screen, state, Options{}, previewCh); err != nil {
+	if err := drawForTest(screen, state, Options{}, previewCh); err != nil {
 		t.Fatalf("draw error: %v", err)
 	}
 
@@ -1366,7 +1719,7 @@ func TestDrawShowsYoloRulesStatusWhenEnabled(t *testing.T) {
 	state.yoloMode = config.YoloModeRules
 
 	previewCh := make(chan previewEvent, 1)
-	if err := draw(screen, state, Options{}, previewCh); err != nil {
+	if err := drawForTest(screen, state, Options{}, previewCh); err != nil {
 		t.Fatalf("draw error: %v", err)
 	}
 
@@ -1382,7 +1735,7 @@ func TestDrawShowsSubagentToggleHint(t *testing.T) {
 	state := newTestState([]claudehistory.Project{{Key: "one", Path: "/tmp"}})
 
 	previewCh := make(chan previewEvent, 1)
-	if err := draw(screen, state, Options{}, previewCh); err != nil {
+	if err := drawForTest(screen, state, Options{}, previewCh); err != nil {
 		t.Fatalf("draw error: %v", err)
 	}
 
@@ -1479,4 +1832,25 @@ func readScreenLine(screen tcell.Screen, y int) string {
 		buf.WriteRune(ch)
 	}
 	return buf.String()
+}
+
+func screenContainsText(screen tcell.Screen, text string) bool {
+	_, h := screen.Size()
+	for y := 0; y < h; y++ {
+		if strings.Contains(readScreenLine(screen, y), text) {
+			return true
+		}
+	}
+	return false
+}
+
+func waitForScreenText(screen tcell.Screen, text string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if screenContainsText(screen, text) {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return screenContainsText(screen, text)
 }

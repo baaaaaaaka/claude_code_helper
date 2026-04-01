@@ -1,6 +1,7 @@
 package claudehistory
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -11,6 +12,13 @@ import (
 )
 
 func collectSessionFiles(dir string, recursive bool) ([]string, error) {
+	return collectSessionFilesContext(context.Background(), dir, recursive)
+}
+
+func collectSessionFilesContext(ctx context.Context, dir string, recursive bool) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if !recursive {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -18,6 +26,9 @@ func collectSessionFiles(dir string, recursive bool) ([]string, error) {
 		}
 		files := make([]string, 0, len(entries))
 		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if entry.IsDir() {
 				continue
 			}
@@ -35,6 +46,9 @@ func collectSessionFiles(dir string, recursive bool) ([]string, error) {
 
 	var files []string
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err != nil {
 			return nil
 		}
@@ -53,6 +67,13 @@ func collectSessionFiles(dir string, recursive bool) ([]string, error) {
 }
 
 func collectAgentSessionFiles(dir string, recursive bool) ([]string, error) {
+	return collectAgentSessionFilesContext(context.Background(), dir, recursive)
+}
+
+func collectAgentSessionFilesContext(ctx context.Context, dir string, recursive bool) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if !recursive {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -60,6 +81,9 @@ func collectAgentSessionFiles(dir string, recursive bool) ([]string, error) {
 		}
 		files := make([]string, 0, len(entries))
 		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if entry.IsDir() {
 				continue
 			}
@@ -73,6 +97,9 @@ func collectAgentSessionFiles(dir string, recursive bool) ([]string, error) {
 
 	var files []string
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err != nil {
 			return nil
 		}
@@ -95,9 +122,16 @@ func isAgentSessionFileName(name string) bool {
 }
 
 func resolveSessionFilePath(dir string, sessionID string, recursive bool) (string, error) {
+	return resolveSessionFilePathContext(context.Background(), dir, sessionID, recursive)
+}
+
+func resolveSessionFilePathContext(ctx context.Context, dir string, sessionID string, recursive bool) (string, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return "", nil
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 	target := sessionID + ".jsonl"
 	candidate := filepath.Join(dir, target)
@@ -111,6 +145,9 @@ func resolveSessionFilePath(dir string, sessionID string, recursive bool) (strin
 	var found string
 	errFound := errors.New("found")
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err != nil {
 			return nil
 		}
@@ -130,11 +167,18 @@ func resolveSessionFilePath(dir string, sessionID string, recursive bool) (strin
 }
 
 func rehydrateSessionsFromFiles(dir string, sessions []Session, recursive bool) ([]Session, int, error) {
+	return rehydrateSessionsFromFilesContext(context.Background(), dir, sessions, recursive)
+}
+
+func rehydrateSessionsFromFilesContext(ctx context.Context, dir string, sessions []Session, recursive bool) ([]Session, int, error) {
 	var firstErr error
 	validFiles := 0
 	updated := false
 
 	for i := range sessions {
+		if err := ctx.Err(); err != nil {
+			return sessions, validFiles, err
+		}
 		sessionID := strings.TrimSpace(sessions[i].SessionID)
 		if sessionID == "" {
 			continue
@@ -145,7 +189,7 @@ func rehydrateSessionsFromFiles(dir string, sessions []Session, recursive bool) 
 			filePath = ""
 		}
 		if filePath == "" {
-			resolved, err := resolveSessionFilePath(dir, sessionID, recursive)
+			resolved, err := resolveSessionFilePathContext(ctx, dir, sessionID, recursive)
 			if err != nil && firstErr == nil {
 				firstErr = err
 			}
@@ -160,7 +204,7 @@ func rehydrateSessionsFromFiles(dir string, sessions []Session, recursive bool) 
 		}
 
 		validFiles++
-		meta, err := readSessionFileMetaCached(filePath)
+		meta, err := readSessionFileMetaCachedContext(ctx, filePath)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("read session %s: %w", filePath, err)

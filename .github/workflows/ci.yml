@@ -110,6 +110,20 @@ jobs:
         run: |
           go test -coverprofile=coverage.out ./...
 
+      - name: History/TUI regression suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./internal/claudehistory ./internal/tui \
+            -run '^(TestDiscoverProjects(ReturnsProjectsAlongsideFirstError|ContextHonorsCancellation|RepeatedLoadsMatchExactly|SkipsSnapshotOnlySessionsEvenWhenIndexHasMetadata|ModesMatchExactly|ModesMatchExactlyWithIndexedExternalFullPath|ParallelSessionMetaPersistentCacheWarmHitAcrossShards|DisablesProjectCacheWhenHistoryIndexReadFails|ProjectCache(WarmHitAvoidsSessionMetaReads|WarmHitOnlyRereadsChangedProject|WarmHitRevalidatesInventoryBeforeReturn|Invalidates(On(HistoryChange|NewSessionFile|IndexChange|ProjectPathDirStateChange|AgentFileChange|IndexedExternalFullPathChange)|WhenFilteredIndexedExternalFullPathBecomesVisible)|MissesAfterSessionReplacementWithSameMtime|MissesWhen(IndexBecomesUnreadable|SessionBecomesUnreadable))|ParallelPreservesFirstErrorOrdering)|TestLoadHistoryIndex(ContextHonorsCancellation|PersistentCache(WarmStartMatchesColdLoad|IgnoresCorruptFile|MissesAfterReplacementWithSameMtime))|TestSession(FileCacheInvalidatesOnFileReplacementWithSameMtime|MetaPersistentCache(WarmStartMatchesColdLoad|IgnoresCorruptFile|MissesAfterReplacementWithSameMtime))|TestReadPersistentProjectCacheFileIgnoresOlderSchemaVersion|TestContextAwareSessionFileHelpersHonorCancellation|TestAttachSubagentsContextHonorsCancellation|TestLoadProjectFromSessionFilesWithOptionsContextHonorsCancellation|TestPostUIEventWithRetryRetriesQueueFull|TestHandleKeyIgnoresActionsWhileProjectsLoading|TestSelectSession(LoadsProjectsAsync|KeepsPartialProjectsOnInitialLoadError|StartsRefreshAfterInitialLoadCompletes)|TestDrawKeepsLoadingStatusOverUpdateError)$' \
+            -count=1
+
+      - name: History CLI cancellation regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./internal/cli -run '^(TestHistory(List|Show|Open)CmdCancellationIsFatal)$' -count=1
+
       - name: Proc cross-platform compile smoke (Linux only)
         if: runner.os == 'Linux'
         shell: bash
@@ -118,6 +132,18 @@ jobs:
           tmp_dir="${RUNNER_TEMP:-/tmp}"
           GOOS=windows GOARCH=amd64 go test -c -o "$tmp_dir/proc-windows.test.exe" ./internal/proc
           GOOS=darwin GOARCH=amd64 go test -c -o "$tmp_dir/proc-darwin.test" ./internal/proc
+
+      - name: Claudehistory cross-platform compile smoke (Linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp_dir="${RUNNER_TEMP:-/tmp}"
+          GOOS=darwin GOARCH=amd64 go test -c -o "$tmp_dir/claudehistory-darwin.test" ./internal/claudehistory
+          GOOS=freebsd GOARCH=amd64 go test -c -o "$tmp_dir/claudehistory-freebsd.test" ./internal/claudehistory
+          GOOS=netbsd GOARCH=amd64 go test -c -o "$tmp_dir/claudehistory-netbsd.test" ./internal/claudehistory
+          GOOS=openbsd GOARCH=amd64 go test -c -o "$tmp_dir/claudehistory-openbsd.test" ./internal/claudehistory
+          GOOS=dragonfly GOARCH=amd64 go test -c -o "$tmp_dir/claudehistory-dragonfly.test" ./internal/claudehistory
 
       - name: Installer script matrix smoke (Unix)
         if: runner.os != 'Windows'

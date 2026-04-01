@@ -1,10 +1,12 @@
 package claudehistory
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -60,6 +62,50 @@ func TestDiscoverProjectsReadsJsonlSessions(t *testing.T) {
 	}
 	if !session.ModifiedAt.After(session.CreatedAt) {
 		t.Fatalf("expected modified after created")
+	}
+}
+
+func TestDiscoverProjectsContextHonorsCancellation(t *testing.T) {
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "projects", "proj-cancel")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	projects, err := DiscoverProjectsContext(ctx, root)
+	if err == nil || err != context.Canceled {
+		t.Fatalf("expected context canceled, got projects=%#v err=%v", projects, err)
+	}
+}
+
+func TestDiscoverProjectsReturnsProjectsAlongsideFirstError(t *testing.T) {
+	root := t.TempDir()
+
+	projectDir := filepath.Join(root, "projects", "proj-valid")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	validSession := filepath.Join(projectDir, "sess-valid.jsonl")
+	validContent := `{"type":"user","message":{"role":"user","content":"Hello"},"timestamp":"2026-01-01T00:00:00Z","cwd":"/tmp/project-valid"}`
+	if err := os.WriteFile(validSession, []byte(validContent), 0o644); err != nil {
+		t.Fatalf("write valid session: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(projectDir, "sessions-index.json"), 0o755); err != nil {
+		t.Fatalf("mkdir broken index path: %v", err)
+	}
+
+	projects, err := DiscoverProjects(root)
+	if err == nil {
+		t.Fatalf("expected non-nil error when sessions-index path cannot be read")
+	}
+	if len(projects) != 1 {
+		t.Fatalf("expected scanned project to still be returned, got %#v", projects)
+	}
+	if projects[0].Key != "proj-valid" {
+		t.Fatalf("expected project to remain visible, got %#v", projects[0])
 	}
 }
 
@@ -537,6 +583,40 @@ func TestDiscoverProjectsSkipsSnapshotOnlySessions(t *testing.T) {
 	}
 }
 
+func TestDiscoverProjectsSkipsSnapshotOnlySessionsEvenWhenIndexHasMetadata(t *testing.T) {
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "projects", "proj-snapshot-index")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	indexPath := filepath.Join(projectDir, "sessions-index.json")
+	index := `{"version":1,"entries":[{"sessionId":"sess-snapshot","fullPath":"","summary":"From index","messageCount":9,"projectPath":"/tmp/project"}],"originalPath":"/tmp/project"}`
+	if err := os.WriteFile(indexPath, []byte(index), 0o644); err != nil {
+		t.Fatalf("write index: %v", err)
+	}
+
+	sessionPath := filepath.Join(projectDir, "sess-snapshot.jsonl")
+	content := `{"type":"file-history-snapshot","messageId":"snap-1","snapshot":{"messageId":"snap-1","trackedFileBackups":{},"timestamp":"2026-01-01T00:00:00Z"},"isSnapshotUpdate":false}`
+	if err := os.WriteFile(sessionPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+
+	projects, err := DiscoverProjects(root)
+	if err != nil {
+		t.Fatalf("DiscoverProjects error: %v", err)
+	}
+	if len(projects) != 1 {
+		t.Fatalf("expected index-backed project shell to remain visible, got %#v", projects)
+	}
+	if projects[0].Path != "/tmp/project" {
+		t.Fatalf("unexpected project path: %q", projects[0].Path)
+	}
+	if len(projects[0].Sessions) != 0 {
+		t.Fatalf("expected snapshot-only session to stay filtered, got %#v", projects[0].Sessions)
+	}
+}
+
 func TestDiscoverProjectsKeepsIndexSidechainEntries(t *testing.T) {
 	root := t.TempDir()
 	projectDir := filepath.Join(root, "projects", "proj-index")
@@ -637,5 +717,80 @@ func TestDiscoverProjectsIgnoresAgentOnlyProject(t *testing.T) {
 	}
 	if len(projects) != 0 {
 		t.Fatalf("expected 0 projects, got %d", len(projects))
+	}
+}
+
+func TestDiscoverProjectsRepeatedLoadsMatchExactly(t *testing.T) {
+	resetSessionFileCache()
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "projects", "proj-repeat")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	validPath := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(validPath, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+
+	indexPath := filepath.Join(projectDir, "sessions-index.json")
+	index := fmt.Sprintf(
+		`{"version":1,"entries":[{"sessionId":"sess-main","summary":"From index","fullPath":"","messageCount":0,"projectPath":%s},{"sessionId":"agent-ignored","summary":"Sidechain from index","fullPath":"","isSidechain":true,"messageCount":5},{"sessionId":"sess-snapshot","summary":"Snapshot from index","fullPath":"","messageCount":3,"projectPath":%s}],"originalPath":%s}`,
+		jsonString(t, filepath.Join(root, "missing-project")),
+		jsonString(t, validPath),
+		jsonString(t, filepath.Join(root, "missing-project")),
+	)
+	if err := os.WriteFile(indexPath, []byte(index), 0o644); err != nil {
+		t.Fatalf("write index: %v", err)
+	}
+
+	mainPath := filepath.Join(projectDir, "sess-main.jsonl")
+	mainContent := fmt.Sprintf(
+		`{"type":"user","message":{"role":"user","content":"Hello"},"timestamp":"2026-01-01T00:00:00Z","cwd":%s}
+{"type":"assistant","message":{"role":"assistant","content":"Hi"},"timestamp":"2026-01-01T00:01:00Z","cwd":%s}`,
+		jsonString(t, validPath),
+		jsonString(t, validPath),
+	)
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0o644); err != nil {
+		t.Fatalf("write main session: %v", err)
+	}
+
+	scanPath := filepath.Join(projectDir, "sess-scan.jsonl")
+	scanContent := fmt.Sprintf(
+		`{"type":"user","message":{"role":"user","content":"Scanned"},"timestamp":"2026-01-02T00:00:00Z","cwd":%s}`,
+		jsonString(t, validPath),
+	)
+	if err := os.WriteFile(scanPath, []byte(scanContent), 0o644); err != nil {
+		t.Fatalf("write scan session: %v", err)
+	}
+
+	agentPath := filepath.Join(projectDir, "agent-abc.jsonl")
+	agentContent := fmt.Sprintf(
+		`{"type":"user","message":{"role":"user","content":"Sub task"},"timestamp":"2026-01-03T00:00:00Z","cwd":%s,"sessionId":"sess-main","isSidechain":true}`,
+		jsonString(t, validPath),
+	)
+	if err := os.WriteFile(agentPath, []byte(agentContent), 0o644); err != nil {
+		t.Fatalf("write agent session: %v", err)
+	}
+
+	snapshotPath := filepath.Join(projectDir, "sess-snapshot.jsonl")
+	snapshotContent := `{"type":"file-history-snapshot","messageId":"snap-1","snapshot":{"messageId":"snap-1","trackedFileBackups":{},"timestamp":"2026-01-04T00:00:00Z"},"isSnapshotUpdate":false}`
+	if err := os.WriteFile(snapshotPath, []byte(snapshotContent), 0o644); err != nil {
+		t.Fatalf("write snapshot session: %v", err)
+	}
+
+	coldProjects, err := DiscoverProjects(root)
+	if err != nil {
+		t.Fatalf("DiscoverProjects cold error: %v", err)
+	}
+
+	resetSessionFileCache()
+
+	warmProjects, err := DiscoverProjects(root)
+	if err != nil {
+		t.Fatalf("DiscoverProjects warm error: %v", err)
+	}
+
+	if !reflect.DeepEqual(coldProjects, warmProjects) {
+		t.Fatalf("expected repeated loads to match exactly\ncold=%#v\nwarm=%#v", coldProjects, warmProjects)
 	}
 }

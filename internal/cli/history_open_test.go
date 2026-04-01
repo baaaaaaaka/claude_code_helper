@@ -180,3 +180,55 @@ func TestHistoryOpenCmdReturnsAmbiguousAliasError(t *testing.T) {
 		t.Fatalf("expected canonical candidates in error, got: %v", err)
 	}
 }
+
+func TestHistoryOpenCmdCancellationIsFatal(t *testing.T) {
+	store := newTempStore(t)
+	disabled := false
+	if err := store.Save(config.Config{Version: config.CurrentVersion, ProxyEnabled: &disabled}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	prevDiscover := discoverHistoryFunc
+	prevRun := runClaudeSessionFunc
+	t.Cleanup(func() {
+		discoverHistoryFunc = prevDiscover
+		runClaudeSessionFunc = prevRun
+	})
+
+	discoverHistoryFunc = func(ctx context.Context, claudeDir string) ([]claudehistory.Project, error) {
+		return []claudehistory.Project{{
+			Key: "proj-partial",
+			Sessions: []claudehistory.Session{{
+				SessionID: "sess-1",
+				FilePath:  filepath.Join(t.TempDir(), "sess-1.jsonl"),
+			}},
+		}}, context.Canceled
+	}
+	runClaudeSessionFunc = func(
+		ctx context.Context,
+		root *rootOptions,
+		store *config.Store,
+		profile *config.Profile,
+		instances []config.Instance,
+		session claudehistory.Session,
+		project claudehistory.Project,
+		path string,
+		dir string,
+		useProxy bool,
+		yoloMode config.YoloMode,
+		log io.Writer,
+	) error {
+		t.Fatalf("runClaudeSession should not be called after discovery cancellation")
+		return nil
+	}
+
+	claudeDir := t.TempDir()
+	claudePath := ""
+	profileRef := ""
+	cmd := newHistoryOpenCmd(&rootOptions{configPath: store.Path()}, &claudeDir, &claudePath, &profileRef)
+	cmd.SetArgs([]string{"sess-1"})
+	err := cmd.Execute()
+	if err != context.Canceled {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}

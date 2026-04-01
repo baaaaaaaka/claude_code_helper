@@ -1,13 +1,16 @@
 package claudehistory
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -38,6 +41,21 @@ type SessionMatch struct {
 	Project Project
 }
 
+type discoverProjectsOptions struct {
+	parallel     bool
+	projectCache bool
+}
+
+type discoverProjectResult struct {
+	project Project
+	err     error
+}
+
+var defaultDiscoverProjectsOptions = discoverProjectsOptions{
+	parallel:     true,
+	projectCache: true,
+}
+
 func ResolveClaudeDir(override string) (string, error) {
 	if v := strings.TrimSpace(override); v != "" {
 		return filepath.Clean(os.ExpandEnv(v)), nil
@@ -53,9 +71,24 @@ func ResolveClaudeDir(override string) (string, error) {
 }
 
 func DiscoverProjects(claudeDir string) ([]Project, error) {
+	return DiscoverProjectsContext(context.Background(), claudeDir)
+}
+
+func DiscoverProjectsContext(ctx context.Context, claudeDir string) ([]Project, error) {
 	root, err := ResolveClaudeDir(claudeDir)
 	if err != nil {
 		return nil, err
+	}
+	return discoverProjectsResolvedContext(ctx, root, defaultDiscoverProjectsOptions)
+}
+
+func discoverProjectsResolvedContext(ctx context.Context, root string, opts discoverProjectsOptions) ([]Project, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	ctx, ownsBatch := ensureSessionMetaPersistentBatch(ctx)
+	if ownsBatch {
+		defer flushSessionMetaPersistentBatchContext(ctx)
 	}
 	projectsDir := filepath.Join(root, "projects")
 	entries, err := os.ReadDir(projectsDir)
@@ -66,32 +99,94 @@ func DiscoverProjects(claudeDir string) ([]Project, error) {
 		return nil, fmt.Errorf("read projects dir: %w", err)
 	}
 
-	history, historyErr := loadHistoryIndex(root)
+	history, historyDep, historyErr := loadHistoryIndexStateContext(ctx, root)
+	effectiveOpts := opts
+	if historyErr != nil {
+		effectiveOpts.projectCache = false
+	}
+
+	projectKeys := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		projectKeys = append(projectKeys, entry.Name())
+	}
+
+	results := make([]discoverProjectResult, len(projectKeys))
+	if effectiveOpts.parallel && len(projectKeys) > 1 {
+		loadProjectsParallelContext(ctx, projectsDir, projectKeys, history, historyDep, effectiveOpts, results)
+	} else {
+		loadProjectsSerialContext(ctx, projectsDir, projectKeys, history, historyDep, effectiveOpts, results)
+	}
 
 	var firstErr error
 	var projects []Project
 	if historyErr != nil {
 		firstErr = fmt.Errorf("read history index: %w", historyErr)
 	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
+	for _, result := range results {
+		if result.err != nil && firstErr == nil {
+			firstErr = result.err
+		}
+		if len(result.project.Sessions) == 0 && strings.TrimSpace(result.project.Path) == "" {
 			continue
 		}
-		key := entry.Name()
-		project, err := loadProject(projectsDir, key, history)
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
-		if len(project.Sessions) == 0 && strings.TrimSpace(project.Path) == "" {
-			continue
-		}
-		projects = append(projects, project)
+		projects = append(projects, result.project)
 	}
 
 	sort.Slice(projects, func(i, j int) bool {
 		return strings.ToLower(projects[i].Path) < strings.ToLower(projects[j].Path)
 	})
 	return projects, firstErr
+}
+
+func loadProjectsSerialContext(ctx context.Context, projectsDir string, projectKeys []string, history historyIndex, historyDep historyDependency, opts discoverProjectsOptions, results []discoverProjectResult) {
+	for i, key := range projectKeys {
+		if err := ctx.Err(); err != nil {
+			results[i].err = err
+			return
+		}
+		results[i].project, results[i].err = loadProjectContextWithOptions(ctx, projectsDir, key, history, historyDep, opts)
+	}
+}
+
+func loadProjectsParallelContext(ctx context.Context, projectsDir string, projectKeys []string, history historyIndex, historyDep historyDependency, opts discoverProjectsOptions, results []discoverProjectResult) {
+	workerCount := runtime.GOMAXPROCS(0)
+	if workerCount < 2 {
+		workerCount = 2
+	}
+	if workerCount > len(projectKeys) {
+		workerCount = len(projectKeys)
+	}
+
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				if err := ctx.Err(); err != nil {
+					results[idx].err = err
+					continue
+				}
+				results[idx].project, results[idx].err = loadProjectContextWithOptions(ctx, projectsDir, projectKeys[idx], history, historyDep, opts)
+			}
+		}()
+	}
+
+	for i := range projectKeys {
+		if err := ctx.Err(); err != nil {
+			for j := i; j < len(projectKeys); j++ {
+				results[j].err = err
+			}
+			break
+		}
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
 }
 
 func (idx sessionsIndex) EntriesProjectPath() string {
@@ -158,7 +253,11 @@ func parseTime(raw string) time.Time {
 }
 
 func scanSessionsFromFiles(dir string, history historyIndex, recursive bool) ([]Session, string, error) {
-	files, err := collectSessionFiles(dir, recursive)
+	return scanSessionsFromFilesContext(context.Background(), dir, history, recursive)
+}
+
+func scanSessionsFromFilesContext(ctx context.Context, dir string, history historyIndex, recursive bool) ([]Session, string, error) {
+	files, err := collectSessionFilesContext(ctx, dir, recursive)
 	if err != nil {
 		return nil, "", err
 	}
@@ -166,6 +265,9 @@ func scanSessionsFromFiles(dir string, history historyIndex, recursive bool) ([]
 	sessions := make([]Session, 0, len(files))
 	sessionIndex := map[string]int{}
 	for _, filePath := range files {
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
 		name := filepath.Base(filePath)
 		if !strings.HasSuffix(name, ".jsonl") {
 			continue
@@ -180,7 +282,7 @@ func scanSessionsFromFiles(dir string, history historyIndex, recursive bool) ([]
 		if strings.TrimSpace(sessionID) == "" {
 			continue
 		}
-		meta, err := readSessionFileMetaCached(filePath)
+		meta, err := readSessionFileMetaCachedContext(ctx, filePath)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("read session %s: %w", filePath, err)
@@ -395,14 +497,49 @@ func dropAttachedSubagentSessions(sessions []Session) []Session {
 }
 
 func loadProject(projectsDir string, key string, history historyIndex) (Project, error) {
+	return loadProjectContext(context.Background(), projectsDir, key, history)
+}
+
+func loadProjectContext(ctx context.Context, projectsDir string, key string, history historyIndex) (Project, error) {
+	return loadProjectContextWithOptions(ctx, projectsDir, key, history, historyDependency{}, discoverProjectsOptions{})
+}
+
+func loadProjectContextWithOptions(ctx context.Context, projectsDir string, key string, history historyIndex, historyDep historyDependency, opts discoverProjectsOptions) (Project, error) {
+	projectCtx, ownsBatch := ensureSessionMetaPersistentBatch(ctx)
+	if ownsBatch {
+		defer flushSessionMetaPersistentBatchContext(projectCtx)
+	}
+
 	dir := filepath.Join(projectsDir, key)
+	inv, invErr := buildProjectInventoryContext(projectCtx, dir, true)
+	if invErr != nil {
+		return Project{}, invErr
+	}
+	useProjectCache := opts.projectCache && inv.projectCacheEligible(historyDep)
+	if useProjectCache {
+		if project, refreshedInv, ok, err := lookupPersistentProjectContext(projectCtx, dir, historyDep, inv); err != nil {
+			return Project{}, err
+		} else {
+			inv = refreshedInv
+			if ok {
+				return project, nil
+			}
+		}
+	}
+
 	indexPath := filepath.Join(dir, "sessions-index.json")
+	if err := projectCtx.Err(); err != nil {
+		return Project{}, err
+	}
 	data, err := os.ReadFile(indexPath)
 	if err == nil {
 		var parsed sessionsIndex
 		if err := json.Unmarshal(data, &parsed); err == nil {
 			sessions := parseSessions(parsed.Entries)
 			for i := range sessions {
+				if err := projectCtx.Err(); err != nil {
+					return Project{}, err
+				}
 				for _, lookupID := range append([]string{sessions[i].SessionID}, sessions[i].Aliases...) {
 					info, ok := history.lookup(lookupID)
 					if !ok {
@@ -427,8 +564,8 @@ func loadProject(projectsDir string, key string, history historyIndex) (Project,
 			if projectPath == "" {
 				projectPath = selectProjectPath(sessions)
 			}
-			sessions, validFiles, rehydrateErr := rehydrateSessionsFromFiles(dir, sessions, true)
-			scannedSessions, scannedPath, scanErr := scanSessionsFromFiles(dir, history, true)
+			sessions, validFiles, rehydrateErr := rehydrateSessionsFromInventoryContext(projectCtx, &inv, sessions)
+			scannedSessions, scannedPath, scanErr := scanSessionsFromInventoryContext(projectCtx, &inv, history)
 			if validFiles == 0 && len(scannedSessions) > 0 {
 				sessions = nil
 			}
@@ -444,50 +581,104 @@ func loadProject(projectsDir string, key string, history historyIndex) (Project,
 					}
 				}
 			}
-			sessions, attachErr := attachSubagents(dir, sessions, true)
+			sessions, attachErr := attachSubagentsFromInventoryContext(projectCtx, &inv, sessions)
 			if rehydrateErr == nil && attachErr != nil {
 				rehydrateErr = attachErr
 			}
 			if rehydrateErr == nil && scanErr != nil {
 				rehydrateErr = scanErr
 			}
+			externalPaths := collectSessionExternalFilePaths(sessions, inv.fileKeys)
 			sessions = dropAttachedSubagentSessions(sessions)
-			sessions = filterEmptySessions(sessions)
-			return Project{
+			sessions = filterEmptySessionsContext(projectCtx, sessions)
+			project := Project{
 				Key:      key,
 				Path:     projectPath,
 				Sessions: sessions,
-			}, rehydrateErr
+			}
+			if rehydrateErr == nil && useProjectCache {
+				pathDeps := collectProjectPathDependencies(indexProjectPathCandidates(parsed), &inv, project)
+				if manifest, ok := buildProjectCacheManifest(historyDep, inv, externalPaths, pathDeps); ok {
+					storePersistentProject(dir, manifest, project)
+				}
+			}
+			return project, rehydrateErr
 		}
 	}
 
-	project, scanErr := loadProjectFromSessionFilesWithOptions(dir, key, history, true)
+	project, scanErr := loadProjectFromInventoryContext(projectCtx, &inv, key, history)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		if scanErr != nil {
 			return project, fmt.Errorf("read sessions index %s: %w", indexPath, err)
 		}
 		return project, fmt.Errorf("read sessions index %s: %w", indexPath, err)
 	}
+	if scanErr == nil && useProjectCache {
+		pathDeps := collectProjectPathDependencies(nil, &inv, project)
+		if manifest, ok := buildProjectCacheManifest(historyDep, inv, collectSessionExternalFilePaths(project.Sessions, inv.fileKeys), pathDeps); ok {
+			storePersistentProject(dir, manifest, project)
+		}
+	}
 	return project, scanErr
 }
 
 func loadProjectFromSessionFiles(dir string, key string, history historyIndex) (Project, error) {
-	return loadProjectFromSessionFilesWithOptions(dir, key, history, false)
+	return loadProjectFromSessionFilesWithOptionsContext(context.Background(), dir, key, history, false)
 }
 
 func loadProjectFromSessionFilesWithOptions(dir string, key string, history historyIndex, recursive bool) (Project, error) {
-	sessions, projectPath, firstErr := scanSessionsFromFiles(dir, history, recursive)
-	sessions, attachErr := attachSubagents(dir, sessions, recursive)
+	return loadProjectFromSessionFilesWithOptionsContext(context.Background(), dir, key, history, recursive)
+}
+
+func loadProjectFromSessionFilesWithOptionsContext(ctx context.Context, dir string, key string, history historyIndex, recursive bool) (Project, error) {
+	sessions, projectPath, firstErr := scanSessionsFromFilesContext(ctx, dir, history, recursive)
+	sessions, attachErr := attachSubagentsContext(ctx, dir, sessions, recursive)
 	if firstErr == nil && attachErr != nil {
 		firstErr = attachErr
 	}
 	sessions = dropAttachedSubagentSessions(sessions)
-	sessions = filterEmptySessions(sessions)
+	sessions = filterEmptySessionsContext(ctx, sessions)
 	return Project{
 		Key:      key,
 		Path:     projectPath,
 		Sessions: sessions,
 	}, firstErr
+}
+
+func loadProjectFromInventoryContext(ctx context.Context, inv *projectInventory, key string, history historyIndex) (Project, error) {
+	sessions, projectPath, firstErr := scanSessionsFromInventoryContext(ctx, inv, history)
+	sessions, attachErr := attachSubagentsFromInventoryContext(ctx, inv, sessions)
+	if firstErr == nil && attachErr != nil {
+		firstErr = attachErr
+	}
+	sessions = dropAttachedSubagentSessions(sessions)
+	sessions = filterEmptySessionsContext(ctx, sessions)
+	return Project{
+		Key:      key,
+		Path:     projectPath,
+		Sessions: sessions,
+	}, firstErr
+}
+
+func indexProjectPathCandidates(parsed sessionsIndex) []string {
+	seen := map[string]struct{}{}
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		seen[path] = struct{}{}
+	}
+	add(parsed.OriginalPath)
+	for _, entry := range parsed.Entries {
+		add(entry.ProjectPath)
+	}
+	paths := make([]string, 0, len(seen))
+	for path := range seen {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 func FindSessionByIDMatch(projects []Project, sessionID string) (Session, bool, bool) {

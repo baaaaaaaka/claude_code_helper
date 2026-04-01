@@ -2,11 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/baaaaaaaka/claude_code_helper/internal/claudehistory"
 )
 
 func TestHistoryListCmdOutputsJSON(t *testing.T) {
@@ -106,5 +109,50 @@ func TestHistoryShowCmdAmbiguousAliasListsCandidates(t *testing.T) {
 	}
 	if !strings.Contains(msg, "canonical-a") || !strings.Contains(msg, "canonical-b") {
 		t.Fatalf("expected canonical candidates in error, got: %v", err)
+	}
+}
+
+func TestHistoryListCmdCancellationIsFatal(t *testing.T) {
+	prev := discoverHistoryFunc
+	t.Cleanup(func() { discoverHistoryFunc = prev })
+
+	discoverHistoryFunc = func(ctx context.Context, claudeDir string) ([]claudehistory.Project, error) {
+		return []claudehistory.Project{{Key: "proj-partial"}}, context.Canceled
+	}
+
+	claudeDir := t.TempDir()
+	cmd := newHistoryListCmd(&claudeDir)
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{})
+	err := cmd.Execute()
+	if err != context.Canceled {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if strings.Contains(out.String(), `"projects"`) {
+		t.Fatalf("expected canceled list command to avoid partial JSON output, got %q", out.String())
+	}
+}
+
+func TestHistoryShowCmdCancellationIsFatal(t *testing.T) {
+	prev := discoverHistoryFunc
+	t.Cleanup(func() { discoverHistoryFunc = prev })
+
+	discoverHistoryFunc = func(ctx context.Context, claudeDir string) ([]claudehistory.Project, error) {
+		return []claudehistory.Project{{
+			Key: "proj-partial",
+			Sessions: []claudehistory.Session{{
+				SessionID: "sess-1",
+				FilePath:  filepath.Join(t.TempDir(), "sess-1.jsonl"),
+			}},
+		}}, context.DeadlineExceeded
+	}
+
+	claudeDir := t.TempDir()
+	cmd := newHistoryShowCmd(&claudeDir)
+	cmd.SetArgs([]string{"sess-1"})
+	err := cmd.Execute()
+	if err != context.DeadlineExceeded {
+		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
 	}
 }

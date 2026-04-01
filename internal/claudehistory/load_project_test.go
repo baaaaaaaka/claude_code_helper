@@ -1,6 +1,7 @@
 package claudehistory
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -37,5 +38,22 @@ func TestLoadProjectFromSessionFiles(t *testing.T) {
 	}
 	if len(project.Sessions) != 1 || project.Sessions[0].SessionID != "sess-1" {
 		t.Fatalf("unexpected sessions: %#v", project.Sessions)
+	}
+}
+
+func TestLoadProjectFromSessionFilesWithOptionsContextHonorsCancellation(t *testing.T) {
+	dir := t.TempDir()
+	sessionPath := filepath.Join(dir, "sess-1.jsonl")
+	content := `{"type":"user","message":{"role":"user","content":"Hello"},"timestamp":"2026-01-01T00:00:00Z","cwd":"/tmp/project"}`
+	if err := os.WriteFile(sessionPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	project, err := loadProjectFromSessionFilesWithOptionsContext(ctx, dir, "proj-1", historyIndex{}, false)
+	if err != context.Canceled {
+		t.Fatalf("expected context canceled, got project=%#v err=%v", project, err)
 	}
 }

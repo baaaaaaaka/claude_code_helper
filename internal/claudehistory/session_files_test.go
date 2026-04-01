@@ -1,6 +1,7 @@
 package claudehistory
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -44,6 +45,72 @@ func TestCollectSessionFilesExcludesAgentFiles(t *testing.T) {
 	if len(recursive) != 2 {
 		t.Fatalf("expected 2 session files, got %#v", recursive)
 	}
+}
+
+func TestCollectSessionFilesContextHonorsCancellation(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "sess-1.jsonl"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	files, err := collectSessionFilesContext(ctx, dir, true)
+	if err == nil || err != context.Canceled {
+		t.Fatalf("expected context canceled, got files=%#v err=%v", files, err)
+	}
+}
+
+func TestContextAwareSessionFileHelpersHonorCancellation(t *testing.T) {
+	t.Run("collectAgentSessionFilesContext", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "agent-abc.jsonl"), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write agent: %v", err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		files, err := collectAgentSessionFilesContext(ctx, dir, true)
+		if err != context.Canceled {
+			t.Fatalf("expected context canceled, got files=%#v err=%v", files, err)
+		}
+	})
+
+	t.Run("resolveSessionFilePathContext", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "sess-1.jsonl")
+		if err := os.WriteFile(target, []byte("{}"), 0o644); err != nil {
+			t.Fatalf("write session: %v", err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		path, err := resolveSessionFilePathContext(ctx, dir, "sess-1", false)
+		if err != context.Canceled {
+			t.Fatalf("expected context canceled, got path=%q err=%v", path, err)
+		}
+	})
+
+	t.Run("rehydrateSessionsFromFilesContext", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "sess-1.jsonl")
+		content := `{"type":"user","message":{"role":"user","content":"first"},"timestamp":"2026-01-02T00:00:00Z","cwd":"/tmp/project"}`
+		if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
+			t.Fatalf("write session: %v", err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		sessions := []Session{{SessionID: "sess-1"}}
+		out, valid, err := rehydrateSessionsFromFilesContext(ctx, dir, sessions, false)
+		if err != context.Canceled {
+			t.Fatalf("expected context canceled, got out=%#v valid=%d err=%v", out, valid, err)
+		}
+	})
 }
 
 func TestCollectAgentSessionFilesOnlyAgents(t *testing.T) {

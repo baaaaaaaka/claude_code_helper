@@ -1,6 +1,7 @@
 package claudehistory
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -126,5 +127,20 @@ func TestAttachSubagentsEmptySessions(t *testing.T) {
 	}
 	if len(out) != 0 {
 		t.Fatalf("expected empty sessions, got %d", len(out))
+	}
+}
+
+func TestAttachSubagentsContextHonorsCancellation(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "agent-abc.jsonl"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write agent: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	out, err := attachSubagentsContext(ctx, root, []Session{{SessionID: "sess-main"}}, false)
+	if err != context.Canceled {
+		t.Fatalf("expected context canceled, got out=%#v err=%v", out, err)
 	}
 }

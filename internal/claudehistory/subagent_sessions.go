@@ -1,6 +1,7 @@
 package claudehistory
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -8,7 +9,11 @@ import (
 )
 
 func attachSubagents(dir string, sessions []Session, recursive bool) ([]Session, error) {
-	files, err := collectAgentSessionFiles(dir, recursive)
+	return attachSubagentsContext(context.Background(), dir, sessions, recursive)
+}
+
+func attachSubagentsContext(ctx context.Context, dir string, sessions []Session, recursive bool) ([]Session, error) {
+	files, err := collectAgentSessionFilesContext(ctx, dir, recursive)
 	if err != nil {
 		return sessions, err
 	}
@@ -26,6 +31,9 @@ func attachSubagents(dir string, sessions []Session, recursive bool) ([]Session,
 
 	var firstErr error
 	for _, filePath := range files {
+		if err := ctx.Err(); err != nil {
+			return sessions, err
+		}
 		parentSessionID, err := parentSessionIDForAgentFile(filePath)
 		if err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("read session id %s: %w", filePath, err)
@@ -37,7 +45,7 @@ func attachSubagents(dir string, sessions []Session, recursive bool) ([]Session,
 		if !ok {
 			continue
 		}
-		meta, err := readSessionFileMetaCached(filePath)
+		meta, err := readSessionFileMetaCachedContext(ctx, filePath)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("read session %s: %w", filePath, err)

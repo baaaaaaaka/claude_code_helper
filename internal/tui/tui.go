@@ -74,6 +74,11 @@ type updateEvent struct {
 	status   *update.Status
 }
 
+type projectLoadEvent struct {
+	projects []claudehistory.Project
+	err      error
+}
+
 type rect struct {
 	y int
 	x int
@@ -137,6 +142,7 @@ type uiState struct {
 	updateChecking   bool
 	updateErrorUntil time.Time
 	updateErrorTimer *time.Timer
+	loadingProjects  bool
 
 	proxyEnabled    bool
 	proxyConfigured bool
@@ -177,15 +183,73 @@ func nextYoloMode(mode config.YoloMode) config.YoloMode {
 	}
 }
 
+func postUIEventWithRetry(ctx context.Context, done <-chan struct{}, screen tcell.Screen, ev tcell.Event) {
+	for {
+		err := screen.PostEvent(ev)
+		if err == nil || !errors.Is(err, tcell.ErrEventQFull) {
+			return
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-done:
+			timer.Stop()
+			return
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+func startProjectLoad(
+	ctx context.Context,
+	done <-chan struct{},
+	screen tcell.Screen,
+	loadProjects func(context.Context) ([]claudehistory.Project, error),
+	loadCh chan projectLoadEvent,
+) {
+	go func() {
+		projects, err := loadProjects(ctx)
+		select {
+		case loadCh <- projectLoadEvent{projects: projects, err: err}:
+		default:
+			select {
+			case <-loadCh:
+			default:
+			}
+			loadCh <- projectLoadEvent{projects: projects, err: err}
+		}
+		postUIEventWithRetry(ctx, done, screen, &uiEvent{when: time.Now(), kind: "projects"})
+	}()
+}
+
+func startRefreshLoop(ctx context.Context, done <-chan struct{}, screen tcell.Screen, interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				postUIEventWithRetry(ctx, done, screen, &uiEvent{when: time.Now(), kind: "refresh"})
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
 func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 	if opts.LoadProjects == nil {
 		return nil, errors.New("LoadProjects is required")
 	}
 
-	projects, err := opts.LoadProjects(ctx)
 	state := &uiState{
-		projects:         projects,
-		loadError:        err,
 		focus:            "projects",
 		lastListFocus:    "projects",
 		proxyEnabled:     opts.ProxyEnabled,
@@ -196,6 +260,7 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 		previewCache:     map[string]string{},
 		previewError:     map[string]string{},
 		previewLoading:   map[string]bool{},
+		loadingProjects:  true,
 		statusHeight:     1,
 	}
 
@@ -208,10 +273,19 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 	}
 	defer screen.Fini()
 
+	loadCtx, cancelLoad := context.WithCancel(ctx)
+	defer cancelLoad()
+
 	done := make(chan struct{})
 	defer close(done)
 
 	updateCh := make(chan updateEvent, 2)
+	projectLoadCh := make(chan projectLoadEvent, 1)
+	previewCh := make(chan previewEvent, 8)
+	refreshStarted := false
+
+	startProjectLoad(loadCtx, done, screen, opts.LoadProjects, projectLoadCh)
+
 	if opts.CheckUpdate != nil {
 		state.updateChecking = true
 		go func() {
@@ -222,9 +296,9 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 				case updateCh <- updateEvent{checking: true}:
 				default:
 				}
-				screen.PostEvent(&uiEvent{when: time.Now(), kind: "update"})
+				postUIEventWithRetry(loadCtx, done, screen, &uiEvent{when: time.Now(), kind: "update"})
 
-				st := opts.CheckUpdate(ctx)
+				st := opts.CheckUpdate(loadCtx)
 				ev := updateEvent{checking: false, status: &st}
 				select {
 				case updateCh <- ev:
@@ -232,33 +306,13 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 					<-updateCh
 					updateCh <- ev
 				}
-				screen.PostEvent(&uiEvent{when: time.Now(), kind: "update"})
+				postUIEventWithRetry(loadCtx, done, screen, &uiEvent{when: time.Now(), kind: "update"})
 
 				select {
 				case <-ticker.C:
 				case <-done:
 					return
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-	}
-
-	previewCh := make(chan previewEvent, 8)
-
-	if opts.RefreshInterval > 0 {
-		interval := opts.RefreshInterval
-		go func() {
-			ticker := time.NewTicker(interval)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					screen.PostEvent(&uiEvent{when: time.Now(), kind: "refresh"})
-				case <-done:
-					return
-				case <-ctx.Done():
+				case <-loadCtx.Done():
 					return
 				}
 			}
@@ -266,12 +320,15 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 	}
 
 	go func() {
-		<-ctx.Done()
-		screen.PostEvent(&uiEvent{when: time.Now(), kind: "quit"})
+		select {
+		case <-ctx.Done():
+			postUIEventWithRetry(ctx, done, screen, &uiEvent{when: time.Now(), kind: "quit"})
+		case <-done:
+		}
 	}()
 
 	for {
-		if err := draw(screen, state, opts, previewCh); err != nil {
+		if err := draw(loadCtx, done, screen, state, opts, previewCh); err != nil {
 			return nil, err
 		}
 		ev := screen.PollEvent()
@@ -281,6 +338,24 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 			switch tev.kind {
 			case "quit":
 				return nil, ctx.Err()
+			case "projects":
+				for {
+					select {
+					case ev := <-projectLoadCh:
+						state.loadingProjects = false
+						state.projects = ev.projects
+						state.loadError = ev.err
+						state.projectState = listState{}
+						state.sessionState = listState{}
+						state.previewState = previewState{}
+					default:
+						if !refreshStarted {
+							startRefreshLoop(loadCtx, done, screen, opts.RefreshInterval)
+							refreshStarted = true
+						}
+						goto nextEvent
+					}
+				}
 			case "update":
 				for {
 					select {
@@ -298,7 +373,7 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 									state.updateErrorTimer.Stop()
 								}
 								state.updateErrorTimer = time.AfterFunc(time.Until(until), func() {
-									screen.PostEvent(&uiEvent{when: time.Now(), kind: "update"})
+									postUIEventWithRetry(loadCtx, done, screen, &uiEvent{when: time.Now(), kind: "update"})
 								})
 							} else {
 								state.updateErrorUntil = time.Time{}
@@ -313,7 +388,9 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 					}
 				}
 			case "refresh":
-				refreshStatePreserveSelection(ctx, state, opts)
+				if !state.loadingProjects {
+					refreshStatePreserveSelection(loadCtx, state, opts)
+				}
 			case "preview":
 				for {
 					select {
@@ -338,7 +415,7 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 			screen.Sync()
 			continue
 		case *tcell.EventKey:
-			selection, err := handleKey(ctx, screen, state, opts, tev)
+			selection, err := handleKey(loadCtx, screen, state, opts, tev)
 			if err != nil {
 				if errors.Is(err, errQuit) {
 					return nil, nil
@@ -429,6 +506,9 @@ func handleKey(
 		state.yoloMode = nextMode
 		return nil, nil
 	case tcell.KeyCtrlR:
+		if state.loadingProjects {
+			return nil, nil
+		}
 		refreshState(ctx, state, opts)
 		return nil, nil
 	case tcell.KeyCtrlC:
@@ -440,6 +520,9 @@ func handleKey(
 		case 'q', 'Q':
 			return nil, errQuit
 		case 'r', 'R':
+			if state.loadingProjects {
+				return nil, nil
+			}
 			refreshState(ctx, state, opts)
 			return nil, nil
 		case '/':
@@ -561,6 +644,9 @@ func handleKey(
 	}
 
 	if ev.Key() == tcell.KeyCtrlN {
+		if state.loadingProjects {
+			return nil, nil
+		}
 		if cwd := newSessionCwd(selectedProject, opts.DefaultCwd); cwd != "" {
 			return &Selection{Project: selectedProject, Cwd: cwd, UseProxy: state.proxyEnabled, YoloMode: state.yoloMode}, nil
 		}
@@ -574,6 +660,9 @@ func handleKey(
 		}
 	}
 	if enterPressed {
+		if state.loadingProjects {
+			return nil, nil
+		}
 		if selectedSession != nil {
 			return &Selection{Project: selectedProject, Session: *selectedSession, UseProxy: state.proxyEnabled, YoloMode: state.yoloMode}, nil
 		}
@@ -693,7 +782,7 @@ func computeLayout(screen tcell.Screen, statusHeight int) layout {
 	}
 }
 
-func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- previewEvent) error {
+func draw(ctx context.Context, done <-chan struct{}, screen tcell.Screen, state *uiState, opts Options, previewCh chan<- previewEvent) error {
 	screen.Clear()
 
 	projects := buildProjectItems(state.projects, opts.DefaultCwd)
@@ -724,7 +813,7 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 	}
 
 	if selectedSession != nil || selectedSubagent != nil {
-		ensurePreview(screen, state, opts, selectedSession, selectedSubagent, previewCh)
+		ensurePreview(ctx, done, screen, state, opts, selectedSession, selectedSubagent, previewCh)
 	}
 
 	proxyLabel := "Proxy mode (Ctrl+P): off"
@@ -781,6 +870,13 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 			statusSegments = append(statusSegments, statusSegment{text: "  n/N: next/prev", style: baseStatusStyle})
 		}
 	}
+	if state.loadingProjects {
+		statusSegments = []statusSegment{
+			{text: "Loading history...  " + proxyLabel + "  ", style: baseStatusStyle},
+		}
+		statusSegments = appendYoloSegment(statusSegments)
+		statusSegments = append(statusSegments, statusSegment{text: "  q: quit", style: baseStatusStyle})
+	}
 	if state.loadError != nil {
 		if len(state.projects) == 0 && newSessionPath != "" {
 			statusSegments = []statusSegment{
@@ -798,8 +894,9 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 		state.updateStatus.Error != "" &&
 		!state.updateErrorUntil.IsZero() &&
 		time.Now().Before(state.updateErrorUntil)
+	displayUpdateError := showUpdateError && !state.loadingProjects
 
-	if state.loadError == nil && showUpdateError && state.inputMode == "" {
+	if state.loadError == nil && displayUpdateError && state.inputMode == "" {
 		statusSegments = []statusSegment{{text: fmt.Sprintf("Update check failed: %s", state.updateStatus.Error), style: baseStatusStyle}}
 	}
 
@@ -815,7 +912,7 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 			} else {
 				updateRight = updateRight + " latest"
 			}
-		} else if showUpdateError {
+		} else if displayUpdateError {
 			updateRight = updateRight + " update failed"
 			updateBold = true
 		}
@@ -881,6 +978,9 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 	} else if state.previewSearch != "" {
 		previewFilter = state.previewSearch
 	}
+	if previewText == "" && state.loadingProjects {
+		previewText = "Loading history..."
+	}
 	drawBox(screen, layoutMode.preview, "Preview", state.focus == "preview", previewFilter)
 	lines := buildPreviewLines(selectedProject, selectedSession, selectedSubagent, selectedIsNew, state, previewText, opts)
 	lines = buildWrappedLines(lines, max(0, layoutMode.preview.w-2))
@@ -917,6 +1017,8 @@ func draw(screen tcell.Screen, state *uiState, opts Options, previewCh chan<- pr
 }
 
 func ensurePreview(
+	ctx context.Context,
+	done <-chan struct{},
 	screen tcell.Screen,
 	state *uiState,
 	opts Options,
@@ -949,7 +1051,7 @@ func ensurePreview(
 			text = claudehistory.FormatMessages(msgs, 400)
 		}
 		previewCh <- previewEvent{cacheKey: key, text: text, err: err}
-		screen.PostEvent(&uiEvent{when: time.Now(), kind: "preview"})
+		postUIEventWithRetry(ctx, done, screen, &uiEvent{when: time.Now(), kind: "preview"})
 	}(cacheKey, filePath, maxMessages)
 }
 
