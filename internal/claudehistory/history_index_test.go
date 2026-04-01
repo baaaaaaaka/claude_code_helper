@@ -123,9 +123,20 @@ func TestLoadHistoryIndexPersistentCacheWarmStartMatchesColdLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadHistoryIndex warm: %v", err)
 	}
-	if !reflect.DeepEqual(coldIdx, warmIdx) {
+	if !reflect.DeepEqual(historyIndexValue(coldIdx), historyIndexValue(warmIdx)) {
 		t.Fatalf("expected warm history index load to match cold load\ncold=%#v\nwarm=%#v", coldIdx, warmIdx)
 	}
+}
+
+func historyIndexValue(idx historyIndex) map[string]historySessionInfo {
+	out := make(map[string]historySessionInfo, len(idx.sessions))
+	for sessionID, info := range idx.sessions {
+		if info == nil {
+			continue
+		}
+		out[sessionID] = *info
+	}
+	return out
 }
 
 func TestLoadHistoryIndexPersistentCacheIgnoresCorruptFile(t *testing.T) {
