@@ -351,6 +351,411 @@ func TestRunUpgradeClaudePrewarmsInstalledLocationFromInstallerOutput(t *testing
 	}
 }
 
+func TestRunUpgradeClaudeRetriesWhenInstallerLeavesUnpatchableVersionFile(t *testing.T) {
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	prevProbe := probeInstalledClaudeVersionFn
+	installerCalls := 0
+	probeInstalledClaudeVersionFn = func(ctx context.Context, path string) (bool, error) {
+		return installerCalls >= 2, nil
+	}
+	t.Cleanup(func() {
+		probeInstalledClaudeVersionFn = prevProbe
+	})
+
+	store := newTempStore(t)
+	disabled := false
+	if err := store.Save(config.Config{
+		Version:      config.CurrentVersion,
+		ProxyEnabled: &disabled,
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	dir := t.TempDir()
+	versionPath := filepath.Join(dir, "home", ".local", "share", "claude", "versions", "2.1.90")
+	if err := os.MkdirAll(filepath.Dir(versionPath), 0o755); err != nil {
+		t.Fatalf("mkdir version dir: %v", err)
+	}
+	original := []byte{0x7f, 'E', 'L', 'F', 0x02, 0x01, 0x01, 0x00, 'n', 'o', 't', '-', 'c', 'l', 'a', 'u', 'd', 'e'}
+	if err := os.WriteFile(versionPath, original, 0o700); err != nil {
+		t.Fatalf("write original version file: %v", err)
+	}
+
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin dir: %v", err)
+	}
+	launcherPath := filepath.Join(binDir, "claude")
+	if err := os.Symlink(versionPath, launcherPath); err != nil {
+		t.Fatalf("symlink launcher: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	retryMovedStaleVersionAside := false
+	prevInstaller := runClaudeInstallerFn
+	runClaudeInstallerFn = func(ctx context.Context, out io.Writer, opts installProxyOptions) error {
+		installerCalls++
+		if installerCalls == 2 {
+			if _, err := os.Stat(versionPath); os.IsNotExist(err) {
+				retryMovedStaleVersionAside = true
+			} else if err != nil {
+				t.Fatalf("stat version path before retry install: %v", err)
+			}
+			repaired := []byte{0x7f, 'E', 'L', 'F', 0x02, 0x01, 0x01, 0x00, 'r', 'e', 'p', 'a', 'i', 'r', 'e', 'd'}
+			if err := os.WriteFile(versionPath, repaired, 0o700); err != nil {
+				t.Fatalf("write repaired version file: %v", err)
+			}
+		}
+		_, _ = fmt.Fprintf(out, "Version: 2.1.90\nLocation: %s\n", launcherPath)
+		return nil
+	}
+	t.Cleanup(func() {
+		runClaudeInstallerFn = prevInstaller
+	})
+
+	prepareCalled := false
+	waitCalled := false
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		prepareCalled = true
+		if len(cmdArgs) != 1 || !config.PathsEqual(cmdArgs[0], launcherPath) {
+			t.Fatalf("unexpected patch prep args: %v", cmdArgs)
+		}
+		return &patchOutcome{}, nil
+	}
+	waitPatchedExecutableReadyFn = func(ctx context.Context, outcome *patchOutcome) error {
+		waitCalled = true
+		return nil
+	}
+
+	root := &rootOptions{
+		configPath: store.Path(),
+		exePatch: exePatchOptions{
+			enabledFlag:    true,
+			policySettings: true,
+		},
+	}
+	cmd := newUpgradeClaudeCmd(root)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetContext(context.Background())
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("upgrade-claude error: %v", err)
+	}
+	if installerCalls != 2 {
+		t.Fatalf("expected installer retry, got %d calls", installerCalls)
+	}
+	if !retryMovedStaleVersionAside {
+		t.Fatalf("expected stale version file to be moved aside before retry")
+	}
+	if !prepareCalled {
+		t.Fatalf("expected patched claude prewarm after retry")
+	}
+	if !waitCalled {
+		t.Fatalf("expected readiness wait after retry")
+	}
+
+	got, err := os.ReadFile(versionPath)
+	if err != nil {
+		t.Fatalf("read repaired version file: %v", err)
+	}
+	if string(got) == string(original) {
+		t.Fatalf("expected repaired version file to differ from original")
+	}
+}
+
+func TestRunUpgradeClaudeRestoresVersionFileWhenRetryStillBroken(t *testing.T) {
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	store := newTempStore(t)
+	disabled := false
+	if err := store.Save(config.Config{
+		Version:      config.CurrentVersion,
+		ProxyEnabled: &disabled,
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	dir := t.TempDir()
+	versionsDir := filepath.Join(dir, "home", ".local", "share", "claude", "versions")
+	versionPath := filepath.Join(versionsDir, "2.1.90")
+	if err := os.MkdirAll(filepath.Dir(versionPath), 0o755); err != nil {
+		t.Fatalf("mkdir version dir: %v", err)
+	}
+	original := []byte{0x7f, 'E', 'L', 'F', 0x02, 0x01, 0x01, 0x00, 'o', 'r', 'i', 'g', 'i', 'n', 'a', 'l'}
+	if err := os.WriteFile(versionPath, original, 0o700); err != nil {
+		t.Fatalf("write original version file: %v", err)
+	}
+
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin dir: %v", err)
+	}
+	launcherPath := filepath.Join(binDir, "claude")
+	if err := os.Symlink(versionPath, launcherPath); err != nil {
+		t.Fatalf("symlink launcher: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	installerCalls := 0
+	prevInstaller := runClaudeInstallerFn
+	runClaudeInstallerFn = func(ctx context.Context, out io.Writer, opts installProxyOptions) error {
+		installerCalls++
+		if installerCalls == 2 {
+			retryVersionPath := filepath.Join(versionsDir, "2.1.90-retry")
+			stillBroken := []byte{0x7f, 'E', 'L', 'F', 0x02, 0x01, 0x01, 0x00, 's', 't', 'i', 'l', 'l', '-', 'b', 'a', 'd'}
+			if err := os.WriteFile(retryVersionPath, stillBroken, 0o700); err != nil {
+				t.Fatalf("write broken retry version file: %v", err)
+			}
+			if err := os.Remove(launcherPath); err != nil {
+				t.Fatalf("remove launcher before repointing retry install: %v", err)
+			}
+			if err := os.Symlink(retryVersionPath, launcherPath); err != nil {
+				t.Fatalf("repoint launcher to retry version path: %v", err)
+			}
+		}
+		_, _ = fmt.Fprintf(out, "Version: 2.1.90\nLocation: %s\n", launcherPath)
+		return nil
+	}
+	t.Cleanup(func() {
+		runClaudeInstallerFn = prevInstaller
+	})
+
+	patchCalled := false
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		patchCalled = true
+		return &patchOutcome{}, nil
+	}
+
+	root := &rootOptions{
+		configPath: store.Path(),
+		exePatch: exePatchOptions{
+			enabledFlag:    true,
+			policySettings: true,
+		},
+	}
+	cmd := newUpgradeClaudeCmd(root)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetContext(context.Background())
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected upgrade-claude error when retry remains broken")
+	}
+	if !strings.Contains(err.Error(), "restored previous Claude version file") {
+		t.Fatalf("expected restore message, got: %v", err)
+	}
+	if installerCalls != 2 {
+		t.Fatalf("expected installer retry, got %d calls", installerCalls)
+	}
+	if patchCalled {
+		t.Fatalf("expected patch prep to be skipped after failed retry")
+	}
+
+	got, readErr := os.ReadFile(versionPath)
+	if readErr != nil {
+		t.Fatalf("read restored version file: %v", readErr)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("expected original version file to be restored, got %q", string(got))
+	}
+	resolvedLauncher, resolveErr := filepath.EvalSymlinks(launcherPath)
+	if resolveErr != nil {
+		t.Fatalf("resolve restored launcher: %v", resolveErr)
+	}
+	if !config.PathsEqual(resolvedLauncher, versionPath) {
+		t.Fatalf("expected launcher to be restored to %q, got %q", versionPath, resolvedLauncher)
+	}
+}
+
+func TestRunUpgradeClaudeDoesNotRetryWhenVersionProbeStillWorks(t *testing.T) {
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	prevProbe := probeInstalledClaudeVersionFn
+	probeInstalledClaudeVersionFn = func(ctx context.Context, path string) (bool, error) {
+		return true, nil
+	}
+	t.Cleanup(func() {
+		probeInstalledClaudeVersionFn = prevProbe
+	})
+
+	store := newTempStore(t)
+	disabled := false
+	if err := store.Save(config.Config{
+		Version:      config.CurrentVersion,
+		ProxyEnabled: &disabled,
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	dir := t.TempDir()
+	versionPath := filepath.Join(dir, "home", ".local", "share", "claude", "versions", "2.1.90")
+	if err := os.MkdirAll(filepath.Dir(versionPath), 0o755); err != nil {
+		t.Fatalf("mkdir version dir: %v", err)
+	}
+	unchanged := []byte{0x7f, 'E', 'L', 'F', 0x02, 0x01, 0x01, 0x00, 'n', 'o', 'p', 'a', 't', 'c', 'h'}
+	if err := os.WriteFile(versionPath, unchanged, 0o700); err != nil {
+		t.Fatalf("write unchanged version file: %v", err)
+	}
+
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin dir: %v", err)
+	}
+	launcherPath := filepath.Join(binDir, "claude")
+	if err := os.Symlink(versionPath, launcherPath); err != nil {
+		t.Fatalf("symlink launcher: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	installerCalls := 0
+	prevInstaller := runClaudeInstallerFn
+	runClaudeInstallerFn = func(ctx context.Context, out io.Writer, opts installProxyOptions) error {
+		installerCalls++
+		_, _ = fmt.Fprintf(out, "Version: 2.1.90\nLocation: %s\n", launcherPath)
+		return nil
+	}
+	t.Cleanup(func() {
+		runClaudeInstallerFn = prevInstaller
+	})
+
+	patchCalled := false
+	waitCalled := false
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		patchCalled = true
+		return &patchOutcome{}, nil
+	}
+	waitPatchedExecutableReadyFn = func(ctx context.Context, outcome *patchOutcome) error {
+		waitCalled = true
+		return nil
+	}
+
+	root := &rootOptions{
+		configPath: store.Path(),
+		exePatch: exePatchOptions{
+			enabledFlag:    true,
+			policySettings: true,
+		},
+	}
+	cmd := newUpgradeClaudeCmd(root)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetContext(context.Background())
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("upgrade-claude error: %v", err)
+	}
+	if installerCalls != 1 {
+		t.Fatalf("expected no retry, got %d installer calls", installerCalls)
+	}
+	if !patchCalled || !waitCalled {
+		t.Fatalf("expected normal patch prewarm flow to continue")
+	}
+}
+
+func TestRunUpgradeClaudeDoesNotRetryWhenGlibcCompatCanHandleProbe(t *testing.T) {
+	requireExePatchEnabled(t)
+	withExePatchTestHooks(t)
+
+	prevProbe := probeInstalledClaudeVersionFn
+	probeCalled := false
+	probeInstalledClaudeVersionFn = func(ctx context.Context, path string) (bool, error) {
+		probeCalled = true
+		return false, nil
+	}
+	t.Cleanup(func() {
+		probeInstalledClaudeVersionFn = prevProbe
+	})
+
+	prevGlibcHostEligible := glibcCompatHostEligibleFn
+	glibcCompatHostEligibleFn = func() bool { return true }
+	t.Cleanup(func() {
+		glibcCompatHostEligibleFn = prevGlibcHostEligible
+	})
+
+	store := newTempStore(t)
+	disabled := false
+	if err := store.Save(config.Config{
+		Version:      config.CurrentVersion,
+		ProxyEnabled: &disabled,
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	dir := t.TempDir()
+	versionPath := filepath.Join(dir, "home", ".local", "share", "claude", "versions", "2.1.90")
+	if err := os.MkdirAll(filepath.Dir(versionPath), 0o755); err != nil {
+		t.Fatalf("mkdir version dir: %v", err)
+	}
+	unchanged := []byte{0x7f, 'E', 'L', 'F', 0x02, 0x01, 0x01, 0x00, 'n', 'o', 'p', 'a', 't', 'c', 'h'}
+	if err := os.WriteFile(versionPath, unchanged, 0o700); err != nil {
+		t.Fatalf("write unchanged version file: %v", err)
+	}
+
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin dir: %v", err)
+	}
+	launcherPath := filepath.Join(binDir, "claude")
+	if err := os.Symlink(versionPath, launcherPath); err != nil {
+		t.Fatalf("symlink launcher: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	installerCalls := 0
+	prevInstaller := runClaudeInstallerFn
+	runClaudeInstallerFn = func(ctx context.Context, out io.Writer, opts installProxyOptions) error {
+		installerCalls++
+		_, _ = fmt.Fprintf(out, "Version: 2.1.90\nLocation: %s\n", launcherPath)
+		return nil
+	}
+	t.Cleanup(func() {
+		runClaudeInstallerFn = prevInstaller
+	})
+
+	patchCalled := false
+	waitCalled := false
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		patchCalled = true
+		return &patchOutcome{}, nil
+	}
+	waitPatchedExecutableReadyFn = func(ctx context.Context, outcome *patchOutcome) error {
+		waitCalled = true
+		return nil
+	}
+
+	root := &rootOptions{
+		configPath: store.Path(),
+		exePatch: exePatchOptions{
+			enabledFlag:    true,
+			policySettings: true,
+			glibcCompat:    true,
+		},
+	}
+	cmd := newUpgradeClaudeCmd(root)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetContext(context.Background())
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("upgrade-claude error: %v", err)
+	}
+	if installerCalls != 1 {
+		t.Fatalf("expected no retry when glibc compat can handle probe, got %d installer calls", installerCalls)
+	}
+	if probeCalled {
+		t.Fatalf("expected raw version probe to be skipped when glibc compat is configured")
+	}
+	if !patchCalled || !waitCalled {
+		t.Fatalf("expected normal patch prewarm flow to continue")
+	}
+}
+
 func TestRunUpgradeClaudeWithProxyUsesProxyEnv(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skip shell script test on windows")
@@ -612,6 +1017,218 @@ func TestRunUpgradeClaudeWithProfileFlag(t *testing.T) {
 	}
 }
 
+func TestSnapshotInstalledClaudeBinaryCapturesLauncherSymlinkState(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	dir := t.TempDir()
+	versionsDir := filepath.Join(dir, "versions")
+	versionPath := filepath.Join(versionsDir, "2.1.90")
+	if err := os.MkdirAll(versionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir versions dir: %v", err)
+	}
+	if err := os.WriteFile(versionPath, testNativeExecutableStubBytes(claudeInstallGOOS), 0o700); err != nil {
+		t.Fatalf("write version file: %v", err)
+	}
+
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin dir: %v", err)
+	}
+	launcherPath := filepath.Join(binDir, "claude")
+	relativeTarget, err := filepath.Rel(binDir, versionPath)
+	if err != nil {
+		t.Fatalf("build relative symlink target: %v", err)
+	}
+	if err := os.Symlink(relativeTarget, launcherPath); err != nil {
+		t.Fatalf("create launcher symlink: %v", err)
+	}
+
+	got, err := snapshotInstalledClaudeBinary(launcherPath)
+	if err != nil {
+		t.Fatalf("snapshotInstalledClaudeBinary error: %v", err)
+	}
+	wantSHA, err := hashFileSHA256(versionPath)
+	if err != nil {
+		t.Fatalf("hash version file: %v", err)
+	}
+	if !got.LauncherWasSymlink {
+		t.Fatalf("expected launcher symlink metadata to be captured")
+	}
+	if got.LauncherLinkTarget != relativeTarget {
+		t.Fatalf("expected raw launcher target %q, got %q", relativeTarget, got.LauncherLinkTarget)
+	}
+	if !config.PathsEqual(got.Path, launcherPath) {
+		t.Fatalf("expected launcher path %q, got %q", launcherPath, got.Path)
+	}
+	if !config.PathsEqual(got.ResolvedPath, versionPath) {
+		t.Fatalf("expected resolved path %q, got %q", versionPath, got.ResolvedPath)
+	}
+	if got.SHA256 != wantSHA {
+		t.Fatalf("expected sha %q, got %q", wantSHA, got.SHA256)
+	}
+}
+
+func TestRestoreInstalledClaudeLauncherRestoresOriginalSymlinkTarget(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	dir := t.TempDir()
+	versionsDir := filepath.Join(dir, "versions")
+	versionPath := filepath.Join(versionsDir, "2.1.90")
+	if err := os.MkdirAll(versionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir versions dir: %v", err)
+	}
+	if err := os.WriteFile(versionPath, testNativeExecutableStubBytes(claudeInstallGOOS), 0o700); err != nil {
+		t.Fatalf("write original version file: %v", err)
+	}
+
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin dir: %v", err)
+	}
+	launcherPath := filepath.Join(binDir, "claude")
+	originalTarget, err := filepath.Rel(binDir, versionPath)
+	if err != nil {
+		t.Fatalf("build original symlink target: %v", err)
+	}
+	if err := os.Symlink(originalTarget, launcherPath); err != nil {
+		t.Fatalf("create launcher symlink: %v", err)
+	}
+
+	snapshot, err := snapshotInstalledClaudeBinary(launcherPath)
+	if err != nil {
+		t.Fatalf("snapshotInstalledClaudeBinary error: %v", err)
+	}
+
+	retryVersionPath := filepath.Join(versionsDir, "2.1.90-retry")
+	if err := os.WriteFile(retryVersionPath, testNativeExecutableStubBytes(claudeInstallGOOS), 0o700); err != nil {
+		t.Fatalf("write retry version file: %v", err)
+	}
+	if err := os.Remove(launcherPath); err != nil {
+		t.Fatalf("remove launcher before repointing: %v", err)
+	}
+	retryTarget, err := filepath.Rel(binDir, retryVersionPath)
+	if err != nil {
+		t.Fatalf("build retry symlink target: %v", err)
+	}
+	if err := os.Symlink(retryTarget, launcherPath); err != nil {
+		t.Fatalf("repoint launcher symlink: %v", err)
+	}
+
+	if err := restoreInstalledClaudeLauncher(snapshot); err != nil {
+		t.Fatalf("restoreInstalledClaudeLauncher error: %v", err)
+	}
+
+	gotTarget, err := os.Readlink(launcherPath)
+	if err != nil {
+		t.Fatalf("read restored launcher target: %v", err)
+	}
+	if gotTarget != originalTarget {
+		t.Fatalf("expected restored raw target %q, got %q", originalTarget, gotTarget)
+	}
+	resolved, err := filepath.EvalSymlinks(launcherPath)
+	if err != nil {
+		t.Fatalf("resolve restored launcher: %v", err)
+	}
+	if !config.PathsEqual(resolved, versionPath) {
+		t.Fatalf("expected restored launcher to resolve to %q, got %q", versionPath, resolved)
+	}
+}
+
+func TestInstalledClaudeBinaryProblemSkipsProbeWhenGlibcCompatCanRepair(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	prevProbe := probeInstalledClaudeVersionFn
+	probeCalled := false
+	probeInstalledClaudeVersionFn = func(ctx context.Context, path string) (bool, error) {
+		probeCalled = true
+		return false, nil
+	}
+	t.Cleanup(func() {
+		probeInstalledClaudeVersionFn = prevProbe
+	})
+
+	prevGlibcHostEligible := glibcCompatHostEligibleFn
+	glibcCompatHostEligibleFn = func() bool { return true }
+	t.Cleanup(func() {
+		glibcCompatHostEligibleFn = prevGlibcHostEligible
+	})
+
+	dir := t.TempDir()
+	versionPath := filepath.Join(dir, "home", ".local", "share", "claude", "versions", "2.1.90")
+	if err := os.MkdirAll(filepath.Dir(versionPath), 0o755); err != nil {
+		t.Fatalf("mkdir version dir: %v", err)
+	}
+	if err := os.WriteFile(versionPath, testNativeExecutableStubBytes(claudeInstallGOOS), 0o700); err != nil {
+		t.Fatalf("write version file: %v", err)
+	}
+
+	problem, bad, err := installedClaudeBinaryProblem(context.Background(), installedClaudeBinaryState{
+		ResolvedPath: versionPath,
+	}, exePatchOptions{
+		enabledFlag:    true,
+		policySettings: true,
+		glibcCompat:    true,
+	})
+	if err != nil {
+		t.Fatalf("installedClaudeBinaryProblem error: %v", err)
+	}
+	if bad || problem != "" {
+		t.Fatalf("expected glibc compat to suppress reinstall, got bad=%v problem=%q", bad, problem)
+	}
+	if probeCalled {
+		t.Fatalf("expected raw version probe to be skipped when glibc compat can repair")
+	}
+}
+
+func TestInstalledClaudeBinaryProblemRequiresProbeWhenGlibcCompatUnavailable(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	prevProbe := probeInstalledClaudeVersionFn
+	probeCalled := false
+	probeInstalledClaudeVersionFn = func(ctx context.Context, path string) (bool, error) {
+		probeCalled = true
+		return false, nil
+	}
+	t.Cleanup(func() {
+		probeInstalledClaudeVersionFn = prevProbe
+	})
+
+	prevGlibcHostEligible := glibcCompatHostEligibleFn
+	glibcCompatHostEligibleFn = func() bool { return false }
+	t.Cleanup(func() {
+		glibcCompatHostEligibleFn = prevGlibcHostEligible
+	})
+
+	dir := t.TempDir()
+	versionPath := filepath.Join(dir, "home", ".local", "share", "claude", "versions", "2.1.90")
+	if err := os.MkdirAll(filepath.Dir(versionPath), 0o755); err != nil {
+		t.Fatalf("mkdir version dir: %v", err)
+	}
+	if err := os.WriteFile(versionPath, testNativeExecutableStubBytes(claudeInstallGOOS), 0o700); err != nil {
+		t.Fatalf("write version file: %v", err)
+	}
+
+	problem, bad, err := installedClaudeBinaryProblem(context.Background(), installedClaudeBinaryState{
+		ResolvedPath: versionPath,
+	}, exePatchOptions{
+		enabledFlag:    true,
+		policySettings: true,
+		glibcCompat:    true,
+	})
+	if err != nil {
+		t.Fatalf("installedClaudeBinaryProblem error: %v", err)
+	}
+	if !bad {
+		t.Fatalf("expected non-probeable binary to be considered broken when glibc compat is unavailable")
+	}
+	if !strings.Contains(problem, "probe failed") {
+		t.Fatalf("expected probe failure reason, got %q", problem)
+	}
+	if !probeCalled {
+		t.Fatalf("expected raw version probe to run when glibc compat is unavailable")
+	}
+}
+
 func TestInvalidateExePatchState(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skip on windows")
@@ -672,5 +1289,16 @@ func TestInvalidateExePatchState(t *testing.T) {
 		if entry.Path == resolvedClaude {
 			t.Fatalf("expected patch history entry to be removed, found: %+v", entry)
 		}
+	}
+}
+
+func testNativeExecutableStubBytes(goos string) []byte {
+	switch strings.ToLower(strings.TrimSpace(goos)) {
+	case "windows":
+		return []byte{'M', 'Z', 0x90, 0x00, 't', 'e', 's', 't'}
+	case "darwin":
+		return []byte{0xcf, 0xfa, 0xed, 0xfe, 't', 'e', 's', 't'}
+	default:
+		return []byte{0x7f, 'E', 'L', 'F', 0x02, 0x01, 0x01, 0x00, 't', 'e', 's', 't'}
 	}
 }
