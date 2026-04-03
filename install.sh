@@ -28,6 +28,51 @@ api_base="${CLAUDE_PROXY_API_BASE:-https://api.github.com}"
 release_base="${CLAUDE_PROXY_RELEASE_BASE:-https://github.com}"
 api_base="${api_base%/}"
 release_base="${release_base%/}"
+tmpdir=""
+install_dir_resolved="$install_dir"
+
+cleanup() {
+  if [ -n "${tmpdir:-}" ] && [ -d "$tmpdir" ]; then
+    rm -rf "$tmpdir"
+  fi
+}
+
+on_exit() {
+  code=$?
+  trap - EXIT
+  cleanup
+  if [ "$code" -ne 0 ]; then
+    echo >&2
+    echo "==================== INSTALL FAILED ====================" >&2
+    echo "claude-proxy install did not complete." >&2
+  fi
+  exit "$code"
+}
+
+print_success() {
+  echo
+  echo "==================== INSTALL SUCCESS ===================="
+  echo "Installed: $dst"
+  echo "Installed: $clp_dst"
+  echo "Run: \"$dst\" proxy doctor"
+  if [ -n "${CONFIG_WARNINGS:-}" ]; then
+    echo "Attention: automatic shell setup was incomplete."
+    old_ifs="$IFS"
+    IFS='
+'
+    for warning in $CONFIG_WARNINGS; do
+      [ -n "${warning:-}" ] || continue
+      echo "  - $warning"
+    done
+    IFS="$old_ifs"
+    echo "To use 'clp', add \"$install_dir_resolved\" to PATH manually, then open a new shell."
+  else
+    echo "Shell setup checked for PATH entries and alias 'clp'."
+    echo "If 'clp' is not found in this shell, open a new shell."
+  fi
+}
+
+trap 'on_exit' EXIT
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -87,19 +132,24 @@ http_get() {
   url="$1"
   out="$2"
   if have_cmd curl; then
-    curl -fsSL -o "$out" "$url"
-    return 0
+    if curl -fsSL -o "$out" "$url"; then
+      return 0
+    fi
   fi
   if have_cmd wget; then
-    wget -q -O "$out" "$url"
-    return 0
+    if wget -q -O "$out" "$url"; then
+      return 0
+    fi
   fi
-  echo "Missing downloader: need curl or wget" >&2
+  if ! have_cmd curl && ! have_cmd wget; then
+    echo "Missing downloader: need curl or wget" >&2
+  fi
   return 1
 }
 
 CONFIG_UPDATED=0
 SOURCE_FILES=""
+CONFIG_WARNINGS=""
 
 add_source_file() {
   file="$1"
@@ -120,6 +170,28 @@ $file"
   esac
 }
 
+record_config_warning() {
+  message="$1"
+  if [ -z "${message:-}" ]; then
+    return 0
+  fi
+  case "
+$CONFIG_WARNINGS
+" in
+    *"
+$message
+"*) ;;
+    *)
+      if [ -n "$CONFIG_WARNINGS" ]; then
+        CONFIG_WARNINGS="$CONFIG_WARNINGS
+$message"
+      else
+        CONFIG_WARNINGS="$message"
+      fi
+      ;;
+  esac
+}
+
 ensure_line() {
   file="$1"
   line="$2"
@@ -127,16 +199,25 @@ ensure_line() {
     return 0
   fi
   dir="$(dirname "$file")"
-  if [ -n "${dir:-}" ]; then
-    mkdir -p "$dir" 2>/dev/null || true
+  if [ -n "${dir:-}" ] && [ ! -d "$dir" ]; then
+    if ! mkdir -p "$dir" 2>/dev/null; then
+      record_config_warning "Could not create shell config directory: $dir"
+      return 0
+    fi
   fi
   if [ ! -f "$file" ]; then
-    : > "$file"
+    if ! ( : > "$file" ) 2>/dev/null; then
+      record_config_warning "Could not create shell config file: $file"
+      return 0
+    fi
   fi
   if ! grep -Fqx "$line" "$file" 2>/dev/null; then
-    printf "\n%s\n" "$line" >> "$file"
-    CONFIG_UPDATED=1
-    add_source_file "$file"
+    if ( printf "\n%s\n" "$line" >> "$file" ) 2>/dev/null; then
+      CONFIG_UPDATED=1
+      add_source_file "$file"
+    else
+      record_config_warning "Could not update shell config: $file"
+    fi
   fi
 }
 
@@ -148,16 +229,25 @@ ensure_block() {
     return 0
   fi
   dir="$(dirname "$file")"
-  if [ -n "${dir:-}" ]; then
-    mkdir -p "$dir" 2>/dev/null || true
+  if [ -n "${dir:-}" ] && [ ! -d "$dir" ]; then
+    if ! mkdir -p "$dir" 2>/dev/null; then
+      record_config_warning "Could not create shell config directory: $dir"
+      return 0
+    fi
   fi
   if [ ! -f "$file" ]; then
-    : > "$file"
+    if ! ( : > "$file" ) 2>/dev/null; then
+      record_config_warning "Could not create shell config file: $file"
+      return 0
+    fi
   fi
   if ! grep -Fqx "$marker" "$file" 2>/dev/null; then
-    printf "\n%s\n" "$block" >> "$file"
-    CONFIG_UPDATED=1
-    add_source_file "$file"
+    if ( printf "\n%s\n" "$block" >> "$file" ) 2>/dev/null; then
+      CONFIG_UPDATED=1
+      add_source_file "$file"
+    else
+      record_config_warning "Could not update shell config: $file"
+    fi
   fi
 }
 
@@ -272,10 +362,10 @@ source_config_file() {
 
 update_shell_config() {
   if [ -z "${HOME:-}" ]; then
+    record_config_warning "HOME is not set; skipped automatic shell setup."
     return 0
   fi
 
-  install_dir_resolved="$install_dir"
   if [ -d "$install_dir" ]; then
     resolved="$(cd "$install_dir" 2>/dev/null && pwd -P || true)"
     if [ -n "${resolved:-}" ]; then
@@ -460,7 +550,6 @@ get_latest_tag() {
 }
 
 tmpdir="$(mktemp -d 2>/dev/null || mktemp -d -t claude-proxy)"
-trap 'rm -rf "$tmpdir"' EXIT INT TERM
 
 if [ "$version" = "latest" ] || [ -z "${version:-}" ]; then
   version="$(get_latest_tag "$tmpdir/latest.json")"
@@ -499,6 +588,13 @@ fi
 mkdir -p "$install_dir"
 chmod 0755 "$bin_tmp" 2>/dev/null || true
 
+if [ -d "$install_dir" ]; then
+  resolved="$(cd "$install_dir" 2>/dev/null && pwd -P || true)"
+  if [ -n "${resolved:-}" ]; then
+    install_dir_resolved="$resolved"
+  fi
+fi
+
 dst="$install_dir/claude-proxy"
 mv -f "$bin_tmp" "$dst"
 
@@ -511,7 +607,5 @@ if [ ! -f "$clp_dst" ]; then
 fi
 chmod 0755 "$clp_dst" 2>/dev/null || true
 
-echo "Installed: $dst"
 update_shell_config
-echo "Run: $dst proxy doctor"
-echo "Shell config checked for PATH entries and alias 'clp' (reload attempted)"
+print_success

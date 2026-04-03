@@ -42,6 +42,9 @@ func TestInstallShChecksumMismatch(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected checksum mismatch error")
 	}
+	if !strings.Contains(string(output), "INSTALL FAILED") {
+		t.Fatalf("expected install failure banner, got %s", string(output))
+	}
 	if !strings.Contains(string(output), "Checksum mismatch") {
 		t.Fatalf("expected checksum mismatch output, got %s", string(output))
 	}
@@ -74,6 +77,40 @@ func TestInstallShUsesProfileWhenShellMissing(t *testing.T) {
 	}
 	if !strings.Contains(text, "alias clp='claude-proxy'") {
 		t.Fatalf("missing clp alias in profile")
+	}
+}
+
+func TestInstallShShellSetupFailureStillReportsSuccess(t *testing.T) {
+	run := newInstallShRun(t, false, false)
+	profilePath := filepath.Join(run.homeDir, ".profile")
+	if err := os.WriteFile(profilePath, []byte("# locked profile\n"), 0o400); err != nil {
+		t.Fatalf("write readonly profile: %v", err)
+	}
+
+	cmd := exec.Command("sh", run.scriptPath)
+	cmd.Dir = run.repoRoot
+	cmd.Env = run.env
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("install.sh failed unexpectedly: %v\n%s", err, string(output))
+	}
+	if !strings.Contains(string(output), "INSTALL SUCCESS") {
+		t.Fatalf("expected install success banner, got %s", string(output))
+	}
+	if strings.Contains(string(output), "INSTALL FAILED") {
+		t.Fatalf("did not expect install failure banner, got %s", string(output))
+	}
+	if !strings.Contains(string(output), "Attention: automatic shell setup was incomplete.") {
+		t.Fatalf("expected shell setup warning, got %s", string(output))
+	}
+	if !strings.Contains(string(output), "Could not update shell config: "+profilePath) {
+		t.Fatalf("expected profile warning, got %s", string(output))
+	}
+	if !strings.Contains(string(output), "To use 'clp', add \""+expectedInstallDir(t, run.installDir)+"\" to PATH manually, then open a new shell.") {
+		t.Fatalf("expected manual PATH guidance, got %s", string(output))
+	}
+	if _, err := os.Stat(filepath.Join(run.installDir, "clp")); err != nil {
+		t.Fatalf("expected clp to be installed: %v", err)
 	}
 }
 
@@ -355,6 +392,26 @@ func TestInstallShRejectsUnknownArg(t *testing.T) {
 	if exitErr.ExitCode() != 2 {
 		t.Fatalf("expected exit code 2, got %d\n%s", exitErr.ExitCode(), string(output))
 	}
+	if !strings.Contains(string(output), "INSTALL FAILED") {
+		t.Fatalf("expected install failure banner, got %s", string(output))
+	}
+}
+
+func TestInstallShHelpDoesNotPrintStatusBanner(t *testing.T) {
+	repoRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	scriptPath := filepath.Join(repoRoot, "install.sh")
+	cmd := exec.Command("sh", scriptPath, "--help")
+	cmd.Dir = repoRoot
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("help failed: %v\n%s", err, string(output))
+	}
+	if strings.Contains(string(output), "INSTALL SUCCESS") || strings.Contains(string(output), "INSTALL FAILED") {
+		t.Fatalf("did not expect status banner in help output, got %s", string(output))
+	}
 }
 
 func runInstallSh(t *testing.T, apiFail bool, pathAlreadySet bool) {
@@ -413,6 +470,12 @@ func runInstallSh(t *testing.T, apiFail bool, pathAlreadySet bool) {
 	if err != nil {
 		t.Fatalf("install.sh failed: %v\n%s", err, string(output))
 	}
+	if !strings.Contains(string(output), "INSTALL SUCCESS") {
+		t.Fatalf("expected install success banner, got %s", string(output))
+	}
+	if strings.Contains(string(output), "sed: can't read") {
+		t.Fatalf("unexpected redirect fallback noise in output, got %s", string(output))
+	}
 
 	installed := filepath.Join(installDir, "claude-proxy")
 	got, err := os.ReadFile(installed)
@@ -430,6 +493,18 @@ func runInstallSh(t *testing.T, apiFail bool, pathAlreadySet bool) {
 	}
 	if string(clpData) != string(assetData) {
 		t.Fatalf("clp payload mismatch")
+	}
+	if !strings.Contains(string(output), "Installed: "+installed) {
+		t.Fatalf("expected installed binary path in output, got %s", string(output))
+	}
+	if !strings.Contains(string(output), "Installed: "+clpPath) {
+		t.Fatalf("expected clp path in output, got %s", string(output))
+	}
+	if !strings.Contains(string(output), "Shell setup checked for PATH entries and alias 'clp'.") {
+		t.Fatalf("expected shell setup status in output, got %s", string(output))
+	}
+	if !strings.Contains(string(output), "If 'clp' is not found in this shell, open a new shell.") {
+		t.Fatalf("expected shell hint in output, got %s", string(output))
 	}
 
 	configPath := expectedBashConfigPath(homeDir)

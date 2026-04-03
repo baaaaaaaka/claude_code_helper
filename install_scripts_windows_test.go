@@ -28,6 +28,65 @@ func TestInstallPs1SkipsPathUpdateWhenAlreadySet(t *testing.T) {
 	runInstallPs1(t, false, true)
 }
 
+func TestInstallPs1ChecksumMismatch(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("powershell"); err != nil {
+		t.Skip("powershell not available")
+	}
+
+	repoRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	scriptPath := filepath.Join(repoRoot, "install.ps1")
+
+	repo := "owner/name"
+	tag := "v1.2.3"
+	verNoV := strings.TrimPrefix(tag, "v")
+	asset := fmt.Sprintf("claude-proxy_%s_windows_amd64.exe", verNoV)
+	assetData := []byte("fake-binary")
+	badChecksum := sha256.Sum256([]byte("different-binary"))
+
+	server := newInstallServer(t, repo, tag, asset, assetData, false, badChecksum)
+	defer server.Close()
+
+	homeDir := t.TempDir()
+	installDir := t.TempDir()
+	tempDir := t.TempDir()
+	profilePath := filepath.Join(t.TempDir(), "profile.ps1")
+	basePath := os.Getenv("SystemRoot")
+	if basePath == "" {
+		basePath = `C:\Windows`
+	}
+	pathValue := filepath.Join(basePath, "System32")
+	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath,
+		"-Repo", repo,
+		"-Version", "latest",
+		"-InstallDir", installDir,
+	)
+	cmd.Env = append([]string{}, filterEnvWithoutKey(os.Environ(), "Path")...)
+	cmd.Env = append(cmd.Env,
+		"CLAUDE_PROXY_API_BASE="+server.URL,
+		"CLAUDE_PROXY_RELEASE_BASE="+server.URL,
+		"CLAUDE_PROXY_PROFILE_PATH="+profilePath,
+		"CLAUDE_PROXY_SKIP_PATH_UPDATE=1",
+		"USERPROFILE="+homeDir,
+		"HOME="+homeDir,
+		"Path="+pathValue,
+		"TEMP="+tempDir,
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected checksum mismatch error")
+	}
+	if !strings.Contains(string(output), "INSTALL FAILED") {
+		t.Fatalf("expected install failure banner, got %s", string(output))
+	}
+	if !strings.Contains(string(output), "Checksum mismatch") {
+		t.Fatalf("expected checksum mismatch output, got %s", string(output))
+	}
+}
+
 func TestInstallPs1RemovesLegacyAlias(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("powershell"); err != nil {
@@ -244,6 +303,27 @@ func runInstallPs1(t *testing.T, apiFail bool, pathAlreadySet bool) {
 	}
 	installDirResolved := resolvePathViaPowerShell(t, cmd.Env, installDir)
 	claudeBinDirResolved := resolvePathViaPowerShell(t, cmd.Env, claudeBinDir)
+	if !strings.Contains(string(output), "INSTALL SUCCESS") {
+		t.Fatalf("expected install success banner, got %s", string(output))
+	}
+	if !strings.Contains(strings.ToLower(string(output)), strings.ToLower("Installed: "+filepath.Join(installDirResolved, "claude-proxy.exe"))) {
+		t.Fatalf("expected installed exe path in output, got %s", string(output))
+	}
+	if !strings.Contains(strings.ToLower(string(output)), strings.ToLower("Installed: "+filepath.Join(installDirResolved, "clp.cmd"))) {
+		t.Fatalf("expected clp.cmd path in output, got %s", string(output))
+	}
+	if !strings.Contains(strings.ToLower(string(output)), strings.ToLower("Installed: "+filepath.Join(installDirResolved, "clp"))) {
+		t.Fatalf("expected clp shim path in output, got %s", string(output))
+	}
+	if !strings.Contains(strings.ToLower(string(output)), strings.ToLower("Run: & \""+filepath.Join(installDirResolved, "claude-proxy.exe")+"\" proxy doctor")) {
+		t.Fatalf("expected doctor command in output, got %s", string(output))
+	}
+	if !strings.Contains(string(output), "PowerShell profile checked for PATH entries and a 'clp' command override:") {
+		t.Fatalf("expected profile status in output, got %s", string(output))
+	}
+	if !strings.Contains(string(output), "If 'clp' is not found in this shell, open a new shell.") {
+		t.Fatalf("expected shell hint in output, got %s", string(output))
+	}
 
 	installed := filepath.Join(installDir, "claude-proxy.exe")
 	got, err := os.ReadFile(installed)
