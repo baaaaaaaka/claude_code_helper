@@ -38,6 +38,31 @@ function Add-ShellSetupWarning([string]$message) {
   $script:ShellSetupWarnings.Add($message)
 }
 
+function Get-SHA256Hex([string]$path) {
+  $fileHashCmd = Get-Command Get-FileHash -ErrorAction SilentlyContinue
+  if ($fileHashCmd) {
+    return (Get-FileHash -Algorithm SHA256 -Path $path).Hash.ToLowerInvariant()
+  }
+
+  $stream = [System.IO.File]::OpenRead($path)
+  try {
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      $hashBytes = $sha256.ComputeHash($stream)
+    } finally {
+      if ($sha256) {
+        $sha256.Dispose()
+      }
+    }
+  } finally {
+    if ($stream) {
+      $stream.Dispose()
+    }
+  }
+
+  return ([System.BitConverter]::ToString($hashBytes) -replace "-", "").ToLowerInvariant()
+}
+
 function Ensure-ProfileLine([string]$path, [string]$line) {
   if ([string]::IsNullOrWhiteSpace($path) -or [string]::IsNullOrWhiteSpace($line)) {
     return $false
@@ -347,7 +372,7 @@ try {
     $expected = $null
   }
   if ($expected) {
-    $actual = (Get-FileHash -Algorithm SHA256 -Path $tmp).Hash.ToLowerInvariant()
+    $actual = Get-SHA256Hex -path $tmp
     if ($expected.ToLowerInvariant() -ne $actual) {
       throw "Checksum mismatch for $asset (expected $expected, got $actual)"
     }
