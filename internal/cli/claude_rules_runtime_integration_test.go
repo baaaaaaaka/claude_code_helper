@@ -341,7 +341,7 @@ func prepareRuntimeAuth(t *testing.T, configDir string) {
 		return
 	}
 
-	t.Fatalf("runtime auth unavailable: set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, or ensure %s exists", authSrc)
+	t.Skipf("runtime auth unavailable: set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, or ensure %s exists", authSrc)
 }
 
 func writeRuntimeSettingsIfPresent(t *testing.T, path string, spec runtimeSettingsSpec) {
