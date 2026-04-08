@@ -15,16 +15,24 @@ import (
 )
 
 func writeClaudeHelpStub(t *testing.T) string {
+	return writeClaudeHelpStubWithOutput(t, "--permission-mode")
+}
+
+func writeClaudeHelpStubWithOutput(t *testing.T, output string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("skip shell script execution on windows")
 	}
 	path := filepath.Join(t.TempDir(), "claude")
-	body := "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then\n  echo \"--permission-mode\"\nfi\nexit 0\n"
+	body := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo \"Claude Code 1.2.3\"\n  exit 0\nfi\nif [ \"$1\" = \"--help\" ]; then\n  printf '%s\\n' " + shellSingleQuote(output) + "\n  exit 0\nfi\nexit 0\n"
 	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
 		t.Fatalf("write claude stub: %v", err)
 	}
 	return path
+}
+
+func shellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
 func cloneArgs(args []string) []string {
@@ -81,8 +89,9 @@ func TestBuildClaudeResumeCommandAddsYoloArgs(t *testing.T) {
 	dir := t.TempDir()
 	session := claudehistory.Session{SessionID: "abc"}
 	project := claudehistory.Project{Path: dir}
+	claudePath := writeClaudeHelpStub(t)
 
-	_, args, _, err := buildClaudeResumeCommand("/bin/claude", session, project, config.YoloModeBypass)
+	_, args, _, err := buildClaudeResumeCommand(claudePath, session, project, config.YoloModeBypass)
 	if err != nil {
 		t.Fatalf("buildClaudeResumeCommand error: %v", err)
 	}
@@ -95,6 +104,20 @@ func TestBuildClaudeResumeCommandAddsYoloArgs(t *testing.T) {
 			t.Fatalf("expected args %v, got %v", want, args)
 		}
 	}
+}
+
+func TestBuildClaudeResumeCommandAddsDangerousSkipWhenSupported(t *testing.T) {
+	dir := t.TempDir()
+	session := claudehistory.Session{SessionID: "abc"}
+	project := claudehistory.Project{Path: dir}
+	claudePath := writeClaudeHelpStubWithOutput(t, "--dangerously-skip-permissions\n--permission-mode")
+
+	_, args, _, err := buildClaudeResumeCommand(claudePath, session, project, config.YoloModeBypass)
+	if err != nil {
+		t.Fatalf("buildClaudeResumeCommand error: %v", err)
+	}
+	want := []string{"--dangerously-skip-permissions", "--permission-mode", "bypassPermissions", "--resume", "abc"}
+	requireArgsEqual(t, args, want)
 }
 
 func TestBuildClaudeResumeCommandKeepsRulesModeArgFree(t *testing.T) {
@@ -295,7 +318,7 @@ func TestRunClaudeNewSessionAddsYoloArgs(t *testing.T) {
 	dir := t.TempDir()
 	outFile := filepath.Join(t.TempDir(), "args.txt")
 	scriptPath := filepath.Join(t.TempDir(), "claude")
-	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\n", outFile)
+	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo \"Claude Code 1.2.3\"\n  exit 0\nfi\nif [ \"$1\" = \"--help\" ]; then\n  echo \"--permission-mode\"\n  exit 0\nfi\nprintf '%%s\\n' \"$@\" > %q\n", outFile)
 	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
 		t.Fatalf("write script: %v", err)
 	}
@@ -334,6 +357,84 @@ func TestRunClaudeNewSessionAddsYoloArgs(t *testing.T) {
 		if lines[i] != want[i] {
 			t.Fatalf("expected args %v, got %v", want, lines)
 		}
+	}
+}
+
+func TestRunClaudeSessionDisablesBypassWhenNoFlagsExposed(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	claudePath := writeClaudeHelpStubWithOutput(t, "usage: claude")
+	store := newTempStore(t)
+	root := &rootOptions{configPath: store.Path()}
+	projectDir := t.TempDir()
+	session := claudehistory.Session{SessionID: "sess-1", ProjectPath: projectDir}
+	project := claudehistory.Project{Path: projectDir}
+
+	var patchCalls [][]string
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		patchCalls = append(patchCalls, cloneArgs(cmdArgs))
+		return nil, nil
+	}
+	runTargetWithFallbackWithOptionsFn = func(ctx context.Context, cmdArgs []string, proxyURL string, healthCheck func() error, patchOutcome *patchOutcome, fatalCh <-chan error, opts runTargetOptions) error {
+		requireArgsEqual(t, cmdArgs, []string{claudePath, "--resume", "sess-1"})
+		if opts.YoloEnabled {
+			t.Fatalf("expected bypass mode to be disabled when no yolo flags are exposed")
+		}
+		return nil
+	}
+
+	if err := runClaudeSession(context.Background(), root, store, nil, nil, session, project, claudePath, "", false, config.YoloModeBypass, io.Discard); err != nil {
+		t.Fatalf("runClaudeSession error: %v", err)
+	}
+	if len(patchCalls) != 1 {
+		t.Fatalf("expected 1 patch call, got %d", len(patchCalls))
+	}
+	requireArgsEqual(t, patchCalls[0], []string{claudePath, "--resume", "sess-1"})
+
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if got := resolveYoloMode(cfg); got != config.YoloModeOff {
+		t.Fatalf("expected yolo mode off after bypass disable, got %s", got)
+	}
+}
+
+func TestRunClaudeNewSessionDisablesBypassWhenNoFlagsExposed(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	claudePath := writeClaudeHelpStubWithOutput(t, "usage: claude")
+	store := newTempStore(t)
+	root := &rootOptions{configPath: store.Path()}
+	projectDir := t.TempDir()
+
+	var patchCalls [][]string
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		patchCalls = append(patchCalls, cloneArgs(cmdArgs))
+		return nil, nil
+	}
+	runTargetWithFallbackWithOptionsFn = func(ctx context.Context, cmdArgs []string, proxyURL string, healthCheck func() error, patchOutcome *patchOutcome, fatalCh <-chan error, opts runTargetOptions) error {
+		requireArgsEqual(t, cmdArgs, []string{claudePath})
+		if opts.YoloEnabled {
+			t.Fatalf("expected bypass mode to be disabled when no yolo flags are exposed")
+		}
+		return nil
+	}
+
+	if err := runClaudeNewSession(context.Background(), root, store, nil, nil, projectDir, claudePath, "", false, config.YoloModeBypass, io.Discard); err != nil {
+		t.Fatalf("runClaudeNewSession error: %v", err)
+	}
+	if len(patchCalls) != 1 {
+		t.Fatalf("expected 1 patch call, got %d", len(patchCalls))
+	}
+	requireArgsEqual(t, patchCalls[0], []string{claudePath})
+
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if got := resolveYoloMode(cfg); got != config.YoloModeOff {
+		t.Fatalf("expected yolo mode off after bypass disable, got %s", got)
 	}
 }
 

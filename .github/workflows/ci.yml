@@ -187,7 +187,7 @@ jobs:
         env:
           CLAUDE_PATCH_TEST: "1"
         run: |
-          go test ./internal/cli -run '^TestClaudePatch(Integration(|RetriesKnownFailure)|RulesIntegration)$' -count=1
+          go test ./internal/cli -run '^TestClaudePatch(Integration(|RetriesKnownFailure)|RulesIntegration|BypassRuntimeIntegration)$' -count=1
 
       - name: Claude patch smoke (Linux)
         if: runner.os == 'Linux'
@@ -195,7 +195,18 @@ jobs:
         env:
           CLAUDE_PATCH_TEST: "1"
         run: |
-          go test ./internal/cli -run '^TestClaudePatch(Integration(|RetriesKnownFailure)|RulesIntegration)$' -count=1
+          go test ./internal/cli -run '^TestClaudePatch(Integration(|RetriesKnownFailure)|RulesIntegration|BypassRuntimeIntegration)$' -count=1
+
+      - name: Claude patch proxy bypass smoke (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        timeout-minutes: 20
+        env:
+          CLAUDE_PATCH_PROXY_RUNTIME_TEST: "1"
+          CLAUDE_PATCH_PROXY_PROFILE: "ci-ssh"
+        run: |
+          set -euo pipefail
+          go test ./internal/cli -run '^TestClaudePatchBypassRuntimeIntegrationWithProxy$' -count=1
 
       - name: Claude patch smoke (Windows)
         if: runner.os == 'Windows'
@@ -203,7 +214,7 @@ jobs:
         env:
           CLAUDE_PATCH_TEST: "1"
         run: |
-          go test ./internal/cli -run '^TestClaudePatch(Integration(|RetriesKnownFailure)|RulesIntegration)$' -count=1
+          go test ./internal/cli -run '^TestClaudePatch(Integration(|RetriesKnownFailure)|RulesIntegration|BypassRuntimeIntegration)$' -count=1
 
       - name: Claude install+launch smoke (Linux/macOS)
         if: runner.os != 'Windows'

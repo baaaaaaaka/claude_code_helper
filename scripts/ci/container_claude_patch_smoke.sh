@@ -66,4 +66,4 @@ echo "Running Claude patch+TUI smoke in container for ${CLAUDE_PATCH_VERSION}"
 
 install_deps
 
-"$test_bin" -test.run '^TestClaudePatch(Integration(|RetriesKnownFailure)|RulesIntegration)$' -test.count=1 -test.v
+"$test_bin" -test.run '^TestClaudePatch(Integration(|RetriesKnownFailure)|RulesIntegration|BypassRuntimeIntegration)$' -test.count=1 -test.v

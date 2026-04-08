@@ -16,6 +16,8 @@ import (
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
 )
 
+var probeYoloBypassArgsFn = probeYoloBypassArgs
+
 func currentProxyVersion() string {
 	v := strings.TrimSpace(version)
 	if v == "" {
@@ -62,18 +64,108 @@ func extractVersion(output string) string {
 }
 
 func supportsYoloFlag(path string) bool {
+	args, err := probeYoloBypassArgsFn(path)
+	return err == nil && len(args) > 0
+}
+
+func yoloBypassArgs(path string) []string {
+	args, _ := probeYoloBypassArgsFn(path)
+	return args
+}
+
+func probeYoloBypassArgs(path string) ([]string, error) {
 	out, err := runClaudeProbe(path, "--help")
-	if strings.Contains(out, "--permission-mode") {
-		return true
-	}
 	if err != nil {
-		return true
+		return nil, err
 	}
-	lower := strings.ToLower(out)
-	if strings.Contains(lower, "usage") || strings.Contains(lower, "claude") {
-		return false
+	hasDangerousSkip := strings.Contains(out, "--dangerously-skip-permissions")
+	hasPermissionMode := strings.Contains(out, "--permission-mode")
+
+	switch {
+	case hasDangerousSkip && hasPermissionMode:
+		return []string{"--dangerously-skip-permissions", "--permission-mode", "bypassPermissions"}, nil
+	case hasDangerousSkip:
+		return []string{"--dangerously-skip-permissions"}, nil
+	case hasPermissionMode:
+		return []string{"--permission-mode", "bypassPermissions"}, nil
 	}
-	return true
+	return nil, nil
+}
+
+func resolveYoloBypassArgs(path string, configPath string) []string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	resolvedPath := resolveYoloProbePath(path)
+	proxyVersion := currentProxyVersionFn()
+	claudeVersion := strings.TrimSpace(resolveClaudeVersionFn(resolvedPath))
+	if args, ok := lookupCachedYoloBypassArgs(configPath, proxyVersion, claudeVersion, resolvedPath); ok {
+		return append([]string(nil), args...)
+	}
+	args, err := probeYoloBypassArgsFn(resolvedPath)
+	if err == nil && configPath != "" {
+		_ = rememberYoloBypassArgs(configPath, proxyVersion, claudeVersion, resolvedPath, args)
+	}
+	return append([]string(nil), args...)
+}
+
+func resolveYoloProbePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	exePath, err := execLookPathFn(path)
+	if err != nil {
+		return path
+	}
+	resolvedPath, err := resolveExecutablePathFn(exePath)
+	if err != nil {
+		return exePath
+	}
+	resolvedPath = strings.TrimSpace(resolvedPath)
+	if resolvedPath == "" {
+		return exePath
+	}
+	return resolvedPath
+}
+
+func lookupCachedYoloBypassArgs(configPath string, proxyVersion string, claudeVersion string, claudePath string) ([]string, bool) {
+	configPath = strings.TrimSpace(configPath)
+	if configPath == "" {
+		return nil, false
+	}
+	store, err := config.NewStore(configPath)
+	if err != nil {
+		return nil, false
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		return nil, false
+	}
+	return cfg.FindYoloBypassProbe(proxyVersion, claudeVersion, claudePath)
+}
+
+func rememberYoloBypassArgs(configPath string, proxyVersion string, claudeVersion string, claudePath string, args []string) error {
+	configPath = strings.TrimSpace(configPath)
+	if configPath == "" {
+		return nil
+	}
+	store, err := config.NewStore(configPath)
+	if err != nil {
+		return err
+	}
+	return store.Update(func(cfg *config.Config) error {
+		cfg.PurgeStaleYoloBypassProbes(proxyVersion)
+		cfg.UpsertYoloBypassProbe(config.YoloBypassProbe{
+			ProxyVersion:  strings.TrimSpace(proxyVersion),
+			ClaudeVersion: strings.TrimSpace(claudeVersion),
+			ClaudePath:    strings.TrimSpace(claudePath),
+			Args:          append([]string(nil), args...),
+			ProbedAt:      time.Now(),
+		})
+		return nil
+	})
 }
 
 func hasYoloBypassPermissionsArg(cmdArgs []string) bool {
@@ -82,6 +174,9 @@ func hasYoloBypassPermissionsArg(cmdArgs []string) bool {
 	}
 	for i := 1; i < len(cmdArgs); i++ {
 		arg := strings.TrimSpace(cmdArgs[i])
+		if arg == "--dangerously-skip-permissions" {
+			return true
+		}
 		if arg == "--permission-mode" {
 			if i+1 < len(cmdArgs) && strings.TrimSpace(cmdArgs[i+1]) == "bypassPermissions" {
 				return true
@@ -231,8 +326,12 @@ func isYoloFailure(err error, output string) bool {
 	if err == nil {
 		return false
 	}
+	if looksLikeYoloRuntimeFailure(output) {
+		return true
+	}
 	lower := strings.ToLower(output)
-	if !strings.Contains(lower, "permission-mode") {
+	if !strings.Contains(lower, "permission-mode") &&
+		!strings.Contains(lower, "dangerously-skip-permissions") {
 		return false
 	}
 	if strings.Contains(lower, "unknown") || strings.Contains(lower, "unrecognized") {
@@ -242,6 +341,17 @@ func isYoloFailure(err error, output string) bool {
 		return true
 	}
 	if strings.Contains(lower, "flag provided but not defined") {
+		return true
+	}
+	return false
+}
+
+func looksLikeYoloRuntimeFailure(output string) bool {
+	lower := strings.ToLower(output)
+	if strings.Contains(lower, "tool permission request failed") {
+		return true
+	}
+	if strings.Contains(lower, "stream closed") && strings.Contains(lower, "permission") {
 		return true
 	}
 	return false
@@ -258,10 +368,18 @@ func stripYoloArgs(cmdArgs []string) []string {
 			skipNext = false
 			continue
 		}
+		if cmdArgs[i] == "--dangerously-skip-permissions" ||
+			cmdArgs[i] == "--allow-dangerously-skip-permissions" {
+			continue
+		}
 		if cmdArgs[i] == "--permission-mode" {
 			if i+1 < len(cmdArgs) && cmdArgs[i+1] == "bypassPermissions" {
 				skipNext = true
 			}
+			continue
+		}
+		if strings.HasPrefix(cmdArgs[i], "--permission-mode=") &&
+			strings.TrimPrefix(cmdArgs[i], "--permission-mode=") == "bypassPermissions" {
 			continue
 		}
 		out = append(out, cmdArgs[i])

@@ -82,6 +82,7 @@ type runtimeResultEvent struct {
 }
 
 type runtimePromptResult struct {
+	InitPermissionMode string
 	PermissionRequests []runtimePermissionRequest
 	ToolUses           []runtimeToolUse
 	ToolResults        []runtimeToolResult
@@ -456,10 +457,22 @@ func runClaudePromptCase(
 	projectDir string,
 	tc runtimePromptCase,
 ) runtimePromptResult {
+	return runClaudePromptCaseWithExtraArgs(t, ctx, binaryPath, outcome, configDir, projectDir, nil, tc)
+}
+
+func runClaudePromptCaseWithExtraArgs(
+	t *testing.T,
+	ctx context.Context,
+	binaryPath string,
+	outcome *patchOutcome,
+	configDir string,
+	projectDir string,
+	extraArgs []string,
+	tc runtimePromptCase,
+) runtimePromptResult {
 	t.Helper()
 
-	args := commandArgsForOutcome(outcome, []string{
-		binaryPath,
+	baseArgs := []string{
 		"--print",
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
@@ -469,7 +482,12 @@ func runClaudePromptCase(
 		"--setting-sources", "user,project,local",
 		"--append-system-prompt", runtimeRuleSystemPrompt,
 		"--max-budget-usd", "0.15",
-	})
+	}
+	launchArgs := make([]string, 0, 1+len(extraArgs)+len(baseArgs))
+	launchArgs = append(launchArgs, binaryPath)
+	launchArgs = append(launchArgs, extraArgs...)
+	launchArgs = append(launchArgs, baseArgs...)
+	args := commandArgsForOutcome(outcome, launchArgs)
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = projectDir
 	cmd.Env = runtimeCommandEnv(configDir)
@@ -549,6 +567,17 @@ func runClaudePromptCase(
 		}
 
 		switch envelope.Type {
+		case "system":
+			var event struct {
+				Subtype        string `json:"subtype"`
+				PermissionMode string `json:"permissionMode"`
+			}
+			if err := json.Unmarshal([]byte(line), &event); err != nil {
+				continue
+			}
+			if event.Subtype == "init" {
+				result.InitPermissionMode = strings.TrimSpace(event.PermissionMode)
+			}
 		case "control_request":
 			var req struct {
 				RequestID string `json:"request_id"`

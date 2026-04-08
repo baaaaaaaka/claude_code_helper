@@ -40,6 +40,12 @@ func withExePatchTestHooks(t *testing.T) {
 	prevRunWithProfileOptions := runWithProfileOptionsFn
 	prevRunTargetWithFallback := runTargetWithFallbackWithOptionsFn
 	prevReleasePatchPrepMemory := releasePatchPrepMemoryFn
+	prevProbeYoloBypassArgs := probeYoloBypassArgsFn
+	prevPrepareTTYRelay := prepareTTYRelayFn
+	prevStartTTYCaptureSession := startTTYCaptureSessionFn
+	prevTTYRelayIsTerminal := ttyRelayIsTerminalFn
+	prevTTYRelayMakeRaw := ttyRelayMakeRawFn
+	prevTTYRelayRestore := ttyRelayRestoreFn
 	t.Cleanup(func() {
 		execLookPathFn = prevLookPath
 		resolveExecutablePathFn = prevResolvePath
@@ -64,6 +70,12 @@ func withExePatchTestHooks(t *testing.T) {
 		runWithProfileOptionsFn = prevRunWithProfileOptions
 		runTargetWithFallbackWithOptionsFn = prevRunTargetWithFallback
 		releasePatchPrepMemoryFn = prevReleasePatchPrepMemory
+		probeYoloBypassArgsFn = prevProbeYoloBypassArgs
+		prepareTTYRelayFn = prevPrepareTTYRelay
+		startTTYCaptureSessionFn = prevStartTTYCaptureSession
+		ttyRelayIsTerminalFn = prevTTYRelayIsTerminal
+		ttyRelayMakeRawFn = prevTTYRelayMakeRaw
+		ttyRelayRestoreFn = prevTTYRelayRestore
 	})
 }
 

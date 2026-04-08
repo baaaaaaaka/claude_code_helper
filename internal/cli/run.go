@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -257,6 +259,7 @@ type runTargetOptions struct {
 	UseProxy bool
 	// PreserveTTY keeps stdout/stderr attached to the terminal for interactive CLIs.
 	PreserveTTY        bool
+	CaptureTTYOutput   bool
 	YoloEnabled        bool
 	OnYoloFallback     func() error
 	OnYoloRetryPrepare func([]string) (*patchOutcome, error)
@@ -338,6 +341,37 @@ func (b *limitedBuffer) String() string {
 	return string(b.buf)
 }
 
+type synchronizedLimitedBuffer struct {
+	mu  sync.Mutex
+	buf []byte
+	max int
+}
+
+func (b *synchronizedLimitedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.max <= 0 || len(p) == 0 {
+		return len(p), nil
+	}
+	if len(p) >= b.max {
+		b.buf = append(b.buf[:0], p[len(p)-b.max:]...)
+		return len(p), nil
+	}
+	if len(b.buf)+len(p) > b.max {
+		overflow := len(b.buf) + len(p) - b.max
+		b.buf = append(b.buf[overflow:], p...)
+		return len(p), nil
+	}
+	b.buf = append(b.buf, p...)
+	return len(p), nil
+}
+
+func (b *synchronizedLimitedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(b.buf)
+}
+
 func runTargetWithFallback(
 	ctx context.Context,
 	cmdArgs []string,
@@ -366,17 +400,24 @@ func runTargetWithFallbackWithOptions(
 	patchChecked := false
 	for {
 		attempt++
-		stdoutBuf := &limitedBuffer{max: maxOutputCaptureBytes}
-		stderrBuf := &limitedBuffer{max: maxOutputCaptureBytes}
+		stdoutBuf := &synchronizedLimitedBuffer{max: maxOutputCaptureBytes}
+		stderrBuf := &synchronizedLimitedBuffer{max: maxOutputCaptureBytes}
 		launchArgs := commandArgsForOutcome(patchOutcome, cmdArgs)
-		err := runTargetOnceWithOptions(ctx, launchArgs, proxyURL, healthCheck, fatalCh, stdoutBuf, stderrBuf, opts)
+		attemptOpts := opts
+		if attemptOpts.PreserveTTY && (attemptOpts.YoloEnabled || (patchOutcome != nil && patchOutcome.RollbackOnStartupFailure)) {
+			attemptOpts.CaptureTTYOutput = true
+		}
+		err := runTargetOnceWithOptions(ctx, launchArgs, proxyURL, healthCheck, fatalCh, stdoutBuf, stderrBuf, attemptOpts)
 		if err == nil {
 			return nil
 		}
 		out := stdoutBuf.String() + stderrBuf.String()
 		if opts.YoloEnabled && !yoloRetried && isYoloFailure(err, out) {
 			yoloRetried = true
-			nextArgs := stripYoloArgs(cmdArgs)
+			nextArgs := prepareYoloRetryArgs(cmdArgs, isYoloRuntimeFailure(err))
+			if isYoloRuntimeFailure(err) {
+				_, _ = fmt.Fprintln(os.Stderr, "yolo: bypass permission mode failed at runtime; retrying without bypass")
+			}
 			if opts.OnYoloFallback != nil {
 				_ = opts.OnYoloFallback()
 			}
@@ -437,16 +478,24 @@ func runTargetOnceWithOptions(
 	stderrBuf io.Writer,
 	opts runTargetOptions,
 ) error {
-	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
-	if opts.Cwd != "" {
-		cmd.Dir = opts.Cwd
-	}
 	envVars := os.Environ()
 	if opts.UseProxy {
 		envVars = env.WithProxy(envVars, proxyURL)
 	}
 	if len(opts.ExtraEnv) > 0 {
 		envVars = append(envVars, opts.ExtraEnv...)
+	}
+
+	if opts.PreserveTTY && opts.CaptureTTYOutput {
+		err := runTargetOnceWithCapturedTTYOutput(ctx, cmdArgs, envVars, healthCheck, fatalCh, stdoutBuf, stderrBuf, opts)
+		if err == nil || !errors.Is(err, errTTYCaptureUnavailable) {
+			return err
+		}
+	}
+
+	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
+	if opts.Cwd != "" {
+		cmd.Dir = opts.Cwd
 	}
 	cmd.Env = envVars
 	cmd.Stdin = os.Stdin
@@ -505,6 +554,20 @@ func runTargetOnceWithOptions(
 			failures = 0
 		}
 	}
+}
+
+func prepareYoloRetryArgs(cmdArgs []string, runtimeFailure bool) []string {
+	nextArgs := stripYoloArgs(cmdArgs)
+	if !runtimeFailure {
+		return nextArgs
+	}
+	if len(nextArgs) != 1 {
+		return nextArgs
+	}
+	if !isClaudeExecutable(nextArgs[0], nextArgs[0]) {
+		return nextArgs
+	}
+	return append(nextArgs, "--continue")
 }
 
 func isPatchedBinaryFailure(err error, output string) bool {

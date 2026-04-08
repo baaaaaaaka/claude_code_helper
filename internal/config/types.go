@@ -14,13 +14,14 @@ const (
 )
 
 type Config struct {
-	Version       int            `json:"version"`
-	ProxyEnabled  *bool          `json:"proxyEnabled,omitempty"`
-	YoloEnabled   *bool          `json:"yoloEnabled,omitempty"`
-	YoloMode      *string        `json:"yoloMode,omitempty"`
-	Profiles      []Profile      `json:"profiles"`
-	Instances     []Instance     `json:"instances"`
-	PatchFailures []PatchFailure `json:"patchFailures,omitempty"`
+	Version          int               `json:"version"`
+	ProxyEnabled     *bool             `json:"proxyEnabled,omitempty"`
+	YoloEnabled      *bool             `json:"yoloEnabled,omitempty"`
+	YoloMode         *string           `json:"yoloMode,omitempty"`
+	Profiles         []Profile         `json:"profiles"`
+	Instances        []Instance        `json:"instances"`
+	PatchFailures    []PatchFailure    `json:"patchFailures,omitempty"`
+	YoloBypassProbes []YoloBypassProbe `json:"yoloBypassProbes,omitempty"`
 }
 
 type PatchFailure struct {
@@ -31,6 +32,14 @@ type PatchFailure struct {
 	ClaudeSHA256  string    `json:"claudeSha256,omitempty"`
 	FailedAt      time.Time `json:"failedAt"`
 	Reason        string    `json:"reason,omitempty"`
+}
+
+type YoloBypassProbe struct {
+	ProxyVersion  string    `json:"proxyVersion"`
+	ClaudeVersion string    `json:"claudeVersion,omitempty"`
+	ClaudePath    string    `json:"claudePath,omitempty"`
+	Args          []string  `json:"args,omitempty"`
+	ProbedAt      time.Time `json:"probedAt"`
 }
 
 type Profile struct {

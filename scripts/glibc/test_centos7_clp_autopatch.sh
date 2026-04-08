@@ -264,7 +264,7 @@ EOF
     CLAUDE_PATCH_SKIP_PRECHECK=1 \
     CLAUDE_PATCH_VERSION="$CLAUDE_VERSION" \
     CLAUDE_PATCH_BUCKET="$CLAUDE_BUCKET" \
-    "$CLAUDE_CLI_TEST_BIN" -test.run '^TestClaudePatch(Integration(|RetriesKnownFailure)|RulesIntegration)$' -test.count=1 -test.v
+    "$CLAUDE_CLI_TEST_BIN" -test.run '^TestClaudePatch(Integration(|RetriesKnownFailure)|RulesIntegration|BypassRuntimeIntegration)$' -test.count=1 -test.v
 
   echo "PASS: claude-proxy used a host-local glibc compat ${compat_mode} path on CentOS 7."
 }

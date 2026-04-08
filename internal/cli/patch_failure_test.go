@@ -26,14 +26,66 @@ func TestSupportsYoloFlag(t *testing.T) {
 		t.Fatalf("expected support when flag appears in help output")
 	}
 
+	pathWithDanger := writeProbeScript(t, dir, "has-danger", "#!/bin/sh\necho \"--dangerously-skip-permissions\"; exit 0\n")
+	if !supportsYoloFlag(pathWithDanger) {
+		t.Fatalf("expected support when dangerous skip flag appears in help output")
+	}
+
 	pathWithUsage := writeProbeScript(t, dir, "usage", "#!/bin/sh\necho \"usage: claude\"; exit 0\n")
 	if supportsYoloFlag(pathWithUsage) {
 		t.Fatalf("expected no support for plain usage output")
 	}
 
 	pathWithError := writeProbeScript(t, dir, "error", "#!/bin/sh\nexit 1\n")
-	if !supportsYoloFlag(pathWithError) {
-		t.Fatalf("expected support when help command fails")
+	if supportsYoloFlag(pathWithError) {
+		t.Fatalf("expected no support when help command fails")
+	}
+}
+
+func TestYoloBypassArgs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script test on windows")
+	}
+	dir := t.TempDir()
+
+	cases := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{
+			name: "legacy permission mode only",
+			body: "#!/bin/sh\necho \"--permission-mode\"; exit 0\n",
+			want: []string{"--permission-mode", "bypassPermissions"},
+		},
+		{
+			name: "dangerous skip only",
+			body: "#!/bin/sh\necho \"--dangerously-skip-permissions\"; exit 0\n",
+			want: []string{"--dangerously-skip-permissions"},
+		},
+		{
+			name: "both flags",
+			body: "#!/bin/sh\necho \"--dangerously-skip-permissions\\n--permission-mode\"; exit 0\n",
+			want: []string{"--dangerously-skip-permissions", "--permission-mode", "bypassPermissions"},
+		},
+		{
+			name: "probe error fails closed",
+			body: "#!/bin/sh\nexit 1\n",
+			want: nil,
+		},
+	}
+
+	for _, tc := range cases {
+		path := writeProbeScript(t, dir, tc.name, tc.body)
+		got := yoloBypassArgs(path)
+		if len(got) != len(tc.want) {
+			t.Fatalf("%s: expected %v, got %v", tc.name, tc.want, got)
+		}
+		for i := range tc.want {
+			if got[i] != tc.want[i] {
+				t.Fatalf("%s: expected %v, got %v", tc.name, tc.want, got)
+			}
+		}
 	}
 }
 
@@ -204,10 +256,13 @@ func TestIsYoloFailure(t *testing.T) {
 	}{
 		{"", false},
 		{"unknown flag: --permission-mode", true},
+		{"unknown flag: --dangerously-skip-permissions", true},
 		{"permission-mode unknown", true},
+		{"dangerously-skip-permissions unknown", true},
 		{"permission-mode not supported", true},
 		{"permission-mode invalid", true},
 		{"permission-mode flag provided but not defined", true},
+		{"Tool permission request failed: Error: Stream closed", true},
 		{"unrelated error", false},
 	}
 	for _, tc := range cases {
@@ -222,7 +277,15 @@ func TestIsYoloFailure(t *testing.T) {
 }
 
 func TestStripYoloArgs(t *testing.T) {
-	in := []string{"claude", "--permission-mode", "bypassPermissions", "--resume", "abc"}
+	in := []string{
+		"claude",
+		"--dangerously-skip-permissions",
+		"--allow-dangerously-skip-permissions",
+		"--permission-mode",
+		"bypassPermissions",
+		"--resume",
+		"abc",
+	}
 	out := stripYoloArgs(in)
 	want := []string{"claude", "--resume", "abc"}
 	if len(out) != len(want) {
@@ -249,6 +312,11 @@ func TestHasYoloBypassPermissionsArg(t *testing.T) {
 		{
 			name:    "split args",
 			cmdArgs: []string{"claude", "--permission-mode", "bypassPermissions", "--resume", "abc"},
+			want:    true,
+		},
+		{
+			name:    "dangerous skip",
+			cmdArgs: []string{"claude", "--dangerously-skip-permissions", "--resume", "abc"},
 			want:    true,
 		},
 		{
@@ -325,6 +393,135 @@ func TestRunClaudeProbeArgsAndOutcome(t *testing.T) {
 	}
 	if out != "--shim\n--help\n" {
 		t.Fatalf("unexpected probe outcome output: %q", out)
+	}
+}
+
+func TestResolveYoloBypassArgsUsesCachedProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script test on windows")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "claude")
+	body := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--version\" ]; then\n" +
+		"  echo \"Claude Code 9.9.9\"\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"if [ \"$1\" = \"--help\" ]; then\n" +
+		"  echo \"--dangerously-skip-permissions\"\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"exit 1\n"
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+		t.Fatalf("write probe script: %v", err)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	got := resolveYoloBypassArgs(path, configPath)
+	want := []string{"--dangerously-skip-permissions"}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+
+	body = "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--version\" ]; then\n" +
+		"  echo \"Claude Code 9.9.9\"\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"exit 1\n"
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+		t.Fatalf("rewrite probe script: %v", err)
+	}
+
+	got = resolveYoloBypassArgs(path, configPath)
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("expected cached args %v, got %v", want, got)
+	}
+}
+
+func TestResolveYoloBypassArgsDoesNotCacheProbeFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script test on windows")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "claude")
+	body := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--version\" ]; then\n" +
+		"  echo \"Claude Code 9.9.9\"\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"exit 1\n"
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+		t.Fatalf("write failing probe script: %v", err)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if got := resolveYoloBypassArgs(path, configPath); got != nil {
+		t.Fatalf("expected nil args after probe failure, got %v", got)
+	}
+
+	body = "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--version\" ]; then\n" +
+		"  echo \"Claude Code 9.9.9\"\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"if [ \"$1\" = \"--help\" ]; then\n" +
+		"  echo \"--dangerously-skip-permissions\"\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"exit 1\n"
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+		t.Fatalf("rewrite probe script: %v", err)
+	}
+
+	got := resolveYoloBypassArgs(path, configPath)
+	want := []string{"--dangerously-skip-permissions"}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("expected reprobed args %v after transient failure, got %v", want, got)
+	}
+}
+
+func TestResolveYoloBypassArgsCachesSuccessfulUnsupportedProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script test on windows")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "claude")
+	body := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--version\" ]; then\n" +
+		"  echo \"Claude Code 9.9.9\"\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"if [ \"$1\" = \"--help\" ]; then\n" +
+		"  echo \"usage: claude\"\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"exit 1\n"
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+		t.Fatalf("write unsupported probe script: %v", err)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if got := resolveYoloBypassArgs(path, configPath); got != nil {
+		t.Fatalf("expected nil args for unsupported probe, got %v", got)
+	}
+
+	body = "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--version\" ]; then\n" +
+		"  echo \"Claude Code 9.9.9\"\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"if [ \"$1\" = \"--help\" ]; then\n" +
+		"  echo \"--dangerously-skip-permissions\"\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"exit 1\n"
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+		t.Fatalf("rewrite probe script: %v", err)
+	}
+
+	if got := resolveYoloBypassArgs(path, configPath); got != nil {
+		t.Fatalf("expected cached unsupported result to suppress reprobe, got %v", got)
 	}
 }
 

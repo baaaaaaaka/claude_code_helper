@@ -118,6 +118,75 @@ func (c *Config) PurgeStalePatchFailures(currentVersion string) bool {
 	return true
 }
 
+func (c Config) FindYoloBypassProbe(proxyVersion, claudeVersion, claudePath string) ([]string, bool) {
+	proxyVersion = strings.TrimSpace(proxyVersion)
+	claudeVersion = strings.TrimSpace(claudeVersion)
+	claudePath = strings.TrimSpace(claudePath)
+	if proxyVersion == "" {
+		return nil, false
+	}
+	if claudeVersion != "" {
+		for _, entry := range c.YoloBypassProbes {
+			if strings.TrimSpace(entry.ProxyVersion) != proxyVersion {
+				continue
+			}
+			if strings.TrimSpace(entry.ClaudeVersion) != claudeVersion {
+				continue
+			}
+			return append([]string(nil), entry.Args...), true
+		}
+		return nil, false
+	}
+	if claudePath == "" {
+		return nil, false
+	}
+	for _, entry := range c.YoloBypassProbes {
+		if strings.TrimSpace(entry.ProxyVersion) != proxyVersion {
+			continue
+		}
+		if strings.TrimSpace(entry.ClaudeVersion) != "" {
+			continue
+		}
+		if strings.TrimSpace(entry.ClaudePath) != claudePath {
+			continue
+		}
+		return append([]string(nil), entry.Args...), true
+	}
+	return nil, false
+}
+
+func (c *Config) UpsertYoloBypassProbe(entry YoloBypassProbe) {
+	for i := range c.YoloBypassProbes {
+		if sameYoloBypassProbeKey(c.YoloBypassProbes[i], entry) {
+			c.YoloBypassProbes[i] = cloneYoloBypassProbe(entry)
+			return
+		}
+	}
+	c.YoloBypassProbes = append(c.YoloBypassProbes, cloneYoloBypassProbe(entry))
+}
+
+func (c *Config) PurgeStaleYoloBypassProbes(currentVersion string) bool {
+	currentVersion = strings.TrimSpace(currentVersion)
+	if currentVersion == "" {
+		return false
+	}
+	n := 0
+	for _, entry := range c.YoloBypassProbes {
+		if strings.TrimSpace(entry.ProxyVersion) == currentVersion {
+			c.YoloBypassProbes[n] = entry
+			n++
+		}
+	}
+	if n == len(c.YoloBypassProbes) {
+		return false
+	}
+	for i := n; i < len(c.YoloBypassProbes); i++ {
+		c.YoloBypassProbes[i] = YoloBypassProbe{}
+	}
+	c.YoloBypassProbes = c.YoloBypassProbes[:n]
+	return true
+}
+
 func samePatchFailureKey(a, b PatchFailure) bool {
 	aHostID := strings.TrimSpace(a.HostID)
 	bHostID := strings.TrimSpace(b.HostID)
@@ -137,4 +206,24 @@ func samePatchFailureKey(a, b PatchFailure) bool {
 		return strings.TrimSpace(a.ClaudePath) == strings.TrimSpace(b.ClaudePath)
 	}
 	return false
+}
+
+func sameYoloBypassProbeKey(a, b YoloBypassProbe) bool {
+	if strings.TrimSpace(a.ProxyVersion) != strings.TrimSpace(b.ProxyVersion) {
+		return false
+	}
+	if strings.TrimSpace(a.ClaudeVersion) != "" || strings.TrimSpace(b.ClaudeVersion) != "" {
+		return strings.TrimSpace(a.ClaudeVersion) == strings.TrimSpace(b.ClaudeVersion)
+	}
+	aPath := strings.TrimSpace(a.ClaudePath)
+	bPath := strings.TrimSpace(b.ClaudePath)
+	if aPath != "" && bPath != "" {
+		return aPath == bPath
+	}
+	return false
+}
+
+func cloneYoloBypassProbe(entry YoloBypassProbe) YoloBypassProbe {
+	entry.Args = append([]string(nil), entry.Args...)
+	return entry
 }

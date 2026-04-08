@@ -191,4 +191,80 @@ func TestConfigProfileAndPatchFailureEdges(t *testing.T) {
 			t.Fatalf("expected empty host id to match legacy entry")
 		}
 	})
+
+	t.Run("YoloBypassProbe lookup and purge", func(t *testing.T) {
+		cfg := Config{Version: CurrentVersion}
+		cfg.UpsertYoloBypassProbe(YoloBypassProbe{
+			ProxyVersion:  "v1",
+			ClaudeVersion: "2.1.96",
+			Args:          []string{"--dangerously-skip-permissions"},
+		})
+		cfg.UpsertYoloBypassProbe(YoloBypassProbe{
+			ProxyVersion: "v0",
+			ClaudePath:   "/tmp/claude",
+			Args:         []string{"--permission-mode", "bypassPermissions"},
+		})
+		if got, ok := cfg.FindYoloBypassProbe("v1", "2.1.96", "/ignored"); !ok || len(got) != 1 || got[0] != "--dangerously-skip-permissions" {
+			t.Fatalf("unexpected version probe lookup: %#v ok=%v", got, ok)
+		}
+		if got, ok := cfg.FindYoloBypassProbe("v0", "", "/tmp/claude"); !ok || len(got) != 2 || got[0] != "--permission-mode" {
+			t.Fatalf("unexpected path probe lookup: %#v ok=%v", got, ok)
+		}
+		if !cfg.PurgeStaleYoloBypassProbes("v1") {
+			t.Fatalf("expected stale probe purge to report changes")
+		}
+		if len(cfg.YoloBypassProbes) != 1 {
+			t.Fatalf("expected one probe after purge, got %d", len(cfg.YoloBypassProbes))
+		}
+		if _, ok := cfg.FindYoloBypassProbe("v0", "", "/tmp/claude"); ok {
+			t.Fatalf("expected stale yolo probe entry to be removed")
+		}
+	})
+
+	t.Run("YoloBypassProbe upsert overwrites matching key", func(t *testing.T) {
+		cfg := Config{Version: CurrentVersion}
+		cfg.UpsertYoloBypassProbe(YoloBypassProbe{
+			ProxyVersion:  "v1",
+			ClaudeVersion: "2.1.96",
+			Args:          []string{"--permission-mode", "bypassPermissions"},
+		})
+		cfg.UpsertYoloBypassProbe(YoloBypassProbe{
+			ProxyVersion:  "v1",
+			ClaudeVersion: "2.1.96",
+			Args:          []string{"--dangerously-skip-permissions"},
+		})
+		if len(cfg.YoloBypassProbes) != 1 {
+			t.Fatalf("expected overwrite instead of append, got %d entries", len(cfg.YoloBypassProbes))
+		}
+		if got, ok := cfg.FindYoloBypassProbe("v1", "2.1.96", ""); !ok || len(got) != 1 || got[0] != "--dangerously-skip-permissions" {
+			t.Fatalf("unexpected overwritten args: %#v ok=%v", got, ok)
+		}
+	})
+
+	t.Run("sameYoloBypassProbeKey distinguishes version and path scopes", func(t *testing.T) {
+		if !sameYoloBypassProbeKey(
+			YoloBypassProbe{ProxyVersion: "v1", ClaudeVersion: "2.1.96"},
+			YoloBypassProbe{ProxyVersion: "v1", ClaudeVersion: "2.1.96", ClaudePath: "/ignored"},
+		) {
+			t.Fatalf("expected matching version-scoped keys")
+		}
+		if sameYoloBypassProbeKey(
+			YoloBypassProbe{ProxyVersion: "v1", ClaudeVersion: "2.1.96"},
+			YoloBypassProbe{ProxyVersion: "v1", ClaudeVersion: "2.1.97"},
+		) {
+			t.Fatalf("expected version-scoped keys to differ")
+		}
+		if !sameYoloBypassProbeKey(
+			YoloBypassProbe{ProxyVersion: "v1", ClaudePath: "/tmp/claude"},
+			YoloBypassProbe{ProxyVersion: "v1", ClaudePath: "/tmp/claude"},
+		) {
+			t.Fatalf("expected matching path-scoped keys")
+		}
+		if sameYoloBypassProbeKey(
+			YoloBypassProbe{ProxyVersion: "v1", ClaudePath: "/tmp/claude-a"},
+			YoloBypassProbe{ProxyVersion: "v1", ClaudePath: "/tmp/claude-b"},
+		) {
+			t.Fatalf("expected path-scoped keys to differ")
+		}
+	})
 }

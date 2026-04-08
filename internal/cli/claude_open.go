@@ -25,6 +25,16 @@ func buildClaudeResumeCommand(
 	project claudehistory.Project,
 	yoloMode config.YoloMode,
 ) (string, []string, string, error) {
+	return buildClaudeResumeCommandWithYoloArgs(claudePath, session, project, yoloMode, nil)
+}
+
+func buildClaudeResumeCommandWithYoloArgs(
+	claudePath string,
+	session claudehistory.Session,
+	project claudehistory.Project,
+	yoloMode config.YoloMode,
+	yoloArgs []string,
+) (string, []string, string, error) {
 	if session.SessionID == "" {
 		return "", nil, "", fmt.Errorf("missing session id")
 	}
@@ -49,7 +59,11 @@ func buildClaudeResumeCommand(
 
 	args := []string{"--resume", session.SessionID}
 	if isBypassYoloMode(yoloMode) {
-		args = append([]string{"--permission-mode", "bypassPermissions"}, args...)
+		resolvedYoloArgs := yoloArgs
+		if len(resolvedYoloArgs) == 0 {
+			resolvedYoloArgs = yoloBypassArgs(path)
+		}
+		args = append(append([]string{}, resolvedYoloArgs...), args...)
 	}
 	return path, args, cwd, nil
 }
@@ -130,9 +144,14 @@ func runClaudeSession(
 	}
 	claudePath = claudePathResolved
 
-	if isBypassYoloMode(yoloMode) && !supportsYoloFlag(claudePath) {
-		_ = persistYoloMode(store, config.YoloModeOff)
-		yoloMode = config.YoloModeOff
+	yoloArgs := []string(nil)
+	if isBypassYoloMode(yoloMode) {
+		yoloArgs = resolveYoloBypassArgs(claudePath, root.configPath)
+		if len(yoloArgs) == 0 {
+			_, _ = fmt.Fprintln(os.Stderr, "yolo: this Claude build does not expose bypass flags; disabling yolo bypass")
+			_ = persistYoloMode(store, config.YoloModeOff)
+			yoloMode = config.YoloModeOff
+		}
 	}
 	patchOpts := withYoloModePatchOptions(root.exePatch, yoloMode)
 	if normalizeYoloMode(yoloMode) == config.YoloModeRules {
@@ -140,7 +159,7 @@ func runClaudeSession(
 			return err
 		}
 	}
-	path, args, cwd, err := buildClaudeResumeCommand(claudePath, session, project, yoloMode)
+	path, args, cwd, err := buildClaudeResumeCommandWithYoloArgs(claudePath, session, project, yoloMode, yoloArgs)
 	if err != nil {
 		return err
 	}
@@ -213,9 +232,14 @@ func runClaudeNewSession(
 		return err
 	}
 	claudePath = claudePathResolved
-	if isBypassYoloMode(yoloMode) && !supportsYoloFlag(claudePath) {
-		_ = persistYoloMode(store, config.YoloModeOff)
-		yoloMode = config.YoloModeOff
+	yoloArgs := []string(nil)
+	if isBypassYoloMode(yoloMode) {
+		yoloArgs = resolveYoloBypassArgs(claudePath, root.configPath)
+		if len(yoloArgs) == 0 {
+			_, _ = fmt.Fprintln(os.Stderr, "yolo: this Claude build does not expose bypass flags; disabling yolo bypass")
+			_ = persistYoloMode(store, config.YoloModeOff)
+			yoloMode = config.YoloModeOff
+		}
 	}
 	patchOpts := withYoloModePatchOptions(root.exePatch, yoloMode)
 	if normalizeYoloMode(yoloMode) == config.YoloModeRules {
@@ -225,7 +249,7 @@ func runClaudeNewSession(
 	}
 	cmdArgs := []string{claudePath}
 	if isBypassYoloMode(yoloMode) {
-		cmdArgs = append(cmdArgs, "--permission-mode", "bypassPermissions")
+		cmdArgs = append(cmdArgs, yoloArgs...)
 	}
 
 	exePatchOutcome, err := maybePatchExecutableCtxFn(ctx, cmdArgs, patchOpts, root.configPath, log)
