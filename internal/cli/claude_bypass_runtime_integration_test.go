@@ -30,6 +30,9 @@ func requirePatchTestYoloArgs(t *testing.T, path string, configPath string, want
 	if len(yoloArgs) > 0 {
 		return yoloArgs
 	}
+	if os.Getenv(claudePatchSkipPrecheckEnv) == "1" {
+		t.Skip("skip bypass runtime probe when raw Claude precheck is disabled")
+	}
 	if strings.TrimSpace(wantVersion) == defaultClaudePatchVersion {
 		t.Fatalf("expected Claude %s to expose yolo bypass args", wantVersion)
 	}
