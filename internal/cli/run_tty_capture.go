@@ -59,11 +59,15 @@ func runTargetOnceWithCapturedTTYOutput(
 	if stdoutBuf != nil {
 		outputWriter = io.MultiWriter(os.Stdout, stdoutBuf)
 	}
+	stdin := os.Stdin
 	go func() {
 		_, _ = io.Copy(outputWriter, session.Output())
 	}()
 	go func() {
-		_, _ = io.Copy(session.Input(), os.Stdin)
+		if stdin == nil {
+			return
+		}
+		_, _ = io.Copy(session.Input(), stdin)
 	}()
 
 	waitDone := make(chan error, 1)
