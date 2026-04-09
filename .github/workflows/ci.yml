@@ -126,6 +126,14 @@ jobs:
           set -euo pipefail
           go test ./internal/cli -run '^(TestHistory(List|Show|Open)CmdCancellationIsFatal)$' -count=1
 
+      - name: Managed Claude regression suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./internal/cli \
+            -run '^(TestFindManagedClaudePath(FallsBackToUnixMigratedLocalInstall|FallsBackToUserHomeDirWhenHomeEnvMissing|IncludesRecoveredLauncher(|WithoutHomeEnv))|TestFindInstalledClaudePathPrefersLookPathWhenManagedLocationMissing|TestEnsureClaudeInstalled(IgnoresPathClaudeAndUsesManagedInstall|ReusesRecoveredLauncher|ExportsGitBashBeforeReturningManagedWindowsInstall|ReturnsExportGitBashError)|TestBuildClaudeResumeCommand(UsesManagedClaudeWhenUnset|UsesManagedClaudeViaUserHomeFallbackWhenEnvMissing|UsesRecoveredLauncherWhenHomeEnvMissing))$' \
+            -count=1
+
       - name: Proc cross-platform compile smoke (Linux only)
         if: runner.os == 'Linux'
         shell: bash

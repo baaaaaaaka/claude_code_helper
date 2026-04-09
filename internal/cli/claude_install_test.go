@@ -309,7 +309,7 @@ func TestEnsureClaudeInstalledRecoversEL7GlibcFailure(t *testing.T) {
 	}
 }
 
-func TestFindInstalledClaudePathDoesNotFallbackToUnixHomeBin(t *testing.T) {
+func TestFindInstalledClaudePathFallsBackToUnixDefaultLocation(t *testing.T) {
 	prevLookPath := claudeInstallLookPathFn
 	t.Cleanup(func() { claudeInstallLookPathFn = prevLookPath })
 	claudeInstallLookPathFn = func(file string) (string, error) {
@@ -333,8 +333,243 @@ func TestFindInstalledClaudePathDoesNotFallbackToUnixHomeBin(t *testing.T) {
 	}
 
 	got, ok := findInstalledClaudePath("linux", "", getenv)
-	if ok {
-		t.Fatalf("expected linux install path discovery to ignore %q, got %q", claudePath, got)
+	if !ok {
+		t.Fatalf("expected linux install path discovery to resolve %q", claudePath)
+	}
+	if got != claudePath {
+		t.Fatalf("expected %q, got %q", claudePath, got)
+	}
+}
+
+func TestFindManagedClaudePathFallsBackToUnixMigratedLocalInstall(t *testing.T) {
+	home := t.TempDir()
+	claudePath := filepath.Join(home, ".claude", "local", "claude")
+	if err := os.MkdirAll(filepath.Dir(claudePath), 0o755); err != nil {
+		t.Fatalf("mkdir claude dir: %v", err)
+	}
+	if err := os.WriteFile(claudePath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write claude: %v", err)
+	}
+
+	getenv := func(key string) string {
+		if key == "HOME" {
+			return home
+		}
+		return ""
+	}
+
+	got, ok := findManagedClaudePath("linux", "", getenv)
+	if !ok {
+		t.Fatalf("expected linux managed Claude discovery to resolve %q", claudePath)
+	}
+	if got != claudePath {
+		t.Fatalf("expected %q, got %q", claudePath, got)
+	}
+}
+
+func TestFindManagedClaudePathFallsBackToUserHomeDirWhenHomeEnvMissing(t *testing.T) {
+	prevUserHomeDirFn := userHomeDirFn
+	t.Cleanup(func() { userHomeDirFn = prevUserHomeDirFn })
+
+	home := t.TempDir()
+	userHomeDirFn = func() (string, error) { return home, nil }
+	claudePath := filepath.Join(home, ".local", "bin", "claude")
+	if err := os.MkdirAll(filepath.Dir(claudePath), 0o755); err != nil {
+		t.Fatalf("mkdir claude dir: %v", err)
+	}
+	if err := os.WriteFile(claudePath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write claude: %v", err)
+	}
+
+	got, ok := findManagedClaudePath("linux", "", func(string) string { return "" })
+	if !ok {
+		t.Fatalf("expected managed Claude discovery to resolve %q via user home dir fallback", claudePath)
+	}
+	if got != claudePath {
+		t.Fatalf("expected %q, got %q", claudePath, got)
+	}
+}
+
+func TestFindManagedClaudePathIncludesRecoveredLauncher(t *testing.T) {
+	home := t.TempDir()
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	hostID := "test-host"
+	launcherPath := filepath.Join(cacheRoot, "claude-proxy", "hosts", hostID, "install-recovery", "claude")
+	if err := os.MkdirAll(filepath.Dir(launcherPath), 0o755); err != nil {
+		t.Fatalf("mkdir launcher dir: %v", err)
+	}
+	if err := os.WriteFile(launcherPath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write launcher: %v", err)
+	}
+
+	getenv := func(key string) string {
+		switch key {
+		case "HOME":
+			return home
+		case "XDG_CACHE_HOME":
+			return cacheRoot
+		case claudeProxyHostIDEnv:
+			return hostID
+		default:
+			return ""
+		}
+	}
+
+	got, ok := findManagedClaudePath("linux", "", getenv)
+	if !ok {
+		t.Fatalf("expected managed Claude discovery to resolve recovered launcher %q", launcherPath)
+	}
+	if got != launcherPath {
+		t.Fatalf("expected %q, got %q", launcherPath, got)
+	}
+}
+
+func TestFindManagedClaudePathIncludesRecoveredLauncherWithoutHomeEnv(t *testing.T) {
+	prevUserHomeDirFn := userHomeDirFn
+	t.Cleanup(func() { userHomeDirFn = prevUserHomeDirFn })
+	userHomeDirFn = func() (string, error) { return "", os.ErrNotExist }
+
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	hostID := "test-host"
+	launcherPath := filepath.Join(cacheRoot, "claude-proxy", "hosts", hostID, "install-recovery", "claude")
+	if err := os.MkdirAll(filepath.Dir(launcherPath), 0o755); err != nil {
+		t.Fatalf("mkdir launcher dir: %v", err)
+	}
+	if err := os.WriteFile(launcherPath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write launcher: %v", err)
+	}
+
+	getenv := func(key string) string {
+		switch key {
+		case "XDG_CACHE_HOME":
+			return cacheRoot
+		case claudeProxyHostIDEnv:
+			return hostID
+		default:
+			return ""
+		}
+	}
+
+	got, ok := findManagedClaudePath("linux", "", getenv)
+	if !ok {
+		t.Fatalf("expected managed Claude discovery to resolve recovered launcher %q without home env", launcherPath)
+	}
+	if got != launcherPath {
+		t.Fatalf("expected %q, got %q", launcherPath, got)
+	}
+}
+
+func TestFindInstalledClaudePathPrefersLookPathWhenManagedLocationMissing(t *testing.T) {
+	prevLookPath := claudeInstallLookPathFn
+	t.Cleanup(func() { claudeInstallLookPathFn = prevLookPath })
+
+	pathClaude := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(pathClaude, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write PATH claude: %v", err)
+	}
+	claudeInstallLookPathFn = func(file string) (string, error) {
+		if file == "claude" {
+			return pathClaude, nil
+		}
+		return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
+	}
+
+	home := t.TempDir()
+	getenv := func(key string) string {
+		if key == "HOME" {
+			return home
+		}
+		return ""
+	}
+
+	got, ok := findInstalledClaudePath("linux", "", getenv)
+	if !ok {
+		t.Fatalf("expected installed Claude discovery to resolve PATH Claude %q", pathClaude)
+	}
+	if got != pathClaude {
+		t.Fatalf("expected %q, got %q", pathClaude, got)
+	}
+}
+
+func TestEnsureClaudeInstalledIgnoresPathClaudeAndUsesManagedInstall(t *testing.T) {
+	prevGOOS := claudeInstallGOOS
+	prevInstaller := runClaudeInstallerWithEnvFn
+	t.Cleanup(func() {
+		claudeInstallGOOS = prevGOOS
+		runClaudeInstallerWithEnvFn = prevInstaller
+	})
+
+	claudeInstallGOOS = "linux"
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	pathDir := t.TempDir()
+	pathClaude := filepath.Join(pathDir, "claude")
+	if err := os.WriteFile(pathClaude, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write PATH claude: %v", err)
+	}
+	t.Setenv("PATH", pathDir)
+
+	managedClaude := filepath.Join(home, ".local", "bin", "claude")
+	installCalls := 0
+	runClaudeInstallerWithEnvFn = func(ctx context.Context, out io.Writer, opts installProxyOptions, extraEnv []string) error {
+		installCalls++
+		if err := os.MkdirAll(filepath.Dir(managedClaude), 0o755); err != nil {
+			t.Fatalf("mkdir managed claude dir: %v", err)
+		}
+		if err := os.WriteFile(managedClaude, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			t.Fatalf("write managed claude: %v", err)
+		}
+		_, _ = io.WriteString(out, "Claude Code successfully installed!\n")
+		return nil
+	}
+
+	got, err := ensureClaudeInstalled(context.Background(), "", io.Discard, installProxyOptions{})
+	if err != nil {
+		t.Fatalf("ensureClaudeInstalled error: %v", err)
+	}
+	if got != managedClaude {
+		t.Fatalf("expected managed Claude %q, got %q", managedClaude, got)
+	}
+	if got == pathClaude {
+		t.Fatalf("expected PATH Claude %q to be ignored", pathClaude)
+	}
+	if installCalls != 1 {
+		t.Fatalf("expected installer to run once, got %d", installCalls)
+	}
+}
+
+func TestEnsureClaudeInstalledReusesRecoveredLauncher(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("recovered launcher path currently applies on linux")
+	}
+
+	prevGOOS := claudeInstallGOOS
+	t.Cleanup(func() { claudeInstallGOOS = prevGOOS })
+	claudeInstallGOOS = "linux"
+
+	home := t.TempDir()
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	hostID := "test-host"
+	launcherPath := filepath.Join(cacheRoot, "claude-proxy", "hosts", hostID, "install-recovery", "claude")
+	if err := os.MkdirAll(filepath.Dir(launcherPath), 0o755); err != nil {
+		t.Fatalf("mkdir launcher dir: %v", err)
+	}
+	if err := os.WriteFile(launcherPath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write launcher: %v", err)
+	}
+
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv("CLAUDE_PROXY_HOST_ID", hostID)
+	t.Setenv("PATH", "")
+
+	got, err := ensureClaudeInstalled(context.Background(), "", io.Discard, installProxyOptions{})
+	if err != nil {
+		t.Fatalf("ensureClaudeInstalled error: %v", err)
+	}
+	if got != launcherPath {
+		t.Fatalf("expected recovered launcher %q, got %q", launcherPath, got)
 	}
 }
 
@@ -376,6 +611,9 @@ func TestInstallerCandidatesAndFailures(t *testing.T) {
 
 	t.Run("ensureClaudeInstalled propagates installer error", func(t *testing.T) {
 		t.Setenv("PATH", "")
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("USERPROFILE", home)
 		_, err := ensureClaudeInstalled(context.Background(), "", io.Discard, installProxyOptions{})
 		if err == nil {
 			t.Fatalf("expected error when installer is unavailable")
@@ -926,7 +1164,10 @@ func TestEnsureClaudeInstalledReturnsExportGitBashError(t *testing.T) {
 	}
 
 	localAppData := t.TempDir()
+	home := t.TempDir()
 	t.Setenv("LOCALAPPDATA", localAppData)
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	bashPath := filepath.Join(localAppData, "claude-proxy", "git", "current", "bin", "bash.exe")
 	if err := os.MkdirAll(filepath.Dir(bashPath), 0o755); err != nil {
 		t.Fatalf("mkdir bash dir: %v", err)
@@ -938,6 +1179,53 @@ func TestEnsureClaudeInstalledReturnsExportGitBashError(t *testing.T) {
 	_, err := ensureClaudeInstalled(context.Background(), "", io.Discard, installProxyOptions{})
 	if err == nil || !strings.Contains(err.Error(), "set CLAUDE_CODE_GIT_BASH_PATH for current process") {
 		t.Fatalf("expected export git bash error, got %v", err)
+	}
+}
+
+func TestEnsureClaudeInstalledExportsGitBashBeforeReturningManagedWindowsInstall(t *testing.T) {
+	prevGOOS := claudeInstallGOOS
+	prevSetenv := claudeInstallSetenvFn
+	t.Cleanup(func() {
+		claudeInstallGOOS = prevGOOS
+		claudeInstallSetenvFn = prevSetenv
+	})
+	claudeInstallGOOS = "windows"
+
+	home := t.TempDir()
+	localAppData := filepath.Join(home, "AppData", "Local")
+	claudePath := filepath.Join(home, ".local", "bin", "claude.exe")
+	bashPath := filepath.Join(localAppData, "claude-proxy", "git", "current", "bin", "bash.exe")
+	if err := os.MkdirAll(filepath.Dir(claudePath), 0o755); err != nil {
+		t.Fatalf("mkdir claude dir: %v", err)
+	}
+	if err := os.WriteFile(claudePath, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write claude.exe: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(bashPath), 0o755); err != nil {
+		t.Fatalf("mkdir bash dir: %v", err)
+	}
+	if err := os.WriteFile(bashPath, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write bash.exe: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("LOCALAPPDATA", localAppData)
+
+	var exports []string
+	claudeInstallSetenvFn = func(key string, value string) error {
+		exports = append(exports, key+"="+value)
+		return nil
+	}
+
+	got, err := ensureClaudeInstalled(context.Background(), "", io.Discard, installProxyOptions{})
+	if err != nil {
+		t.Fatalf("ensureClaudeInstalled error: %v", err)
+	}
+	if got != claudePath {
+		t.Fatalf("expected managed Claude path %q, got %q", claudePath, got)
+	}
+	if len(exports) != 1 || exports[0] != "CLAUDE_CODE_GIT_BASH_PATH="+bashPath {
+		t.Fatalf("expected CLAUDE_CODE_GIT_BASH_PATH export %q, got %v", bashPath, exports)
 	}
 }
 
@@ -1087,7 +1375,7 @@ func TestClaudeInstallNotFoundErrorIncludesGitBashHelp(t *testing.T) {
 		t.Fatalf("expected error")
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "binary not found in PATH") {
+	if !strings.Contains(msg, "managed Claude binary was not found") {
 		t.Fatalf("expected binary not found message, got %q", msg)
 	}
 	if !strings.Contains(msg, "CLAUDE_CODE_GIT_BASH_PATH") {

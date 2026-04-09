@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -50,10 +49,10 @@ func buildClaudeResumeCommandWithYoloArgs(
 
 	path := claudePath
 	if path == "" {
-		var err error
-		path, err = exec.LookPath("claude")
-		if err != nil {
-			return "", nil, "", fmt.Errorf("claude CLI not found in PATH")
+		var ok bool
+		path, ok = findManagedClaudePath(claudeInstallGOOS, "", os.Getenv)
+		if !ok {
+			return "", nil, "", fmt.Errorf("claude CLI not found in claude-proxy-managed install")
 		}
 	}
 

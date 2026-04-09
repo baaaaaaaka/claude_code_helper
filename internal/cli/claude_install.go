@@ -191,16 +191,19 @@ type installProxyOptions struct {
 func ensureClaudeInstalled(ctx context.Context, claudePath string, out io.Writer, installOpts installProxyOptions) (string, error) {
 	if strings.TrimSpace(claudePath) != "" {
 		if executableExists(claudePath) {
+			if err := exportCurrentProcessGitBashPath(findWindowsGitBashPath(os.Getenv)); err != nil {
+				return "", err
+			}
 			return claudePath, nil
 		}
 		return "", fmt.Errorf("claude not found at %s", claudePath)
 	}
 
-	if path, err := claudeInstallLookPathFn("claude"); err == nil {
-		return path, nil
-	}
 	if err := exportCurrentProcessGitBashPath(findWindowsGitBashPath(os.Getenv)); err != nil {
 		return "", err
+	}
+	if path, ok := findManagedClaudePath(claudeInstallGOOS, "", os.Getenv); ok {
+		return path, nil
 	}
 
 	if out != nil {
@@ -213,7 +216,7 @@ func ensureClaudeInstalled(ctx context.Context, claudePath string, out io.Writer
 	}
 	err := runClaudeInstaller(ctx, installOut, installOpts)
 	if err == nil {
-		if path, ok := findInstalledClaudePath(claudeInstallGOOS, installLog.String(), os.Getenv); ok {
+		if path, ok := findManagedClaudePath(claudeInstallGOOS, installLog.String(), os.Getenv); ok {
 			return path, nil
 		}
 	} else if !needsWindowsGitBash(claudeInstallGOOS, installLog.String()) {
@@ -244,7 +247,7 @@ func ensureClaudeInstalled(ctx context.Context, claudePath string, out io.Writer
 		if retryErr != nil {
 			return "", retryErr
 		}
-		if path, ok := findInstalledClaudePath(claudeInstallGOOS, combinedLog, getenvWithInstallOverrides(os.Getenv, map[string]string{
+		if path, ok := findManagedClaudePath(claudeInstallGOOS, combinedLog, getenvWithInstallOverrides(os.Getenv, map[string]string{
 			"CLAUDE_CODE_GIT_BASH_PATH": bashPath,
 		})); ok {
 			return path, nil
@@ -546,11 +549,7 @@ func installerAttemptLabel(cmd installCmd) string {
 	return fmt.Sprintf("%s %s", cmd.path, cmd.args[0])
 }
 
-func findInstalledClaudePath(goos string, installOutput string, getenv func(string) string) (string, bool) {
-	if path, err := claudeInstallLookPathFn("claude"); err == nil {
-		return path, true
-	}
-
+func findManagedClaudePath(goos string, installOutput string, getenv func(string) string) (string, bool) {
 	if path := resolveInstalledClaudeLocation(goos, parseInstalledClaudeLocation(installOutput)); path != "" {
 		return path, true
 	}
@@ -562,6 +561,133 @@ func findInstalledClaudePath(goos string, installOutput string, getenv func(stri
 	}
 
 	return "", false
+}
+
+func findInstalledClaudePath(goos string, installOutput string, getenv func(string) string) (string, bool) {
+	if path, ok := findManagedClaudePath(goos, installOutput, getenv); ok {
+		return path, true
+	}
+
+	if path, err := claudeInstallLookPathFn("claude"); err == nil {
+		return path, true
+	}
+
+	return "", false
+}
+
+func defaultClaudeInstallCandidates(goos string, getenv func(string) string) []string {
+	homes := installHomeCandidates(goos, getenv)
+
+	if !strings.EqualFold(goos, "windows") {
+		candidates := make([]string, 0, len(homes)*2+1)
+		for _, home := range homes {
+			for _, candidate := range []string{
+				filepath.Join(home, ".local", "bin", "claude"),
+				filepath.Join(home, ".claude", "local", "claude"),
+			} {
+				candidates = appendInstallCandidate(candidates, goos, candidate)
+			}
+		}
+		if candidate := defaultRecoveredClaudeLauncherCandidate(goos, getenv); candidate != "" {
+			candidates = appendInstallCandidate(candidates, goos, candidate)
+		}
+		return candidates
+	}
+
+	if len(homes) == 0 {
+		return nil
+	}
+	candidates := make([]string, 0, len(homes)*5)
+	for _, home := range homes {
+		base := filepath.Join(home, ".local", "bin")
+		for _, name := range []string{"claude.exe", "claude.cmd", "claude.bat", "claude.com", "claude"} {
+			candidates = appendInstallCandidate(candidates, goos, filepath.Join(base, name))
+		}
+	}
+	return candidates
+}
+
+func installHomeCandidates(goos string, getenv func(string) string) []string {
+	keys := []string{"HOME", "USERPROFILE"}
+	if strings.EqualFold(goos, "windows") {
+		keys = []string{"USERPROFILE", "HOME"}
+	}
+
+	homes := make([]string, 0, len(keys))
+	for _, key := range keys {
+		homes = appendInstallHomeCandidate(homes, goos, getenv(key))
+	}
+
+	if len(homes) == 0 {
+		if home, err := userHomeDirFn(); err == nil {
+			homes = appendInstallHomeCandidate(homes, goos, home)
+		}
+	}
+	return homes
+}
+
+func installPathEqual(goos string, a string, b string) bool {
+	if strings.EqualFold(goos, "windows") {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+func appendInstallCandidate(candidates []string, goos string, candidate string) []string {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return candidates
+	}
+	for _, existing := range candidates {
+		if installPathEqual(goos, existing, candidate) {
+			return candidates
+		}
+	}
+	return append(candidates, candidate)
+}
+
+func appendInstallHomeCandidate(homes []string, goos string, candidate string) []string {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return homes
+	}
+	for _, existing := range homes {
+		if installPathEqual(goos, existing, candidate) {
+			return homes
+		}
+	}
+	return append(homes, candidate)
+}
+
+func defaultRecoveredClaudeLauncherCandidate(goos string, getenv func(string) string) string {
+	if !strings.EqualFold(goos, "linux") {
+		return ""
+	}
+	cacheBase := strings.TrimSpace(getenv("XDG_CACHE_HOME"))
+	if cacheBase == "" {
+		if home := strings.TrimSpace(getenv("HOME")); home != "" {
+			cacheBase = filepath.Join(home, ".cache")
+		}
+	}
+	if cacheBase == "" {
+		var err error
+		cacheBase, err = resolveStableCacheBase()
+		if err != nil {
+			return ""
+		}
+	}
+
+	hostID := strings.TrimSpace(getenv(claudeProxyHostIDEnv))
+	if hostID != "" {
+		hostID = sanitizePathComponent(hostID)
+	} else {
+		hostID = resolveHostID()
+	}
+	if hostID == "" {
+		return ""
+	}
+
+	return filepath.Join(cacheBase, "claude-proxy", "hosts", hostID, "install-recovery", "claude")
 }
 
 func needsWindowsGitBash(goos string, output string) bool {
@@ -637,37 +763,6 @@ func resolveWindowsGitBashLocation(location string) string {
 		return filepath.Clean(location)
 	}
 	return ""
-}
-
-func defaultClaudeInstallCandidates(goos string, getenv func(string) string) []string {
-	if !strings.EqualFold(goos, "windows") {
-		return nil
-	}
-
-	var homes []string
-	for _, key := range []string{"USERPROFILE", "HOME"} {
-		if home := strings.TrimSpace(getenv(key)); home != "" {
-			duplicate := false
-			for _, existing := range homes {
-				if strings.EqualFold(existing, home) {
-					duplicate = true
-					break
-				}
-			}
-			if !duplicate {
-				homes = append(homes, home)
-			}
-		}
-	}
-
-	candidates := make([]string, 0, len(homes)*5)
-	for _, home := range homes {
-		base := filepath.Join(home, ".local", "bin")
-		for _, name := range []string{"claude.exe", "claude.cmd", "claude.bat", "claude.com", "claude"} {
-			candidates = append(candidates, filepath.Join(base, name))
-		}
-	}
-	return candidates
 }
 
 func findWindowsGitBashPath(getenv func(string) string) string {
@@ -754,7 +849,7 @@ func sameInstallEnvKey(a string, b string) bool {
 }
 
 func claudeInstallNotFoundError(goos string, installOutput string) error {
-	msg := "claude installation finished but binary not found in PATH"
+	msg := "claude installation finished but managed Claude binary was not found"
 	if strings.EqualFold(goos, "windows") && strings.Contains(strings.ToLower(installOutput), "git-bash") {
 		return fmt.Errorf("%s; %s", msg, windowsGitBashInstallHelp)
 	}

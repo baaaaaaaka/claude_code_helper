@@ -232,6 +232,9 @@ func TestRunUpgradeClaudePrewarmsPatchedClaude(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 
 	prepareCalled := false
 	waitCalled := false
@@ -374,7 +377,10 @@ func TestRunUpgradeClaudeRetriesWhenInstallerLeavesUnpatchableVersionFile(t *tes
 	}
 
 	dir := t.TempDir()
-	versionPath := filepath.Join(dir, "home", ".local", "share", "claude", "versions", "2.1.90")
+	homeDir := filepath.Join(dir, "home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+	versionPath := filepath.Join(homeDir, ".local", "share", "claude", "versions", "2.1.90")
 	if err := os.MkdirAll(filepath.Dir(versionPath), 0o755); err != nil {
 		t.Fatalf("mkdir version dir: %v", err)
 	}
@@ -383,16 +389,13 @@ func TestRunUpgradeClaudeRetriesWhenInstallerLeavesUnpatchableVersionFile(t *tes
 		t.Fatalf("write original version file: %v", err)
 	}
 
-	binDir := filepath.Join(dir, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatalf("mkdir bin dir: %v", err)
+	launcherPath := filepath.Join(homeDir, ".local", "bin", testClaudeLauncherName(claudeInstallGOOS))
+	if err := os.MkdirAll(filepath.Dir(launcherPath), 0o755); err != nil {
+		t.Fatalf("mkdir launcher dir: %v", err)
 	}
-	launcherPath := filepath.Join(binDir, testClaudeLauncherName(claudeInstallGOOS))
 	if err := os.Symlink(versionPath, launcherPath); err != nil {
 		t.Fatalf("symlink launcher: %v", err)
 	}
-	withClaudeInstallLookPath(t, launcherPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	retryMovedStaleVersionAside := false
 	prevInstaller := runClaudeInstallerFn
@@ -481,7 +484,10 @@ func TestRunUpgradeClaudeRestoresVersionFileWhenRetryStillBroken(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	versionsDir := filepath.Join(dir, "home", ".local", "share", "claude", "versions")
+	homeDir := filepath.Join(dir, "home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+	versionsDir := filepath.Join(homeDir, ".local", "share", "claude", "versions")
 	versionPath := filepath.Join(versionsDir, "2.1.90")
 	if err := os.MkdirAll(filepath.Dir(versionPath), 0o755); err != nil {
 		t.Fatalf("mkdir version dir: %v", err)
@@ -491,16 +497,13 @@ func TestRunUpgradeClaudeRestoresVersionFileWhenRetryStillBroken(t *testing.T) {
 		t.Fatalf("write original version file: %v", err)
 	}
 
-	binDir := filepath.Join(dir, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatalf("mkdir bin dir: %v", err)
+	launcherPath := filepath.Join(homeDir, ".local", "bin", testClaudeLauncherName(claudeInstallGOOS))
+	if err := os.MkdirAll(filepath.Dir(launcherPath), 0o755); err != nil {
+		t.Fatalf("mkdir launcher dir: %v", err)
 	}
-	launcherPath := filepath.Join(binDir, testClaudeLauncherName(claudeInstallGOOS))
 	if err := os.Symlink(versionPath, launcherPath); err != nil {
 		t.Fatalf("symlink launcher: %v", err)
 	}
-	withClaudeInstallLookPath(t, launcherPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	installerCalls := 0
 	prevInstaller := runClaudeInstallerFn
@@ -594,7 +597,10 @@ func TestRunUpgradeClaudeDoesNotRetryWhenVersionProbeStillWorks(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	versionPath := filepath.Join(dir, "home", ".local", "share", "claude", "versions", "2.1.90")
+	homeDir := filepath.Join(dir, "home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+	versionPath := filepath.Join(homeDir, ".local", "share", "claude", "versions", "2.1.90")
 	if err := os.MkdirAll(filepath.Dir(versionPath), 0o755); err != nil {
 		t.Fatalf("mkdir version dir: %v", err)
 	}
@@ -603,16 +609,13 @@ func TestRunUpgradeClaudeDoesNotRetryWhenVersionProbeStillWorks(t *testing.T) {
 		t.Fatalf("write unchanged version file: %v", err)
 	}
 
-	binDir := filepath.Join(dir, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatalf("mkdir bin dir: %v", err)
+	launcherPath := filepath.Join(homeDir, ".local", "bin", testClaudeLauncherName(claudeInstallGOOS))
+	if err := os.MkdirAll(filepath.Dir(launcherPath), 0o755); err != nil {
+		t.Fatalf("mkdir launcher dir: %v", err)
 	}
-	launcherPath := filepath.Join(binDir, testClaudeLauncherName(claudeInstallGOOS))
 	if err := os.Symlink(versionPath, launcherPath); err != nil {
 		t.Fatalf("symlink launcher: %v", err)
 	}
-	withClaudeInstallLookPath(t, launcherPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	installerCalls := 0
 	prevInstaller := runClaudeInstallerFn
@@ -690,7 +693,10 @@ func TestRunUpgradeClaudeDoesNotRetryWhenGlibcCompatCanHandleProbe(t *testing.T)
 	}
 
 	dir := t.TempDir()
-	versionPath := filepath.Join(dir, "home", ".local", "share", "claude", "versions", "2.1.90")
+	homeDir := filepath.Join(dir, "home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+	versionPath := filepath.Join(homeDir, ".local", "share", "claude", "versions", "2.1.90")
 	if err := os.MkdirAll(filepath.Dir(versionPath), 0o755); err != nil {
 		t.Fatalf("mkdir version dir: %v", err)
 	}
@@ -699,16 +705,13 @@ func TestRunUpgradeClaudeDoesNotRetryWhenGlibcCompatCanHandleProbe(t *testing.T)
 		t.Fatalf("write unchanged version file: %v", err)
 	}
 
-	binDir := filepath.Join(dir, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatalf("mkdir bin dir: %v", err)
+	launcherPath := filepath.Join(homeDir, ".local", "bin", testClaudeLauncherName(claudeInstallGOOS))
+	if err := os.MkdirAll(filepath.Dir(launcherPath), 0o755); err != nil {
+		t.Fatalf("mkdir launcher dir: %v", err)
 	}
-	launcherPath := filepath.Join(binDir, testClaudeLauncherName(claudeInstallGOOS))
 	if err := os.Symlink(versionPath, launcherPath); err != nil {
 		t.Fatalf("symlink launcher: %v", err)
 	}
-	withClaudeInstallLookPath(t, launcherPath)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	installerCalls := 0
 	prevInstaller := runClaudeInstallerFn
@@ -1314,22 +1317,6 @@ func testClaudeLauncherName(goos string) string {
 		return "claude.exe"
 	}
 	return "claude"
-}
-
-func withClaudeInstallLookPath(t *testing.T, launcherPath string) {
-	t.Helper()
-	prevLookPath := claudeInstallLookPathFn
-	claudeInstallLookPathFn = func(file string) (string, error) {
-		if file == "claude" {
-			if _, err := os.Lstat(launcherPath); err == nil {
-				return launcherPath, nil
-			}
-		}
-		return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
-	}
-	t.Cleanup(func() {
-		claudeInstallLookPathFn = prevLookPath
-	})
 }
 
 func withClaudeInstallGOOS(t *testing.T, goos string) {

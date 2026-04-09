@@ -133,6 +133,107 @@ func TestBuildClaudeResumeCommandKeepsRulesModeArgFree(t *testing.T) {
 	requireArgsEqual(t, args, want)
 }
 
+func TestBuildClaudeResumeCommandUsesManagedClaudeWhenUnset(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	managedClaude := filepath.Join(home, ".claude", "local", "claude")
+	if err := os.MkdirAll(filepath.Dir(managedClaude), 0o755); err != nil {
+		t.Fatalf("mkdir managed Claude dir: %v", err)
+	}
+	if err := os.WriteFile(managedClaude, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write managed Claude: %v", err)
+	}
+
+	dir := t.TempDir()
+	session := claudehistory.Session{SessionID: "abc"}
+	project := claudehistory.Project{Path: dir}
+
+	path, args, cwd, err := buildClaudeResumeCommand("", session, project, config.YoloModeOff)
+	if err != nil {
+		t.Fatalf("buildClaudeResumeCommand error: %v", err)
+	}
+	if path != managedClaude {
+		t.Fatalf("expected managed Claude path %q, got %q", managedClaude, path)
+	}
+	want := []string{"--resume", "abc"}
+	requireArgsEqual(t, args, want)
+	if cwd != dir {
+		t.Fatalf("expected cwd %s, got %s", dir, cwd)
+	}
+}
+
+func TestBuildClaudeResumeCommandUsesManagedClaudeViaUserHomeFallbackWhenEnvMissing(t *testing.T) {
+	prevUserHomeDirFn := userHomeDirFn
+	t.Cleanup(func() { userHomeDirFn = prevUserHomeDirFn })
+
+	home := t.TempDir()
+	userHomeDirFn = func() (string, error) { return home, nil }
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	managedClaude := filepath.Join(home, ".local", "bin", "claude")
+	if err := os.MkdirAll(filepath.Dir(managedClaude), 0o755); err != nil {
+		t.Fatalf("mkdir managed Claude dir: %v", err)
+	}
+	if err := os.WriteFile(managedClaude, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write managed Claude: %v", err)
+	}
+
+	dir := t.TempDir()
+	session := claudehistory.Session{SessionID: "abc"}
+	project := claudehistory.Project{Path: dir}
+
+	path, args, cwd, err := buildClaudeResumeCommand("", session, project, config.YoloModeOff)
+	if err != nil {
+		t.Fatalf("buildClaudeResumeCommand error: %v", err)
+	}
+	if path != managedClaude {
+		t.Fatalf("expected managed Claude path %q, got %q", managedClaude, path)
+	}
+	want := []string{"--resume", "abc"}
+	requireArgsEqual(t, args, want)
+	if cwd != dir {
+		t.Fatalf("expected cwd %s, got %s", dir, cwd)
+	}
+}
+
+func TestBuildClaudeResumeCommandUsesRecoveredLauncherWhenHomeEnvMissing(t *testing.T) {
+	prevUserHomeDirFn := userHomeDirFn
+	t.Cleanup(func() { userHomeDirFn = prevUserHomeDirFn })
+	userHomeDirFn = func() (string, error) { return "", os.ErrNotExist }
+
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	hostID := "test-host"
+	launcherPath := filepath.Join(cacheRoot, "claude-proxy", "hosts", hostID, "install-recovery", "claude")
+	if err := os.MkdirAll(filepath.Dir(launcherPath), 0o755); err != nil {
+		t.Fatalf("mkdir launcher dir: %v", err)
+	}
+	if err := os.WriteFile(launcherPath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write launcher: %v", err)
+	}
+
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv("CLAUDE_PROXY_HOST_ID", hostID)
+
+	dir := t.TempDir()
+	session := claudehistory.Session{SessionID: "abc"}
+	project := claudehistory.Project{Path: dir}
+
+	path, args, cwd, err := buildClaudeResumeCommand("", session, project, config.YoloModeOff)
+	if err != nil {
+		t.Fatalf("buildClaudeResumeCommand error: %v", err)
+	}
+	if path != launcherPath {
+		t.Fatalf("expected recovered launcher path %q, got %q", launcherPath, path)
+	}
+	want := []string{"--resume", "abc"}
+	requireArgsEqual(t, args, want)
+	if cwd != dir {
+		t.Fatalf("expected cwd %s, got %s", dir, cwd)
+	}
+}
+
 func TestBuildClaudeResumeCommandRejectsMissingSession(t *testing.T) {
 	dir := t.TempDir()
 	session := claudehistory.Session{}

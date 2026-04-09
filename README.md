@@ -127,9 +127,9 @@ patch test results (linux/mac/windows + linux distros).
 
 ## Claude Code install and patching
 
-- When opening Claude Code from the TUI or history commands, if `claude` is
-  missing, `claude-proxy` can install it automatically with the official
-  installer.
+- When opening Claude Code from the TUI or history commands, `claude-proxy`
+  uses its managed Claude Code install by default. If that install is missing,
+  it can install Claude automatically with the official installer.
 - On EL7/CentOS 7 hosts, if the official installer fails because the downloaded
   Claude binary needs a newer glibc, `claude-proxy` can reuse that downloaded
   binary through a private launcher and then continue with its glibc compat
@@ -228,7 +228,7 @@ claude-proxy history open <session-id>
 This uses the current proxy mode (direct or SSH proxy). If proxy mode is
 enabled but no profile exists, you will be prompted to configure SSH.
 
-If `claude` is not in PATH:
+If you want to force a specific Claude binary:
 
 ```bash
 claude-proxy history --claude-path /path/to/claude tui

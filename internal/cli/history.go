@@ -71,7 +71,7 @@ func newHistoryCmd(root *rootOptions) *cobra.Command {
 		Short: "Inspect Claude Code history",
 	}
 	cmd.PersistentFlags().StringVar(&claudeDir, "claude-dir", "", "Override Claude Code data dir (default: ~/.claude)")
-	cmd.PersistentFlags().StringVar(&claudePath, "claude-path", "", "Override Claude CLI path (default: search PATH)")
+	cmd.PersistentFlags().StringVar(&claudePath, "claude-path", "", "Override Claude CLI path (default: use claude-proxy-managed Claude Code)")
 	cmd.PersistentFlags().StringVar(&profileRef, "profile", "", "Proxy profile id or name")
 
 	cmd.AddCommand(
