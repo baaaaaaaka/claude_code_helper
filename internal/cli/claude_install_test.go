@@ -1210,6 +1210,7 @@ func TestEnsureClaudeInstalledExportsGitBashBeforeReturningManagedWindowsInstall
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("LOCALAPPDATA", localAppData)
+	t.Setenv("CLAUDE_CODE_GIT_BASH_PATH", "")
 
 	var exports []string
 	claudeInstallSetenvFn = func(key string, value string) error {

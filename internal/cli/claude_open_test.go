@@ -134,6 +134,10 @@ func TestBuildClaudeResumeCommandKeepsRulesModeArgFree(t *testing.T) {
 }
 
 func TestBuildClaudeResumeCommandUsesManagedClaudeWhenUnset(t *testing.T) {
+	prevGOOS := claudeInstallGOOS
+	t.Cleanup(func() { claudeInstallGOOS = prevGOOS })
+	claudeInstallGOOS = "linux"
+
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	managedClaude := filepath.Join(home, ".claude", "local", "claude")
@@ -163,8 +167,14 @@ func TestBuildClaudeResumeCommandUsesManagedClaudeWhenUnset(t *testing.T) {
 }
 
 func TestBuildClaudeResumeCommandUsesManagedClaudeViaUserHomeFallbackWhenEnvMissing(t *testing.T) {
+	prevGOOS := claudeInstallGOOS
 	prevUserHomeDirFn := userHomeDirFn
-	t.Cleanup(func() { userHomeDirFn = prevUserHomeDirFn })
+	t.Cleanup(func() {
+		claudeInstallGOOS = prevGOOS
+		userHomeDirFn = prevUserHomeDirFn
+	})
+
+	claudeInstallGOOS = "linux"
 
 	home := t.TempDir()
 	userHomeDirFn = func() (string, error) { return home, nil }
@@ -197,8 +207,14 @@ func TestBuildClaudeResumeCommandUsesManagedClaudeViaUserHomeFallbackWhenEnvMiss
 }
 
 func TestBuildClaudeResumeCommandUsesRecoveredLauncherWhenHomeEnvMissing(t *testing.T) {
+	prevGOOS := claudeInstallGOOS
 	prevUserHomeDirFn := userHomeDirFn
-	t.Cleanup(func() { userHomeDirFn = prevUserHomeDirFn })
+	t.Cleanup(func() {
+		claudeInstallGOOS = prevGOOS
+		userHomeDirFn = prevUserHomeDirFn
+	})
+
+	claudeInstallGOOS = "linux"
 	userHomeDirFn = func() (string, error) { return "", os.ErrNotExist }
 
 	cacheRoot := filepath.Join(t.TempDir(), "cache")
