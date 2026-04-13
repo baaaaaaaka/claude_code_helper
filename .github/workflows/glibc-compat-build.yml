@@ -113,3 +113,21 @@ jobs:
             "dist/glibc-compat/$PATCHELF_ASSET" \
             "dist/glibc-compat/$PATCHELF_ASSET.sha256" \
             --clobber
+
+      - name: Verify published release assets
+        shell: bash
+        env:
+          GLIBC_COMPAT_REPO: ${{ github.repository }}
+          PATCHELF_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if OUT_DIR="$PWD/dist/release-verify" bash scripts/glibc/verify_release_assets.sh; then
+              exit 0
+            fi
+            if [[ "$attempt" -eq 3 ]]; then
+              exit 1
+            fi
+            echo "Retrying published asset verification after propagation delay..."
+            sleep 5
+          done

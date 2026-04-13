@@ -206,6 +206,15 @@ jobs:
           fi
           echo "CLAUDE_PATCH_VERSION=$version" >> "$GITHUB_ENV"
 
+      - name: Verify published glibc/patchelf release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT_DIR="$PWD/dist/release-verify" \
+          GLIBC_COMPAT_REPO="${GITHUB_REPOSITORY}" \
+          PATCHELF_REPO="${GITHUB_REPOSITORY}" \
+          bash scripts/glibc/verify_release_assets.sh
+
       - name: Claude patch smoke (macOS)
         if: runner.os == 'macOS'
         shell: bash
@@ -423,6 +432,62 @@ jobs:
               -e CLAUDE_PATCH_BUCKET \
               "$img" bash /ci/container_claude_patch_smoke.sh
           done
+
+      - name: Smoke test in CentOS7 (release glibc + release patchelf auto-download)
+        shell: bash
+        timeout-minutes: 20
+        env:
+          CLAUDE_PATCH_TEST: "1"
+          CLAUDE_PROXY_GLIBC_COMPAT_REPO: "baaaaaaaka/claude_code_helper"
+          CLAUDE_PROXY_GLIBC_COMPAT_TAG: "glibc-compat-v2.31"
+          CLAUDE_PROXY_PATCHELF_REPO: "baaaaaaaka/claude_code_helper"
+          CLAUDE_PROXY_PATCHELF_TAG: "glibc-compat-v2.31"
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/dist:/dist:ro" \
+            -v "$PWD/scripts/ci:/ci:ro" \
+            -e CLAUDE_PATCH_TEST \
+            -e CLAUDE_PATCH_VERSION \
+            -e CLAUDE_PATCH_BUCKET \
+            -e CLAUDE_PATCH_SKIP_PRECHECK=1 \
+            -e CLAUDE_PATCH_ASSERT_RELEASE_ASSETS=1 \
+            -e CLAUDE_PATCH_CACHE_ROOT=/tmp/claude-proxy-cache \
+            -e CLAUDE_PROXY_HOST_ID=centos7-release-assets \
+            -e CLAUDE_PROXY_GLIBC_COMPAT=1 \
+            -e CLAUDE_PROXY_GLIBC_COMPAT_REPO \
+            -e CLAUDE_PROXY_GLIBC_COMPAT_TAG \
+            -e CLAUDE_PROXY_PATCHELF_REPO \
+            -e CLAUDE_PROXY_PATCHELF_TAG \
+            centos:7 bash /ci/container_claude_patch_smoke.sh
+
+      - name: Smoke test in Rocky8 (forced compat patch via release assets)
+        shell: bash
+        timeout-minutes: 20
+        env:
+          CLAUDE_PATCH_TEST: "1"
+          CLAUDE_PROXY_GLIBC_COMPAT_REPO: "baaaaaaaka/claude_code_helper"
+          CLAUDE_PROXY_GLIBC_COMPAT_TAG: "glibc-compat-v2.31"
+          CLAUDE_PROXY_PATCHELF_REPO: "baaaaaaaka/claude_code_helper"
+          CLAUDE_PROXY_PATCHELF_TAG: "glibc-compat-v2.31"
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/dist:/dist:ro" \
+            -v "$PWD/scripts/ci:/ci:ro" \
+            -e CLAUDE_PATCH_TEST \
+            -e CLAUDE_PATCH_VERSION \
+            -e CLAUDE_PATCH_BUCKET \
+            -e CLAUDE_PATCH_ASSERT_RELEASE_ASSETS=1 \
+            -e CLAUDE_PATCH_CACHE_ROOT=/tmp/claude-proxy-cache \
+            -e CLAUDE_PROXY_HOST_ID=rockylinux8-forced-compat \
+            -e CLAUDE_PROXY_GLIBC_COMPAT=1 \
+            -e CLAUDE_PROXY_GLIBC_COMPAT_FORCE_HOST=1 \
+            -e CLAUDE_PROXY_GLIBC_COMPAT_REPO \
+            -e CLAUDE_PROXY_GLIBC_COMPAT_TAG \
+            -e CLAUDE_PROXY_PATCHELF_REPO \
+            -e CLAUDE_PROXY_PATCHELF_TAG \
+            rockylinux:8 bash /ci/container_claude_patch_smoke.sh
 
       - name: Smoke test in CentOS7 (Claude startup via host-local glibc mirror)
         shell: bash

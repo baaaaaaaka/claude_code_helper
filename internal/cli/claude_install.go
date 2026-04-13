@@ -348,7 +348,7 @@ func maybeRecoverClaudeInstallOnEL7(installerOutput string, out io.Writer) (bool
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		return false, nil
 	}
-	if !glibcCompatHostEligibleFn() || !isMissingGlibcSymbolError(installerOutput) {
+	if !glibcCompatHostEnabled() || !isMissingGlibcSymbolError(installerOutput) {
 		return false, nil
 	}
 

@@ -9,6 +9,7 @@ import (
 const exePatchEnabledEnv = "CLAUDE_PROXY_EXE_PATCH"
 const exePatchGlibcCompatEnv = "CLAUDE_PROXY_GLIBC_COMPAT"
 const exePatchGlibcCompatRootEnv = "CLAUDE_PROXY_GLIBC_COMPAT_ROOT"
+const exePatchGlibcCompatForceHostEnv = "CLAUDE_PROXY_GLIBC_COMPAT_FORCE_HOST"
 
 func exePatchEnabledDefault() bool {
 	return parseBoolEnv(exePatchEnabledEnv, true)
@@ -20,6 +21,13 @@ func exePatchGlibcCompatDefault() bool {
 
 func exePatchGlibcCompatRootDefault() string {
 	return strings.TrimSpace(os.Getenv(exePatchGlibcCompatRootEnv))
+}
+
+func glibcCompatHostEnabled() bool {
+	if parseBoolEnv(exePatchGlibcCompatForceHostEnv, false) {
+		return true
+	}
+	return glibcCompatHostEligibleFn()
 }
 
 func parseBoolEnv(name string, defaultValue bool) bool {

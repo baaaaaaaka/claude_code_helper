@@ -236,16 +236,36 @@ jobs:
             skip_precheck: "1"
             needs_patchelf: "1"
             glibc_compat: "1"
+            force_glibc_compat: "0"
+            assert_release_assets: "0"
+          - platform: "centos7-release-assets"
+            image: centos:7
+            skip_precheck: "1"
+            needs_patchelf: "0"
+            glibc_compat: "1"
+            force_glibc_compat: "0"
+            assert_release_assets: "1"
           - platform: "rockylinux8"
             image: rockylinux:8
             skip_precheck: "0"
             needs_patchelf: "0"
             glibc_compat: "0"
+            force_glibc_compat: "0"
+            assert_release_assets: "0"
+          - platform: "rockylinux8-forced-compat"
+            image: rockylinux:8
+            skip_precheck: "0"
+            needs_patchelf: "0"
+            glibc_compat: "1"
+            force_glibc_compat: "1"
+            assert_release_assets: "1"
           - platform: "ubuntu20.04"
             image: ubuntu:20.04
             skip_precheck: "0"
             needs_patchelf: "0"
             glibc_compat: "0"
+            force_glibc_compat: "0"
+            assert_release_assets: "0"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -283,6 +303,8 @@ jobs:
           SKIP_PRECHECK: ${{ matrix.skip_precheck }}
           NEEDS_PATCHELF: ${{ matrix.needs_patchelf }}
           GLIBC_COMPAT: ${{ matrix.glibc_compat }}
+          FORCE_GLIBC_COMPAT: ${{ matrix.force_glibc_compat }}
+          ASSERT_RELEASE_ASSETS: ${{ matrix.assert_release_assets }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -297,6 +319,8 @@ jobs:
           skip_precheck = os.environ["SKIP_PRECHECK"] == "1"
           needs_patchelf = os.environ["NEEDS_PATCHELF"] == "1"
           glibc_compat = os.environ["GLIBC_COMPAT"] == "1"
+          force_glibc_compat = os.environ["FORCE_GLIBC_COMPAT"] == "1"
+          assert_release_assets = os.environ["ASSERT_RELEASE_ASSETS"] == "1"
           test_bin = os.environ["TEST_BIN_PATH"]
           bucket = os.environ["CLAUDE_PATCH_BUCKET"]
           ci_scripts = os.path.join(os.environ["GITHUB_WORKSPACE"], "scripts", "ci")
@@ -335,6 +359,13 @@ jobs:
               cmd += ["-e", "CLAUDE_CODE_OAUTH_TOKEN"]
           if skip_precheck:
               cmd += ["-e", "CLAUDE_PATCH_SKIP_PRECHECK=1"]
+          if assert_release_assets:
+              cmd += [
+                  "-e",
+                  "CLAUDE_PATCH_ASSERT_RELEASE_ASSETS=1",
+                  "-e",
+                  "CLAUDE_PATCH_CACHE_ROOT=/tmp/claude-proxy-cache",
+              ]
           if needs_patchelf:
               cmd += [
                   "-v",
@@ -352,7 +383,13 @@ jobs:
                   "CLAUDE_PROXY_GLIBC_COMPAT_REPO=baaaaaaaka/claude_code_helper",
                   "-e",
                   "CLAUDE_PROXY_GLIBC_COMPAT_TAG=glibc-compat-v2.31",
+                  "-e",
+                  "CLAUDE_PROXY_PATCHELF_REPO=baaaaaaaka/claude_code_helper",
+                  "-e",
+                  "CLAUDE_PROXY_PATCHELF_TAG=glibc-compat-v2.31",
               ]
+          if force_glibc_compat:
+              cmd += ["-e", "CLAUDE_PROXY_GLIBC_COMPAT_FORCE_HOST=1"]
           cmd += [image, "bash", "/ci/container_claude_patch_smoke.sh"]
           proc = subprocess.run(cmd)
           results[version] = "pass" if proc.returncode == 0 else "fail"

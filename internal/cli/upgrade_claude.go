@@ -402,7 +402,7 @@ func probeInstalledClaudeVersion(ctx context.Context, path string) (bool, error)
 func canRepairWithGlibcCompat(opts exePatchOptions) bool {
 	return opts.glibcCompatConfigured() &&
 		strings.EqualFold(claudeInstallGOOS, "linux") &&
-		glibcCompatHostEligibleFn()
+		glibcCompatHostEnabled()
 }
 
 func stashInstalledClaudeVersionFile(path string) (string, error) {

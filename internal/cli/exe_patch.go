@@ -318,7 +318,7 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 	}
 	yoloRequested := hasYoloBypassPermissionsArg(cmdArgs)
 	builtinPatchAllowed := (yoloRequested || opts.allowBuiltInWithoutBypass) && len(builtinSpecs) > 0
-	glibcCompatHost := isClaude && glibcCompat && glibcCompatHostEligibleFn()
+	glibcCompatHost := isClaude && glibcCompat && glibcCompatHostEnabled()
 	patchTargetPath := resolvedPath
 	var compatOutcome *patchOutcome
 	// Claude's built-in byte patches are only allowed when a launch both

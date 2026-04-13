@@ -61,3 +61,24 @@ func TestExePatchGlibcCompatRootDefault(t *testing.T) {
 		t.Fatalf("expected trimmed root, got %q", got)
 	}
 }
+
+func TestGlibcCompatHostEnabled(t *testing.T) {
+	prev := glibcCompatHostEligibleFn
+	t.Cleanup(func() { glibcCompatHostEligibleFn = prev })
+
+	t.Run("uses detected host by default", func(t *testing.T) {
+		t.Setenv(exePatchGlibcCompatForceHostEnv, "")
+		glibcCompatHostEligibleFn = func() bool { return false }
+		if glibcCompatHostEnabled() {
+			t.Fatalf("expected host eligibility to remain false without force env")
+		}
+	})
+
+	t.Run("force env overrides host detection", func(t *testing.T) {
+		t.Setenv(exePatchGlibcCompatForceHostEnv, "true")
+		glibcCompatHostEligibleFn = func() bool { return false }
+		if !glibcCompatHostEnabled() {
+			t.Fatalf("expected force env to enable glibc compat host mode")
+		}
+	})
+}
