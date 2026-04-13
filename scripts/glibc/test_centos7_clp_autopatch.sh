@@ -18,6 +18,9 @@ GLIBC_COMPAT_REPO="${GLIBC_COMPAT_REPO:-}"
 GLIBC_COMPAT_TAG="${GLIBC_COMPAT_TAG:-}"
 HOST_ID="${CLAUDE_PROXY_HOST_ID:-centos7-smoke}"
 CACHE_ROOT="${XDG_CACHE_HOME:-/tmp/claude-proxy-cache}"
+PATCHELF_HELPER_PATH="${CLAUDE_PROXY_PATCHELF_PATH:-}"
+PATCHELF_CMD="${PATCHELF_HELPER_PATH:-patchelf}"
+helper_bin_dir=""
 
 sshd_pid=""
 
@@ -30,8 +33,25 @@ patch_base_repo() {
 
 install_deps() {
   patch_base_repo
-  yum -y install ca-certificates curl openssh-server openssh-clients epel-release
-  yum -y install patchelf
+  yum -y install ca-certificates curl openssh-server openssh-clients
+  if [[ -z "$PATCHELF_HELPER_PATH" ]]; then
+    yum -y install epel-release
+    yum -y install patchelf
+  fi
+}
+
+prepare_patchelf_helper() {
+  if [[ -z "$PATCHELF_HELPER_PATH" ]]; then
+    return
+  fi
+  if [[ ! -x "$PATCHELF_HELPER_PATH" ]]; then
+    echo "Configured CLAUDE_PROXY_PATCHELF_PATH is not executable: ${PATCHELF_HELPER_PATH}" >&2
+    exit 1
+  fi
+  helper_bin_dir="$(mktemp -d)"
+  ln -sf "$PATCHELF_HELPER_PATH" "$helper_bin_dir/patchelf"
+  export PATH="$helper_bin_dir:$PATH"
+  PATCHELF_CMD="$PATCHELF_HELPER_PATH"
 }
 
 setup_sshd() {
@@ -212,10 +232,10 @@ EOF
   local interp=""
   local rpath=""
   set +e
-  interp="$(patchelf --print-interpreter "$mirror_path" 2>/dev/null)"
+  interp="$("$PATCHELF_CMD" --print-interpreter "$mirror_path" 2>/dev/null)"
   local interp_ec=$?
   if [[ "$interp_ec" -eq 0 ]]; then
-    rpath="$(patchelf --print-rpath "$mirror_path" 2>/dev/null || true)"
+    rpath="$("$PATCHELF_CMD" --print-rpath "$mirror_path" 2>/dev/null || true)"
   fi
   set -e
 
@@ -270,6 +290,9 @@ EOF
 }
 
 cleanup() {
+  if [[ -n "$helper_bin_dir" ]]; then
+    rm -rf "$helper_bin_dir" || true
+  fi
   if [[ -n "$sshd_pid" ]]; then
     kill "$sshd_pid" 2>/dev/null || true
   fi
@@ -277,6 +300,7 @@ cleanup() {
 trap cleanup EXIT
 
 install_deps
+prepare_patchelf_helper
 setup_sshd
 prepare_runtime
 run_clp_smoke

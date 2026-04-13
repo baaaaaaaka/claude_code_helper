@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -52,6 +53,53 @@ func assertGlibcCompatMirrorLaunchPrefix(t *testing.T, prefix []string, targetPa
 	if !sameFilePath(prefix[2], targetPath) {
 		t.Fatalf("expected target path %q at end of launch prefix, got %#v", targetPath, prefix)
 	}
+}
+
+func setCompatReleaseBaseURL(t *testing.T, url string) {
+	t.Helper()
+	prev := glibcCompatReleaseBaseURL
+	glibcCompatReleaseBaseURL = url
+	t.Cleanup(func() { glibcCompatReleaseBaseURL = prev })
+}
+
+func patchelfHelperScript(recordPath string) []byte {
+	return []byte("#!/bin/sh\nif [ \"$1\" = \"--print-interpreter\" ]; then\n  echo /lib64/ld-linux-x86-64.so.2\n  exit 0\nfi\nif [ \"$1\" = \"--print-rpath\" ]; then\n  echo /usr/lib64\n  exit 0\nfi\nprintf '%s\n' \"$@\" > \"" + recordPath + "\"\nexit 0\n")
+}
+
+func serveCompatReleaseAsset(t *testing.T, repo string, tag string, asset string, payload []byte) (*httptest.Server, *int, *int) {
+	t.Helper()
+	sum := sha256.Sum256(payload)
+	assetRequests := 0
+	checksumRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/" + repo + "/releases/download/" + tag + "/" + asset:
+			assetRequests++
+			_, _ = w.Write(payload)
+		case "/" + repo + "/releases/download/" + tag + "/" + asset + ".sha256":
+			checksumRequests++
+			_, _ = w.Write([]byte(hex.EncodeToString(sum[:]) + "  " + asset + "\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server, &assetRequests, &checksumRequests
+}
+
+func patchelfHelperCachePaths(t *testing.T, repo string, tag string) (string, string) {
+	t.Helper()
+	cacheBase, err := resolveStableCacheBase()
+	if err != nil {
+		t.Fatalf("resolveStableCacheBase error: %v", err)
+	}
+	asset, err := patchelfAssetName(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("patchelfAssetName error: %v", err)
+	}
+	cacheRoot := filepath.Join(cacheBase, "claude-proxy", "tools", "patchelf", sanitizePathComponent(repo), sanitizePathComponent(tag))
+	binaryPath := filepath.Join(cacheRoot, asset)
+	return binaryPath, binaryPath + ".sha256"
 }
 
 func TestResolveGlibcCompatLayout(t *testing.T) {
@@ -227,6 +275,169 @@ func TestResolveGlibcCompatRepoAndTag(t *testing.T) {
 	})
 }
 
+func TestResolvePatchelfRepoAndTag(t *testing.T) {
+	t.Run("explicit patchelf repo and tag env", func(t *testing.T) {
+		t.Setenv(patchelfRepoEnv, "foo/tools")
+		t.Setenv(patchelfTagEnv, "patchelf-vX")
+		if got := resolvePatchelfRepo(); got != "foo/tools" {
+			t.Fatalf("expected repo foo/tools, got %q", got)
+		}
+		if got := resolvePatchelfTag(); got != "patchelf-vX" {
+			t.Fatalf("expected custom patchelf tag, got %q", got)
+		}
+	})
+
+	t.Run("default patchelf repo and tag follow glibc compat settings", func(t *testing.T) {
+		t.Setenv(glibcCompatRepoEnv, "foo/bar")
+		t.Setenv(glibcCompatTagEnv, "glibc-compat-vX")
+		t.Setenv(patchelfRepoEnv, "")
+		t.Setenv(patchelfTagEnv, "")
+		if got := resolvePatchelfRepo(); got != "foo/bar" {
+			t.Fatalf("expected patchelf repo to follow glibc compat repo, got %q", got)
+		}
+		if got := resolvePatchelfTag(); got != "glibc-compat-vX" {
+			t.Fatalf("expected patchelf tag to follow glibc compat tag, got %q", got)
+		}
+	})
+
+	t.Run("asset and release url", func(t *testing.T) {
+		asset, err := patchelfAssetName("linux", "amd64")
+		if err != nil {
+			t.Fatalf("patchelfAssetName error: %v", err)
+		}
+		if asset != "patchelf-linux-x86_64-static" {
+			t.Fatalf("unexpected patchelf asset name: %q", asset)
+		}
+		if _, err := patchelfAssetName("darwin", "arm64"); err == nil {
+			t.Fatalf("expected unsupported patchelf platform error")
+		}
+		gotURL := patchelfReleaseURL("owner/repo", "tag", asset)
+		wantURL := "https://github.com/owner/repo/releases/download/tag/" + asset
+		if gotURL != wantURL {
+			t.Fatalf("unexpected patchelf release url: %q", gotURL)
+		}
+	})
+}
+
+func TestResolvePatchelfBinarySupportsExplicitPathOverride(t *testing.T) {
+	overrideDir := t.TempDir()
+	overridePath := filepath.Join(overrideDir, "patchelf-custom")
+	if err := os.WriteFile(overridePath, patchelfHelperScript(filepath.Join(overrideDir, "unused.args")), 0o755); err != nil {
+		t.Fatalf("write override helper: %v", err)
+	}
+	t.Setenv(patchelfPathEnv, overridePath)
+	t.Setenv("PATH", "")
+
+	got, err := resolvePatchelfBinary(io.Discard)
+	if err != nil {
+		t.Fatalf("resolvePatchelfBinary error: %v", err)
+	}
+	if got != overridePath {
+		t.Fatalf("expected explicit override %q, got %q", overridePath, got)
+	}
+}
+
+func TestResolvePatchelfBinaryRejectsInvalidOverride(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("missing path", func(t *testing.T) {
+		t.Setenv(patchelfPathEnv, filepath.Join(dir, "missing-patchelf"))
+		if _, err := resolvePatchelfBinary(io.Discard); err == nil {
+			t.Fatalf("expected missing override path error")
+		}
+	})
+
+	t.Run("directory path", func(t *testing.T) {
+		t.Setenv(patchelfPathEnv, dir)
+		if _, err := resolvePatchelfBinary(io.Discard); err == nil || !strings.Contains(err.Error(), "points to a directory") {
+			t.Fatalf("expected directory override error, got %v", err)
+		}
+	})
+
+	t.Run("unusable executable", func(t *testing.T) {
+		overridePath := filepath.Join(dir, "bad-patchelf")
+		if err := os.WriteFile(overridePath, []byte("#!/bin/sh\necho unusable >&2\nexit 127\n"), 0o755); err != nil {
+			t.Fatalf("write unusable override: %v", err)
+		}
+		t.Setenv(patchelfPathEnv, overridePath)
+		if _, err := resolvePatchelfBinary(io.Discard); err == nil || !strings.Contains(err.Error(), "validate "+patchelfPathEnv) {
+			t.Fatalf("expected unusable override validation error, got %v", err)
+		}
+	})
+}
+
+func TestResolvePatchelfBinaryPrefersSystemPathOverDownload(t *testing.T) {
+	stubDir := t.TempDir()
+	recordPath := filepath.Join(stubDir, "patchelf.args")
+	writeStub(t, stubDir, patchelfBinaryName, string(patchelfHelperScript(recordPath)), "@echo off\r\nexit /b 1\r\n")
+	setStubPath(t, stubDir)
+
+	repo := "owner/repo"
+	tag := "patchelf-test"
+	t.Setenv(patchelfRepoEnv, repo)
+	t.Setenv(patchelfTagEnv, tag)
+
+	asset := "patchelf-linux-x86_64-static"
+	server, assetRequests, checksumRequests := serveCompatReleaseAsset(t, repo, tag, asset, patchelfHelperScript(recordPath))
+	setCompatReleaseBaseURL(t, server.URL)
+
+	path, err := resolvePatchelfBinary(io.Discard)
+	if err != nil {
+		t.Fatalf("resolvePatchelfBinary error: %v", err)
+	}
+	wantPath, err := exec.LookPath(patchelfBinaryName)
+	if err != nil {
+		t.Fatalf("LookPath(%s) error: %v", patchelfBinaryName, err)
+	}
+	if !sameFilePath(path, wantPath) {
+		t.Fatalf("expected PATH patchelf %q, got %q", wantPath, path)
+	}
+	if *assetRequests != 0 || *checksumRequests != 0 {
+		t.Fatalf("expected no helper download when PATH patchelf exists, got asset=%d checksum=%d", *assetRequests, *checksumRequests)
+	}
+}
+
+func TestResolvePatchelfBinaryFallsBackWhenSystemPathIsUnusable(t *testing.T) {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		t.Skip("automatic patchelf helper download only applies on linux/amd64")
+	}
+	cacheBase := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheBase)
+
+	stubDir := t.TempDir()
+	recordPath := filepath.Join(t.TempDir(), "patchelf.args")
+	writeStub(t, stubDir, patchelfBinaryName, "#!/bin/sh\necho unusable >&2\nexit 127\n", "@echo off\r\necho unusable 1>&2\r\nexit /b 127\r\n")
+	setStubPath(t, stubDir)
+
+	repo := "owner/repo"
+	tag := "patchelf-test"
+	t.Setenv(patchelfRepoEnv, repo)
+	t.Setenv(patchelfTagEnv, tag)
+
+	asset, err := patchelfAssetName(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("patchelfAssetName error: %v", err)
+	}
+	server, assetRequests, checksumRequests := serveCompatReleaseAsset(t, repo, tag, asset, patchelfHelperScript(recordPath))
+	setCompatReleaseBaseURL(t, server.URL)
+
+	var log strings.Builder
+	path, err := resolvePatchelfBinary(&log)
+	if err != nil {
+		t.Fatalf("resolvePatchelfBinary error: %v", err)
+	}
+	wantPath, _ := patchelfHelperCachePaths(t, repo, tag)
+	if path != wantPath {
+		t.Fatalf("expected helper download path %q, got %q", wantPath, path)
+	}
+	if *assetRequests != 1 || *checksumRequests != 1 {
+		t.Fatalf("expected unusable PATH patchelf to trigger helper download, got asset=%d checksum=%d", *assetRequests, *checksumRequests)
+	}
+	if !strings.Contains(log.String(), "ignoring unusable patchelf") {
+		t.Fatalf("expected unusable PATH patchelf log, got %q", log.String())
+	}
+}
+
 func TestDownloadAndVerifyGlibcCompatBundle(t *testing.T) {
 	dir := t.TempDir()
 	payload := []byte("glibc bundle")
@@ -393,6 +604,117 @@ func TestEnsureDefaultGlibcCompatRuntimeUsesSeededBundle(t *testing.T) {
 	}
 	if secondRoot != runtimeRoot {
 		t.Fatalf("expected cached runtime root %q, got %q", runtimeRoot, secondRoot)
+	}
+}
+
+func TestResolvePatchelfBinaryDownloadsHelperWhenMissing(t *testing.T) {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		t.Skip("automatic patchelf helper download only applies on linux/amd64")
+	}
+	cacheBase := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheBase)
+	emptyPath := filepath.Join(t.TempDir(), "empty-bin")
+	if err := os.MkdirAll(emptyPath, 0o755); err != nil {
+		t.Fatalf("mkdir empty bin: %v", err)
+	}
+	t.Setenv("PATH", emptyPath)
+
+	repo := "owner/repo"
+	tag := "patchelf-test"
+	t.Setenv(patchelfRepoEnv, repo)
+	t.Setenv(patchelfTagEnv, tag)
+
+	recordPath := filepath.Join(t.TempDir(), "patchelf.args")
+	asset, err := patchelfAssetName(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("patchelfAssetName error: %v", err)
+	}
+	server, assetRequests, checksumRequests := serveCompatReleaseAsset(t, repo, tag, asset, patchelfHelperScript(recordPath))
+	setCompatReleaseBaseURL(t, server.URL)
+
+	path, err := resolvePatchelfBinary(io.Discard)
+	if err != nil {
+		t.Fatalf("resolvePatchelfBinary error: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat downloaded patchelf helper: %v", err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("expected downloaded patchelf helper to be executable, got mode %v", info.Mode())
+	}
+	out, err := runPatchelfWithBinary(path, "--print-interpreter", "/tmp/claude")
+	if err != nil {
+		t.Fatalf("runPatchelfWithBinary error: %v", err)
+	}
+	if strings.TrimSpace(string(out)) != "/lib64/ld-linux-x86-64.so.2" {
+		t.Fatalf("unexpected helper output: %q", string(out))
+	}
+
+	secondPath, err := resolvePatchelfBinary(io.Discard)
+	if err != nil {
+		t.Fatalf("second resolvePatchelfBinary error: %v", err)
+	}
+	if secondPath != path {
+		t.Fatalf("expected cached patchelf helper path %q, got %q", path, secondPath)
+	}
+	if *assetRequests != 1 || *checksumRequests != 1 {
+		t.Fatalf("expected one asset+checksum download, got asset=%d checksum=%d", *assetRequests, *checksumRequests)
+	}
+}
+
+func TestResolvePatchelfBinaryRedownloadsCorruptCache(t *testing.T) {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		t.Skip("automatic patchelf helper download only applies on linux/amd64")
+	}
+	cacheBase := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheBase)
+	emptyPath := filepath.Join(t.TempDir(), "empty-bin")
+	if err := os.MkdirAll(emptyPath, 0o755); err != nil {
+		t.Fatalf("mkdir empty bin: %v", err)
+	}
+	t.Setenv("PATH", emptyPath)
+
+	repo := "owner/repo"
+	tag := "patchelf-test"
+	t.Setenv(patchelfRepoEnv, repo)
+	t.Setenv(patchelfTagEnv, tag)
+
+	binaryPath, checksumPath := patchelfHelperCachePaths(t, repo, tag)
+	if err := os.MkdirAll(filepath.Dir(binaryPath), 0o755); err != nil {
+		t.Fatalf("mkdir helper cache: %v", err)
+	}
+	if err := os.WriteFile(binaryPath, []byte("corrupt-helper"), 0o644); err != nil {
+		t.Fatalf("write corrupt helper: %v", err)
+	}
+	if err := os.WriteFile(checksumPath, []byte(strings.Repeat("0", 64)+"  "+filepath.Base(binaryPath)+"\n"), 0o644); err != nil {
+		t.Fatalf("write corrupt checksum: %v", err)
+	}
+
+	recordPath := filepath.Join(t.TempDir(), "patchelf.args")
+	asset, err := patchelfAssetName(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("patchelfAssetName error: %v", err)
+	}
+	server, assetRequests, checksumRequests := serveCompatReleaseAsset(t, repo, tag, asset, patchelfHelperScript(recordPath))
+	setCompatReleaseBaseURL(t, server.URL)
+
+	path, err := resolvePatchelfBinary(io.Discard)
+	if err != nil {
+		t.Fatalf("resolvePatchelfBinary error: %v", err)
+	}
+	if path != binaryPath {
+		t.Fatalf("expected cached helper path %q, got %q", binaryPath, path)
+	}
+	data, err := os.ReadFile(binaryPath)
+	if err != nil {
+		t.Fatalf("read redownloaded helper: %v", err)
+	}
+	if string(data) == "corrupt-helper" {
+		t.Fatalf("expected corrupt helper cache to be replaced")
+	}
+	if *assetRequests != 1 || *checksumRequests != 1 {
+		t.Fatalf("expected corrupt cache to trigger one redownload, got asset=%d checksum=%d", *assetRequests, *checksumRequests)
 	}
 }
 
@@ -596,6 +918,127 @@ func TestPrepareGlibcCompatMirrorUsesDistinctCacheKeysPerRuntime(t *testing.T) {
 	}
 }
 
+func TestPrepareGlibcCompatMirrorReusesExistingMirrorWithoutRepatching(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script test on windows")
+	}
+	cacheRoot := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv(claudeProxyHostIDEnv, "host-a")
+
+	layout := writeGlibcCompatRuntimeFixture(t, filepath.Join(t.TempDir(), "runtime"), "loader", "libc")
+
+	sourceDir := t.TempDir()
+	sourcePath := filepath.Join(sourceDir, "claude")
+	if err := os.WriteFile(sourcePath, []byte("claude-binary"), 0o700); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	stubDir := t.TempDir()
+	recordPath := filepath.Join(stubDir, "patchelf.args")
+	writeStub(t, stubDir, patchelfBinaryName, string(patchelfHelperScript(recordPath)), "@echo off\r\nexit /b 1\r\n")
+	setStubPath(t, stubDir)
+
+	firstOutcome, applied, err := prepareGlibcCompatMirror(sourcePath, layout, io.Discard, &patchOutcome{SourcePath: sourcePath})
+	if err != nil {
+		t.Fatalf("first prepareGlibcCompatMirror error: %v", err)
+	}
+	if !applied || firstOutcome == nil {
+		t.Fatalf("expected first mirror prepare to apply, got applied=%v outcome=%#v", applied, firstOutcome)
+	}
+	if err := os.Remove(recordPath); err != nil {
+		t.Fatalf("remove first patchelf record: %v", err)
+	}
+
+	firstInfo, err := os.Stat(firstOutcome.TargetPath)
+	if err != nil {
+		t.Fatalf("stat first mirror: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv(patchelfPathEnv, filepath.Join(t.TempDir(), "missing-patchelf"))
+
+	secondOutcome, applied, err := prepareGlibcCompatMirror(sourcePath, layout, io.Discard, &patchOutcome{SourcePath: sourcePath})
+	if err != nil {
+		t.Fatalf("second prepareGlibcCompatMirror error: %v", err)
+	}
+	if !applied || secondOutcome == nil {
+		t.Fatalf("expected second mirror prepare to apply, got applied=%v outcome=%#v", applied, secondOutcome)
+	}
+	if secondOutcome.TargetPath != firstOutcome.TargetPath {
+		t.Fatalf("expected mirror reuse at %q, got %q", firstOutcome.TargetPath, secondOutcome.TargetPath)
+	}
+	if _, err := os.Stat(recordPath); !os.IsNotExist(err) {
+		t.Fatalf("expected second mirror prepare not to rerun patchelf, got err=%v", err)
+	}
+	secondInfo, err := os.Stat(secondOutcome.TargetPath)
+	if err != nil {
+		t.Fatalf("stat reused mirror: %v", err)
+	}
+	if !secondInfo.ModTime().After(firstInfo.ModTime()) && !secondInfo.ModTime().Equal(firstInfo.ModTime()) {
+		t.Fatalf("expected reused mirror mtime to stay valid, before=%v after=%v", firstInfo.ModTime(), secondInfo.ModTime())
+	}
+}
+
+func TestPrepareGlibcCompatMirrorDownloadsPatchelfHelperWhenPATHMissing(t *testing.T) {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		t.Skip("automatic patchelf helper download only applies on linux/amd64")
+	}
+	cacheRoot := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv(claudeProxyHostIDEnv, "host-a")
+
+	emptyPath := filepath.Join(t.TempDir(), "empty-bin")
+	if err := os.MkdirAll(emptyPath, 0o755); err != nil {
+		t.Fatalf("mkdir empty bin: %v", err)
+	}
+	t.Setenv("PATH", emptyPath)
+
+	repo := "owner/repo"
+	tag := "patchelf-test"
+	t.Setenv(patchelfRepoEnv, repo)
+	t.Setenv(patchelfTagEnv, tag)
+
+	recordPath := filepath.Join(t.TempDir(), "patchelf.args")
+	asset, err := patchelfAssetName(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("patchelfAssetName error: %v", err)
+	}
+	server, _, _ := serveCompatReleaseAsset(t, repo, tag, asset, patchelfHelperScript(recordPath))
+	setCompatReleaseBaseURL(t, server.URL)
+
+	layout := writeGlibcCompatRuntimeFixture(t, filepath.Join(t.TempDir(), "runtime"), "loader", "libc")
+
+	sourceDir := t.TempDir()
+	sourcePath := filepath.Join(sourceDir, "claude")
+	if err := os.WriteFile(sourcePath, []byte("claude-binary"), 0o700); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	var log strings.Builder
+	outcome, applied, err := prepareGlibcCompatMirror(sourcePath, layout, &log, &patchOutcome{SourcePath: sourcePath})
+	if err != nil {
+		t.Fatalf("prepareGlibcCompatMirror error: %v", err)
+	}
+	if !applied {
+		t.Fatalf("expected glibc compat mirror to report applied")
+	}
+	if outcome == nil {
+		t.Fatalf("expected non-nil outcome")
+	}
+	assertGlibcCompatMirrorLaunchPrefix(t, outcome.LaunchArgsPrefix, outcome.TargetPath, layout.LibDir)
+	recordedArgs, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatalf("read patchelf record: %v", err)
+	}
+	if !strings.Contains(string(recordedArgs), "--set-interpreter") {
+		t.Fatalf("expected downloaded patchelf helper to patch the mirror, got %q", string(recordedArgs))
+	}
+	if !strings.Contains(log.String(), "downloaded patchelf helper") {
+		t.Fatalf("expected log to mention downloaded patchelf helper, got %q", log.String())
+	}
+}
+
 func TestApplyClaudeGlibcCompatPatchRescuesNonEL7Hosts(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("skip linux-only glibc compat flow outside linux")
@@ -684,6 +1127,7 @@ func TestApplyClaudeGlibcCompatPatchFallsBackToWrapperWithoutPatchelf(t *testing
 		t.Fatalf("mkdir empty bin: %v", err)
 	}
 	t.Setenv("PATH", emptyPath)
+	t.Setenv(patchelfPathEnv, filepath.Join(dir, "missing-patchelf"))
 
 	outcome, applied, err := applyClaudeGlibcCompatPatch(sourcePath, exePatchOptions{
 		enabledFlag:     true,
@@ -731,6 +1175,25 @@ func TestApplyClaudeGlibcCompatPatchFallsBackToWrapperWithoutPatchelf(t *testing
 	}
 	if string(gotSource) != "claude" {
 		t.Fatalf("expected source to remain unchanged")
+	}
+}
+
+func TestResolveGlibcCompatWrapperPathFindsAdjacentWrapper(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("wrapper shell script lookup is only meaningful outside windows")
+	}
+	layout := writeGlibcCompatRuntimeFixture(t, filepath.Join(t.TempDir(), "runtime"), "loader", "libc")
+	wrapperPath := filepath.Join(filepath.Dir(layout.RootDir), "run-with-glibc-2.31.sh")
+	if err := os.WriteFile(wrapperPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write wrapper: %v", err)
+	}
+
+	got, err := resolveGlibcCompatWrapperPath(layout)
+	if err != nil {
+		t.Fatalf("resolveGlibcCompatWrapperPath error: %v", err)
+	}
+	if !sameFilePath(got, wrapperPath) {
+		t.Fatalf("expected wrapper path %q, got %q", wrapperPath, got)
 	}
 }
 

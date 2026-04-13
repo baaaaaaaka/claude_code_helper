@@ -55,6 +55,7 @@ run_host() {
     -v "${repo_root}/scripts/glibc:/scripts:ro" \
     -v "${shared_dir}:/shared" \
     -e CLAUDE_PROXY_BIN=/dist/claude-proxy \
+    -e CLAUDE_PROXY_PATCHELF_PATH="${CLAUDE_PROXY_PATCHELF_PATH:-}" \
     -e CLAUDE_PATH=/shared/claude/claude \
     -e SHARED_HOME=/shared/home \
     -e EXPECT_MODE="${expect_mode}" \

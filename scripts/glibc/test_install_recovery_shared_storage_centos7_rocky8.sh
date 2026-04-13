@@ -35,6 +35,10 @@ trap cleanup EXIT
 
 run_centos7_install_recovery() {
   local shared_dir="$1"
+  local -a extra_env=()
+  if [[ -z "${CLAUDE_PROXY_PATCHELF_PATH:-}" ]]; then
+    extra_env+=(-e CLAUDE_INSTALL_NEEDS_PATCHELF=1)
+  fi
 
   echo "==> centos:7 (install recovery on shared home)"
   docker run --rm \
@@ -42,16 +46,17 @@ run_centos7_install_recovery() {
     -v "${repo_root}/scripts/ci:/ci:ro" \
     -v "${shared_dir}:/shared" \
     -e TEST_BIN_PATH=/dist/claude_cli_test \
+    -e CLAUDE_PROXY_PATCHELF_PATH="${CLAUDE_PROXY_PATCHELF_PATH:-}" \
     -e CLAUDE_INSTALL_TEST=1 \
     -e CLAUDE_INSTALL_TEST_EL7_GLIBC_RECOVERY=1 \
     -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallEL7RecoveryIntegration \
     -e CLAUDE_INSTALL_TEST_HOME=/shared/home \
     -e CLAUDE_INSTALL_TEST_HOST_ID=centos7-host \
-    -e CLAUDE_INSTALL_NEEDS_PATCHELF=1 \
     -e CLAUDE_INSTALL_NEEDS_TAR=1 \
     -e CLAUDE_PROXY_GLIBC_COMPAT_REPO="${GLIBC_COMPAT_REPO}" \
     -e CLAUDE_PROXY_GLIBC_COMPAT_TAG="${GLIBC_COMPAT_TAG}" \
     -e CI=true \
+    "${extra_env[@]}" \
     centos:7 bash /ci/container_claude_install_launch_smoke.sh
 }
 
@@ -65,6 +70,7 @@ run_rocky8_shared_launcher() {
     -v "${repo_root}/scripts/glibc:/scripts:ro" \
     -v "${shared_dir}:/shared" \
     -e CLAUDE_PROXY_BIN=/dist/claude-proxy \
+    -e CLAUDE_PROXY_PATCHELF_PATH="${CLAUDE_PROXY_PATCHELF_PATH:-}" \
     -e CLAUDE_PATH="${launcher_path}" \
     -e SHARED_HOME=/shared/home \
     -e EXPECT_MODE=direct \

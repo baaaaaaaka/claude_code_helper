@@ -5,12 +5,38 @@ test_bin="${TEST_BIN_PATH:-/dist/claude_cli_test}"
 test_name="${CLAUDE_INSTALL_TEST_NAME:-TestClaudeInstallLaunchIntegration}"
 needs_patchelf="${CLAUDE_INSTALL_NEEDS_PATCHELF:-0}"
 needs_tar="${CLAUDE_INSTALL_NEEDS_TAR:-0}"
+patchelf_helper_path="${CLAUDE_PROXY_PATCHELF_PATH:-}"
+helper_bin_dir=""
+
+cleanup() {
+  if [[ -n "$helper_bin_dir" ]]; then
+    rm -rf "$helper_bin_dir"
+  fi
+}
+trap cleanup EXIT
+
+prepare_patchelf_helper() {
+  if [[ -z "$patchelf_helper_path" ]]; then
+    return
+  fi
+  if [[ ! -x "$patchelf_helper_path" ]]; then
+    echo "Configured CLAUDE_PROXY_PATCHELF_PATH is not executable: ${patchelf_helper_path}" >&2
+    exit 1
+  fi
+  helper_bin_dir="$(mktemp -d)"
+  ln -sf "$patchelf_helper_path" "$helper_bin_dir/patchelf"
+  export PATH="$helper_bin_dir:$PATH"
+}
 
 install_deps() {
+  local install_system_patchelf=0
+  if [[ "$needs_patchelf" == "1" && -z "$patchelf_helper_path" ]]; then
+    install_system_patchelf=1
+  fi
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     pkgs=(ca-certificates curl wget)
-    if [[ "$needs_patchelf" == "1" ]]; then
+    if [[ "$install_system_patchelf" == "1" ]]; then
       pkgs+=(patchelf)
     fi
     if [[ "$needs_tar" == "1" ]]; then
@@ -23,7 +49,7 @@ install_deps() {
 
   if command -v dnf >/dev/null 2>&1; then
     pkgs=(ca-certificates curl wget)
-    if [[ "$needs_patchelf" == "1" ]]; then
+    if [[ "$install_system_patchelf" == "1" ]]; then
       pkgs+=(patchelf)
     fi
     if [[ "$needs_tar" == "1" ]]; then
@@ -44,7 +70,7 @@ install_deps() {
       pkgs+=(tar)
     fi
     yum -y install "${pkgs[@]}"
-    if [[ "$needs_patchelf" == "1" ]]; then
+    if [[ "$install_system_patchelf" == "1" ]]; then
       yum -y install epel-release
       yum -y install patchelf
     fi
@@ -85,6 +111,7 @@ fi
 
 echo "Running Claude install+launch smoke in container"
 
+prepare_patchelf_helper
 install_deps
 apply_proxy_env
 

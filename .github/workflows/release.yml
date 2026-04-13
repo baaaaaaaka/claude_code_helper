@@ -265,6 +265,13 @@ jobs:
           chmod +x "$test_bin"
           echo "TEST_BIN_PATH=$test_bin" >> "$GITHUB_ENV"
 
+      - name: Prepare patchelf helper asset
+        if: matrix.needs_patchelf == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT_DIR="$PWD/dist" bash scripts/glibc/prepare_patchelf_helper.sh
+
       - name: Run patch integration tests (containers)
         shell: bash
         env:
@@ -329,7 +336,14 @@ jobs:
           if skip_precheck:
               cmd += ["-e", "CLAUDE_PATCH_SKIP_PRECHECK=1"]
           if needs_patchelf:
-              cmd += ["-e", "CLAUDE_PATCH_NEEDS_PATCHELF=1"]
+              cmd += [
+                  "-v",
+                  f"{os.environ['GITHUB_WORKSPACE']}/dist:/dist:ro",
+                  "-e",
+                  "CLAUDE_PATCH_NEEDS_PATCHELF=1",
+                  "-e",
+                  "CLAUDE_PROXY_PATCHELF_PATH=/dist/patchelf-linux-x86_64-static",
+              ]
           if glibc_compat:
               cmd += [
                   "-e",

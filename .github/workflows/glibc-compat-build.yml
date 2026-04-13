@@ -1,4 +1,4 @@
-name: Build glibc compat bundle
+name: Build glibc compat assets
 
 on:
   workflow_dispatch:
@@ -19,11 +19,13 @@ concurrency:
 
 jobs:
   build-and-publish:
-    name: Build and publish glibc 2.31 compat bundle
+    name: Build and publish glibc 2.31 compat assets
     runs-on: ubuntu-latest
     env:
       GLIBC_COMPAT_TAG: "glibc-compat-v2.31"
       GLIBC_COMPAT_BUNDLE: "glibc-2.31-centos7-runtime-x86_64.tar.xz"
+      PATCHELF_SOURCE_URL: "https://github.com/NixOS/patchelf/releases/download/0.18.0/patchelf-0.18.0-x86_64.tar.gz"
+      PATCHELF_ASSET: "patchelf-linux-x86_64-static"
 
     steps:
       - name: Checkout
@@ -37,40 +39,53 @@ jobs:
           mkdir -p dist/glibc-compat
           OUT_DIR="$PWD/dist/glibc-compat" JOBS=4 bash scripts/glibc/build_glibc_231_centos7.sh
 
-      - name: Verify bundle checksum file
+      - name: Prepare patchelf helper asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT_DIR="$PWD/dist/glibc-compat" \
+          PATCHELF_SOURCE_URL="$PATCHELF_SOURCE_URL" \
+          PATCHELF_ASSET="$PATCHELF_ASSET" \
+          bash scripts/glibc/prepare_patchelf_helper.sh
+
+      - name: Verify helper asset checksum files
         shell: bash
         run: |
           set -euo pipefail
           cd dist/glibc-compat
-          test -f "$GLIBC_COMPAT_BUNDLE"
-          test -f "$GLIBC_COMPAT_BUNDLE.sha256"
-          expected="$(awk '{
-            for (i = 1; i <= NF; i++) {
-              if ($i ~ /^[0-9A-Fa-f]{64}$/) {
-                print tolower($i)
-                exit
+          for asset in "$GLIBC_COMPAT_BUNDLE" "$PATCHELF_ASSET"; do
+            test -f "$asset"
+            test -f "$asset.sha256"
+            expected="$(awk '{
+              for (i = 1; i <= NF; i++) {
+                if ($i ~ /^[0-9A-Fa-f]{64}$/) {
+                  print tolower($i)
+                  exit
+                }
               }
-            }
-          }' "$GLIBC_COMPAT_BUNDLE.sha256")"
-          if [ -z "$expected" ]; then
-            echo "Missing SHA256 in $GLIBC_COMPAT_BUNDLE.sha256" >&2
-            exit 1
-          fi
-          actual="$(sha256sum "$GLIBC_COMPAT_BUNDLE" | awk '{print tolower($1)}')"
-          if [ "$actual" != "$expected" ]; then
-            echo "SHA256 mismatch for $GLIBC_COMPAT_BUNDLE" >&2
-            echo "expected=$expected" >&2
-            echo "actual=$actual" >&2
-            exit 1
-          fi
+            }' "$asset.sha256")"
+            if [ -z "$expected" ]; then
+              echo "Missing SHA256 in $asset.sha256" >&2
+              exit 1
+            fi
+            actual="$(sha256sum "$asset" | awk '{print tolower($1)}')"
+            if [ "$actual" != "$expected" ]; then
+              echo "SHA256 mismatch for $asset" >&2
+              echo "expected=$expected" >&2
+              echo "actual=$actual" >&2
+              exit 1
+            fi
+          done
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: glibc-compat-bundle
+          name: glibc-compat-assets
           path: |
             dist/glibc-compat/${{ env.GLIBC_COMPAT_BUNDLE }}
             dist/glibc-compat/${{ env.GLIBC_COMPAT_BUNDLE }}.sha256
+            dist/glibc-compat/${{ env.PATCHELF_ASSET }}
+            dist/glibc-compat/${{ env.PATCHELF_ASSET }}.sha256
 
       - name: Ensure release exists
         shell: bash
@@ -79,10 +94,10 @@ jobs:
         run: |
           set -euo pipefail
           if ! gh release view "$GLIBC_COMPAT_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$GLIBC_COMPAT_TAG" \
+              gh release create "$GLIBC_COMPAT_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --title "glibc compat bundle v2.31" \
-              --notes "Automated CentOS7-compatible glibc 2.31 runtime bundle for Claude startup smoke tests."
+              --notes "Automated helper assets for Claude startup smoke tests, including a CentOS7-compatible glibc 2.31 runtime bundle and a static patchelf helper."
           fi
 
       - name: Publish release assets
@@ -95,4 +110,6 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             "dist/glibc-compat/$GLIBC_COMPAT_BUNDLE" \
             "dist/glibc-compat/$GLIBC_COMPAT_BUNDLE.sha256" \
+            "dist/glibc-compat/$PATCHELF_ASSET" \
+            "dist/glibc-compat/$PATCHELF_ASSET.sha256" \
             --clobber

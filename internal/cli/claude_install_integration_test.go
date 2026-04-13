@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -80,13 +81,6 @@ func TestClaudeInstallEL7RecoveryIntegration(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("EL7 glibc recovery integration only applies on linux")
 	}
-	if _, err := exec.LookPath("patchelf"); err != nil {
-		t.Skip("patchelf required for EL7 glibc recovery integration")
-	}
-	if _, err := exec.LookPath("tar"); err != nil {
-		t.Skip("tar required for EL7 glibc recovery integration")
-	}
-
 	homeDir := resolveClaudeInstallTestHome(t)
 	localBinDir, _ := configureClaudeInstallTestEnv(t, homeDir)
 	if err := os.MkdirAll(localBinDir, 0o755); err != nil {
@@ -100,6 +94,12 @@ func TestClaudeInstallEL7RecoveryIntegration(t *testing.T) {
 		hostID = "install-recovery-test"
 	}
 	t.Setenv("CLAUDE_PROXY_HOST_ID", hostID)
+	if _, err := resolvePatchelfBinary(io.Discard); err != nil {
+		t.Skipf("patchelf helper required for EL7 glibc recovery integration: %v", err)
+	}
+	if _, err := exec.LookPath("tar"); err != nil {
+		t.Skip("tar required for EL7 glibc recovery integration")
+	}
 
 	if path, err := exec.LookPath("claude"); err == nil {
 		t.Fatalf("expected claude to be absent from PATH before installation, found %q", path)

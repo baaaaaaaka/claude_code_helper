@@ -26,10 +26,16 @@ const (
 	glibcCompatRepoEnv = "CLAUDE_PROXY_GLIBC_COMPAT_REPO"
 	glibcCompatTagEnv  = "CLAUDE_PROXY_GLIBC_COMPAT_TAG"
 
+	patchelfPathEnv = "CLAUDE_PROXY_PATCHELF_PATH"
+	patchelfRepoEnv = "CLAUDE_PROXY_PATCHELF_REPO"
+	patchelfTagEnv  = "CLAUDE_PROXY_PATCHELF_TAG"
+
 	glibcCompatDefaultTag      = "glibc-compat-v2.31"
 	glibcCompatExtractedDir    = "glibc-2.31"
 	glibcCompatDownloadTimeout = 2 * time.Minute
 	glibcCompatMirrorKeep      = 2
+
+	patchelfDownloadTimeout = 2 * time.Minute
 )
 
 type glibcCompatLayout struct {
@@ -44,6 +50,7 @@ var (
 	userHomeDirFn             = os.UserHomeDir
 	tempDirFn                 = os.TempDir
 	readLinuxOSReleaseFn      = func() ([]byte, error) { return os.ReadFile("/etc/os-release") }
+	glibcCompatReleaseBaseURL = "https://github.com"
 )
 
 const (
@@ -126,6 +133,14 @@ func prepareGlibcCompatLaunchMirror(path string, layout glibcCompatLayout, log i
 			_ = touchPath(mirrorDir)
 			return pruneGlibcCompatMirrors(claudeRoot, mirrorKey)
 		}
+		patchelfPath := ""
+		if patchELF {
+			var err error
+			patchelfPath, err = resolvePatchelfBinary(log)
+			if err != nil {
+				return err
+			}
+		}
 		info, err := os.Stat(path)
 		if err != nil {
 			return fmt.Errorf("stat executable for glibc patch: %w", err)
@@ -139,15 +154,12 @@ func prepareGlibcCompatLaunchMirror(path string, layout glibcCompatLayout, log i
 		}
 		defer func() { _ = os.Remove(stagePath) }()
 		if patchELF {
-			if _, err := exec.LookPath(patchelfBinaryName); err != nil {
-				return fmt.Errorf("missing %s in PATH: %w", patchelfBinaryName, err)
-			}
-			currentInterpreter, err := readPatchelfValue(stagePath, "--print-interpreter")
+			currentInterpreter, err := readPatchelfValueWithBinary(patchelfPath, stagePath, "--print-interpreter")
 			if err != nil {
 				return fmt.Errorf("read interpreter: %w", err)
 			}
 			if !sameFilePath(currentInterpreter, layout.LoaderPath) {
-				if _, err := runPatchelf("--set-interpreter", layout.LoaderPath, stagePath); err != nil {
+				if _, err := runPatchelfWithBinary(patchelfPath, "--set-interpreter", layout.LoaderPath, stagePath); err != nil {
 					return fmt.Errorf("set interpreter: %w", err)
 				}
 			}
@@ -677,7 +689,149 @@ func glibcCompatAssetName(goos string, goarch string) (string, error) {
 }
 
 func glibcCompatReleaseURL(repo string, tag string, asset string) string {
-	return fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", repo, tag, asset)
+	baseURL := strings.TrimRight(strings.TrimSpace(glibcCompatReleaseBaseURL), "/")
+	if baseURL == "" {
+		baseURL = "https://github.com"
+	}
+	return fmt.Sprintf("%s/%s/releases/download/%s/%s", baseURL, repo, tag, asset)
+}
+
+func resolvePatchelfBinary(log io.Writer) (string, error) {
+	if path := strings.TrimSpace(os.Getenv(patchelfPathEnv)); path != "" {
+		info, err := os.Stat(path)
+		if err != nil {
+			return "", fmt.Errorf("resolve %s=%s: %w", patchelfPathEnv, path, err)
+		}
+		if info.IsDir() {
+			return "", fmt.Errorf("%s points to a directory: %s", patchelfPathEnv, path)
+		}
+		resolved := filepath.Clean(path)
+		if err := validatePatchelfBinary(resolved); err != nil {
+			return "", fmt.Errorf("validate %s=%s: %w", patchelfPathEnv, resolved, err)
+		}
+		return resolved, nil
+	}
+	if resolved, err := exec.LookPath(patchelfBinaryName); err == nil && strings.TrimSpace(resolved) != "" {
+		if err := validatePatchelfBinary(resolved); err == nil {
+			return resolved, nil
+		} else if log != nil {
+			_, _ = fmt.Fprintf(log, "exe-patch: ignoring unusable patchelf at %s: %v\n", resolved, err)
+		}
+	}
+	return ensureDefaultPatchelfBinary(log)
+}
+
+func validatePatchelfBinary(path string) error {
+	out, err := exec.Command(path, "--version").CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	msg := strings.TrimSpace(string(out))
+	if msg == "" {
+		return err
+	}
+	return fmt.Errorf("%w: %s", err, msg)
+}
+
+func ensureDefaultPatchelfBinary(log io.Writer) (string, error) {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		return "", fmt.Errorf("automatic patchelf helper download unsupported on %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+
+	repo := resolvePatchelfRepo()
+	tag := resolvePatchelfTag()
+	asset, err := patchelfAssetName(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		return "", err
+	}
+	cacheBase, err := resolveStableCacheBase()
+	if err != nil {
+		return "", err
+	}
+	cacheRoot := filepath.Join(cacheBase, "claude-proxy", "tools", "patchelf", sanitizePathComponent(repo), sanitizePathComponent(tag))
+	binaryPath := filepath.Join(cacheRoot, asset)
+	checksumPath := binaryPath + ".sha256"
+	lockPath := filepath.Join(cacheRoot, ".patchelf.lock")
+	downloaded := false
+	if err := withFileLock(lockPath, func() error {
+		if fileExists(binaryPath) && fileExists(checksumPath) {
+			if err := verifyBundleSHA256(binaryPath, checksumPath); err == nil {
+				if chmodErr := os.Chmod(binaryPath, 0o755); chmodErr != nil {
+					return fmt.Errorf("chmod cached patchelf helper: %w", chmodErr)
+				}
+				return nil
+			}
+		}
+		if err := os.MkdirAll(cacheRoot, 0o755); err != nil {
+			return fmt.Errorf("create patchelf helper cache dir: %w", err)
+		}
+		if err := ensurePatchelfHelper(cacheRoot, repo, tag, asset, binaryPath, checksumPath); err != nil {
+			return err
+		}
+		if err := os.Chmod(binaryPath, 0o755); err != nil {
+			return fmt.Errorf("chmod downloaded patchelf helper: %w", err)
+		}
+		downloaded = true
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	if downloaded && log != nil {
+		_, _ = fmt.Fprintf(log, "exe-patch: downloaded patchelf helper to %s\n", binaryPath)
+	}
+	return binaryPath, nil
+}
+
+func ensurePatchelfHelper(cacheRoot string, repo string, tag string, asset string, binaryPath string, checksumPath string) error {
+	assetURL := patchelfReleaseURL(repo, tag, asset)
+	checksumURL := patchelfReleaseURL(repo, tag, asset+".sha256")
+	if err := downloadIfMissing(assetURL, binaryPath, patchelfDownloadTimeout); err != nil {
+		return err
+	}
+	if err := downloadIfMissing(checksumURL, checksumPath, patchelfDownloadTimeout); err != nil {
+		return err
+	}
+	if err := verifyBundleSHA256(binaryPath, checksumPath); err == nil {
+		return nil
+	}
+
+	_ = os.Remove(binaryPath)
+	_ = os.Remove(checksumPath)
+	if err := downloadURLToFile(assetURL, binaryPath, patchelfDownloadTimeout); err != nil {
+		return err
+	}
+	if err := downloadURLToFile(checksumURL, checksumPath, patchelfDownloadTimeout); err != nil {
+		return err
+	}
+	if err := verifyBundleSHA256(binaryPath, checksumPath); err != nil {
+		return fmt.Errorf("verify downloaded patchelf helper in %s: %w", cacheRoot, err)
+	}
+	return nil
+}
+
+func resolvePatchelfRepo() string {
+	if v := strings.TrimSpace(os.Getenv(patchelfRepoEnv)); v != "" {
+		return v
+	}
+	return resolveGlibcCompatRepo()
+}
+
+func resolvePatchelfTag() string {
+	if v := strings.TrimSpace(os.Getenv(patchelfTagEnv)); v != "" {
+		return v
+	}
+	return resolveGlibcCompatTag()
+}
+
+func patchelfAssetName(goos string, goarch string) (string, error) {
+	if goos != "linux" || goarch != "amd64" {
+		return "", fmt.Errorf("unsupported patchelf helper platform: %s/%s", goos, goarch)
+	}
+	return "patchelf-linux-x86_64-static", nil
+}
+
+func patchelfReleaseURL(repo string, tag string, asset string) string {
+	return glibcCompatReleaseURL(repo, tag, asset)
 }
 
 func downloadIfMissing(url string, targetPath string, timeout time.Duration) error {
@@ -863,7 +1017,11 @@ func isMissingGlibcSymbolError(output string) bool {
 }
 
 func readPatchelfValue(path string, flag string) (string, error) {
-	out, err := runPatchelf(flag, path)
+	return readPatchelfValueWithBinary("", path, flag)
+}
+
+func readPatchelfValueWithBinary(binaryPath string, path string, flag string) (string, error) {
+	out, err := runPatchelfWithBinary(binaryPath, flag, path)
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg == "" {
@@ -875,7 +1033,11 @@ func readPatchelfValue(path string, flag string) (string, error) {
 }
 
 func patchElfInterpreterAndRPath(path string, loaderPath string, rpath string) error {
-	out, err := runPatchelf("--set-interpreter", loaderPath, "--set-rpath", rpath, path)
+	return patchElfInterpreterAndRPathWithBinary("", path, loaderPath, rpath)
+}
+
+func patchElfInterpreterAndRPathWithBinary(binaryPath string, path string, loaderPath string, rpath string) error {
+	out, err := runPatchelfWithBinary(binaryPath, "--set-interpreter", loaderPath, "--set-rpath", rpath, path)
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg == "" {
@@ -887,7 +1049,18 @@ func patchElfInterpreterAndRPath(path string, loaderPath string, rpath string) e
 }
 
 func runPatchelf(args ...string) ([]byte, error) {
-	cmd := exec.Command(patchelfBinaryName, args...)
+	return runPatchelfWithBinary("", args...)
+}
+
+func runPatchelfWithBinary(binaryPath string, args ...string) ([]byte, error) {
+	if strings.TrimSpace(binaryPath) == "" {
+		resolved, err := resolvePatchelfBinary(io.Discard)
+		if err != nil {
+			return nil, err
+		}
+		binaryPath = resolved
+	}
+	cmd := exec.Command(binaryPath, args...)
 	return cmd.CombinedOutput()
 }
 

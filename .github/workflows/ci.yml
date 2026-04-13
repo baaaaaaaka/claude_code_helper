@@ -380,6 +380,12 @@ jobs:
               "$img" bash /ci/container_claude_install_launch_smoke.sh
           done
 
+      - name: Prepare patchelf helper smoke asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT_DIR="$PWD/dist" bash scripts/glibc/prepare_patchelf_helper.sh
+
       - name: Smoke test in CentOS7 (Claude install recovery + glibc compat launch)
         shell: bash
         timeout-minutes: 20
@@ -394,8 +400,8 @@ jobs:
             -e CLAUDE_INSTALL_TEST=1 \
             -e CLAUDE_INSTALL_TEST_EL7_GLIBC_RECOVERY=1 \
             -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallEL7RecoveryIntegration \
-            -e CLAUDE_INSTALL_NEEDS_PATCHELF=1 \
             -e CLAUDE_INSTALL_NEEDS_TAR=1 \
+            -e CLAUDE_PROXY_PATCHELF_PATH=/dist/patchelf-linux-x86_64-static \
             -e CLAUDE_PROXY_GLIBC_COMPAT_REPO \
             -e CLAUDE_PROXY_GLIBC_COMPAT_TAG \
             -e CI=true \
@@ -424,12 +430,14 @@ jobs:
         env:
           GLIBC_COMPAT_REPO: "baaaaaaaka/claude_code_helper"
           GLIBC_COMPAT_TAG: "glibc-compat-v2.31"
+          CLAUDE_PROXY_PATCHELF_PATH: "/dist/patchelf-linux-x86_64-static"
         run: |
           set -euo pipefail
           docker run --rm \
             -v "$PWD/dist:/dist:ro" \
             -v "$PWD/scripts/glibc:/scripts:ro" \
             -e CLAUDE_VERSION="$CLAUDE_PATCH_VERSION" \
+            -e CLAUDE_PROXY_PATCHELF_PATH \
             -e GLIBC_COMPAT_REPO \
             -e GLIBC_COMPAT_TAG \
             centos:7 bash /scripts/test_centos7_clp_autopatch.sh
@@ -440,6 +448,7 @@ jobs:
         env:
           GLIBC_COMPAT_REPO: "baaaaaaaka/claude_code_helper"
           GLIBC_COMPAT_TAG: "glibc-compat-v2.31"
+          CLAUDE_PROXY_PATCHELF_PATH: "/dist/patchelf-linux-x86_64-static"
         run: |
           set -euo pipefail
           bash scripts/glibc/test_shared_storage_centos7_rocky8.sh
@@ -450,6 +459,7 @@ jobs:
         env:
           GLIBC_COMPAT_REPO: "baaaaaaaka/claude_code_helper"
           GLIBC_COMPAT_TAG: "glibc-compat-v2.31"
+          CLAUDE_PROXY_PATCHELF_PATH: "/dist/patchelf-linux-x86_64-static"
         run: |
           set -euo pipefail
           bash scripts/glibc/test_install_recovery_shared_storage_centos7_rocky8.sh

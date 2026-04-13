@@ -12,6 +12,9 @@ GLIBC_COMPAT_REPO="${GLIBC_COMPAT_REPO:-baaaaaaaka/claude_code_helper}"
 GLIBC_COMPAT_TAG="${GLIBC_COMPAT_TAG:-glibc-compat-v2.31}"
 SHARED_UID="${SHARED_UID:-}"
 SHARED_GID="${SHARED_GID:-}"
+PATCHELF_HELPER_PATH="${CLAUDE_PROXY_PATCHELF_PATH:-}"
+PATCHELF_CMD="${PATCHELF_HELPER_PATH:-patchelf}"
+helper_bin_dir=""
 
 sshd_pid=""
 
@@ -26,7 +29,7 @@ install_deps() {
   local -a base_packages=(ca-certificates openssh-server openssh-client)
   local -a rpm_base_packages=(ca-certificates openssh-server openssh-clients)
   local needs_patchelf=0
-  if [[ "$EXPECT_MODE" == "compat" ]]; then
+  if [[ "$EXPECT_MODE" == "compat" && -z "$PATCHELF_HELPER_PATH" ]]; then
     needs_patchelf=1
   fi
 
@@ -59,6 +62,20 @@ install_deps() {
 
   echo "No supported package manager found" >&2
   exit 1
+}
+
+prepare_patchelf_helper() {
+  if [[ -z "$PATCHELF_HELPER_PATH" ]]; then
+    return
+  fi
+  if [[ ! -x "$PATCHELF_HELPER_PATH" ]]; then
+    echo "Configured CLAUDE_PROXY_PATCHELF_PATH is not executable: ${PATCHELF_HELPER_PATH}" >&2
+    exit 1
+  fi
+  helper_bin_dir="$(mktemp -d)"
+  ln -sf "$PATCHELF_HELPER_PATH" "$helper_bin_dir/patchelf"
+  export PATH="$helper_bin_dir:$PATH"
+  PATCHELF_CMD="$PATCHELF_HELPER_PATH"
 }
 
 setup_sshd() {
@@ -239,10 +256,10 @@ run_smoke() {
       local interp=""
       local rpath=""
       set +e
-      interp="$(patchelf --print-interpreter "$mirror_path" 2>/dev/null)"
+      interp="$("$PATCHELF_CMD" --print-interpreter "$mirror_path" 2>/dev/null)"
       local interp_ec=$?
       if [[ "$interp_ec" -eq 0 ]]; then
-        rpath="$(patchelf --print-rpath "$mirror_path" 2>/dev/null || true)"
+        rpath="$("$PATCHELF_CMD" --print-rpath "$mirror_path" 2>/dev/null || true)"
       fi
       set -e
       echo "[compat path] ${mirror_path}"
@@ -294,6 +311,9 @@ run_smoke() {
 }
 
 cleanup() {
+  if [[ -n "$helper_bin_dir" ]]; then
+    rm -rf "$helper_bin_dir" || true
+  fi
   if [[ -n "$SHARED_UID" && -n "$SHARED_GID" && -d /shared ]]; then
     chown -R "${SHARED_UID}:${SHARED_GID}" /shared 2>/dev/null || true
   fi
@@ -304,6 +324,7 @@ cleanup() {
 trap cleanup EXIT
 
 install_deps
+prepare_patchelf_helper
 setup_sshd
 write_config
 run_smoke

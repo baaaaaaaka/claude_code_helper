@@ -96,6 +96,9 @@ mkdir -p "$artifacts_dir"
 chmod +x "$test_bin"
 
 images="${LOCAL_INSTALL_SMOKE_IMAGES:-centos:7 rockylinux:8 ubuntu:20.04}"
+if [[ " ${images} " == *" centos:7 "* ]]; then
+  OUT_DIR="$artifacts_dir" bash "$repo_root/scripts/glibc/prepare_patchelf_helper.sh"
+fi
 docker_network_args=()
 if [[ "${LOCAL_INSTALL_SMOKE_USE_HOST_NETWORK:-}" == "1" ]]; then
   docker_network_args+=(--network host)
@@ -109,8 +112,8 @@ for img in $images; do
     extra_env+=(
       -e CLAUDE_INSTALL_TEST_EL7_GLIBC_RECOVERY=1
       -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallEL7RecoveryIntegration
-      -e CLAUDE_INSTALL_NEEDS_PATCHELF=1
       -e CLAUDE_INSTALL_NEEDS_TAR=1
+      -e CLAUDE_PROXY_PATCHELF_PATH=/dist/patchelf-linux-x86_64-static
       -e CLAUDE_PROXY_GLIBC_COMPAT_REPO="${CLAUDE_PROXY_GLIBC_COMPAT_REPO:-baaaaaaaka/claude_code_helper}"
       -e CLAUDE_PROXY_GLIBC_COMPAT_TAG="${CLAUDE_PROXY_GLIBC_COMPAT_TAG:-glibc-compat-v2.31}"
     )
