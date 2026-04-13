@@ -119,6 +119,84 @@ func validateRulesModePatchActive(outcome *patchOutcome) error {
 	return fmt.Errorf("YOLO rule mode requires an active built-in Claude patch")
 }
 
+func resolveLaunchYoloMode(
+	claudePath string,
+	root *rootOptions,
+	store *config.Store,
+	yoloMode config.YoloMode,
+	warn io.Writer,
+) (config.YoloMode, []string, bool, error) {
+	yoloMode = normalizeYoloMode(yoloMode)
+	if !isBypassYoloMode(yoloMode) {
+		return yoloMode, nil, false, nil
+	}
+
+	yoloArgs := resolveYoloBypassArgs(claudePath, root.configPath)
+	if len(yoloArgs) > 0 {
+		return yoloMode, yoloArgs, false, nil
+	}
+
+	rulesPatchOpts := withYoloModePatchOptions(root.exePatch, config.YoloModeRules)
+	if err := validateRulesModeLaunch(claudePath, rulesPatchOpts); err == nil {
+		_, _ = fmt.Fprintln(warn, "yolo: this Claude build does not expose bypass flags; falling back to yolo rule mode")
+		return config.YoloModeRules, nil, true, nil
+	}
+
+	_, _ = fmt.Fprintln(warn, "yolo: this Claude build does not expose bypass flags; disabling yolo bypass")
+	if store != nil {
+		_ = persistYoloMode(store, config.YoloModeOff)
+	}
+	return config.YoloModeOff, nil, false, nil
+}
+
+func prepareClaudeLaunchPatchState(
+	ctx context.Context,
+	root *rootOptions,
+	store *config.Store,
+	claudePath string,
+	cmdArgs []string,
+	yoloMode config.YoloMode,
+	autoRulesFallback bool,
+	log io.Writer,
+	warn io.Writer,
+) (config.YoloMode, exePatchOptions, *patchOutcome, error) {
+	patchOpts := withYoloModePatchOptions(root.exePatch, yoloMode)
+	if normalizeYoloMode(yoloMode) == config.YoloModeRules {
+		if err := validateRulesModeLaunch(claudePath, patchOpts); err != nil {
+			return yoloMode, patchOpts, nil, err
+		}
+	}
+
+	exePatchOutcome, err := maybePatchExecutableCtxFn(ctx, cmdArgs, patchOpts, root.configPath, log)
+	if err != nil {
+		return yoloMode, patchOpts, nil, err
+	}
+	if patchOpts.dryRun && patchOpts.enabled() {
+		return yoloMode, patchOpts, exePatchOutcome, nil
+	}
+	if normalizeYoloMode(yoloMode) != config.YoloModeRules {
+		return yoloMode, patchOpts, exePatchOutcome, nil
+	}
+	if err := validateRulesModePatchActive(exePatchOutcome); err == nil {
+		return yoloMode, patchOpts, exePatchOutcome, nil
+	} else if !autoRulesFallback {
+		return yoloMode, patchOpts, nil, err
+	}
+
+	_, _ = fmt.Fprintln(warn, "yolo: yolo rule fallback did not activate; running with yolo disabled")
+	if store != nil {
+		_ = persistYoloMode(store, config.YoloModeOff)
+	}
+
+	yoloMode = config.YoloModeOff
+	patchOpts = withYoloModePatchOptions(root.exePatch, yoloMode)
+	exePatchOutcome, err = maybePatchExecutableCtxFn(ctx, cmdArgs, patchOpts, root.configPath, log)
+	if err != nil {
+		return yoloMode, patchOpts, nil, err
+	}
+	return yoloMode, patchOpts, exePatchOutcome, nil
+}
+
 func runClaudeSession(
 	ctx context.Context,
 	root *rootOptions,
@@ -143,20 +221,9 @@ func runClaudeSession(
 	}
 	claudePath = claudePathResolved
 
-	yoloArgs := []string(nil)
-	if isBypassYoloMode(yoloMode) {
-		yoloArgs = resolveYoloBypassArgs(claudePath, root.configPath)
-		if len(yoloArgs) == 0 {
-			_, _ = fmt.Fprintln(os.Stderr, "yolo: this Claude build does not expose bypass flags; disabling yolo bypass")
-			_ = persistYoloMode(store, config.YoloModeOff)
-			yoloMode = config.YoloModeOff
-		}
-	}
-	patchOpts := withYoloModePatchOptions(root.exePatch, yoloMode)
-	if normalizeYoloMode(yoloMode) == config.YoloModeRules {
-		if err := validateRulesModeLaunch(claudePath, patchOpts); err != nil {
-			return err
-		}
+	yoloMode, yoloArgs, autoRulesFallback, err := resolveLaunchYoloMode(claudePath, root, store, yoloMode, os.Stderr)
+	if err != nil {
+		return err
 	}
 	path, args, cwd, err := buildClaudeResumeCommandWithYoloArgs(claudePath, session, project, yoloMode, yoloArgs)
 	if err != nil {
@@ -164,17 +231,22 @@ func runClaudeSession(
 	}
 
 	cmdArgs := append([]string{path}, args...)
-	exePatchOutcome, err := maybePatchExecutableCtxFn(ctx, cmdArgs, patchOpts, root.configPath, log)
+	yoloMode, patchOpts, exePatchOutcome, err := prepareClaudeLaunchPatchState(
+		ctx,
+		root,
+		store,
+		claudePath,
+		cmdArgs,
+		yoloMode,
+		autoRulesFallback,
+		log,
+		os.Stderr,
+	)
 	if err != nil {
 		return err
 	}
 	if patchOpts.dryRun && patchOpts.enabled() {
 		return nil
-	}
-	if normalizeYoloMode(yoloMode) == config.YoloModeRules {
-		if err := validateRulesModePatchActive(exePatchOutcome); err != nil {
-			return err
-		}
 	}
 
 	extraEnv := []string{}
@@ -195,13 +267,29 @@ func runClaudeSession(
 			return maybePatchExecutableCtxFn(ctx, nextArgs, patchOpts, root.configPath, log)
 		},
 	}
+	autoRulesLaunchSucceeded := autoRulesFallback && normalizeYoloMode(yoloMode) == config.YoloModeRules
+	if autoRulesLaunchSucceeded {
+		opts.OnPatchFallback = func() error {
+			autoRulesLaunchSucceeded = false
+			return persistYoloMode(store, config.YoloModeOff)
+		}
+	}
+	var runErr error
 	if useProxy {
 		if profile == nil {
 			return fmt.Errorf("proxy mode enabled but no profile configured")
 		}
-		return runWithProfileOptionsFn(ctx, store, *profile, instances, cmdArgs, exePatchOutcome, opts)
+		runErr = runWithProfileOptionsFn(ctx, store, *profile, instances, cmdArgs, exePatchOutcome, opts)
+	} else {
+		runErr = runTargetWithFallbackWithOptionsFn(ctx, cmdArgs, "", nil, exePatchOutcome, nil, opts)
 	}
-	return runTargetWithFallbackWithOptionsFn(ctx, cmdArgs, "", nil, exePatchOutcome, nil, opts)
+	if runErr != nil {
+		return runErr
+	}
+	if autoRulesLaunchSucceeded {
+		return persistYoloMode(store, config.YoloModeRules)
+	}
+	return nil
 }
 
 func runClaudeNewSession(
@@ -231,37 +319,32 @@ func runClaudeNewSession(
 		return err
 	}
 	claudePath = claudePathResolved
-	yoloArgs := []string(nil)
-	if isBypassYoloMode(yoloMode) {
-		yoloArgs = resolveYoloBypassArgs(claudePath, root.configPath)
-		if len(yoloArgs) == 0 {
-			_, _ = fmt.Fprintln(os.Stderr, "yolo: this Claude build does not expose bypass flags; disabling yolo bypass")
-			_ = persistYoloMode(store, config.YoloModeOff)
-			yoloMode = config.YoloModeOff
-		}
-	}
-	patchOpts := withYoloModePatchOptions(root.exePatch, yoloMode)
-	if normalizeYoloMode(yoloMode) == config.YoloModeRules {
-		if err := validateRulesModeLaunch(claudePath, patchOpts); err != nil {
-			return err
-		}
+
+	yoloMode, yoloArgs, autoRulesFallback, err := resolveLaunchYoloMode(claudePath, root, store, yoloMode, os.Stderr)
+	if err != nil {
+		return err
 	}
 	cmdArgs := []string{claudePath}
 	if isBypassYoloMode(yoloMode) {
 		cmdArgs = append(cmdArgs, yoloArgs...)
 	}
 
-	exePatchOutcome, err := maybePatchExecutableCtxFn(ctx, cmdArgs, patchOpts, root.configPath, log)
+	yoloMode, patchOpts, exePatchOutcome, err := prepareClaudeLaunchPatchState(
+		ctx,
+		root,
+		store,
+		claudePath,
+		cmdArgs,
+		yoloMode,
+		autoRulesFallback,
+		log,
+		os.Stderr,
+	)
 	if err != nil {
 		return err
 	}
 	if patchOpts.dryRun && patchOpts.enabled() {
 		return nil
-	}
-	if normalizeYoloMode(yoloMode) == config.YoloModeRules {
-		if err := validateRulesModePatchActive(exePatchOutcome); err != nil {
-			return err
-		}
 	}
 
 	extraEnv := []string{}
@@ -282,11 +365,27 @@ func runClaudeNewSession(
 			return maybePatchExecutableCtxFn(ctx, nextArgs, patchOpts, root.configPath, log)
 		},
 	}
+	autoRulesLaunchSucceeded := autoRulesFallback && normalizeYoloMode(yoloMode) == config.YoloModeRules
+	if autoRulesLaunchSucceeded {
+		opts.OnPatchFallback = func() error {
+			autoRulesLaunchSucceeded = false
+			return persistYoloMode(store, config.YoloModeOff)
+		}
+	}
+	var runErr error
 	if useProxy {
 		if profile == nil {
 			return fmt.Errorf("proxy mode enabled but no profile configured")
 		}
-		return runWithProfileOptionsFn(ctx, store, *profile, instances, cmdArgs, exePatchOutcome, opts)
+		runErr = runWithProfileOptionsFn(ctx, store, *profile, instances, cmdArgs, exePatchOutcome, opts)
+	} else {
+		runErr = runTargetWithFallbackWithOptionsFn(ctx, cmdArgs, "", nil, exePatchOutcome, nil, opts)
 	}
-	return runTargetWithFallbackWithOptionsFn(ctx, cmdArgs, "", nil, exePatchOutcome, nil, opts)
+	if runErr != nil {
+		return runErr
+	}
+	if autoRulesLaunchSucceeded {
+		return persistYoloMode(store, config.YoloModeRules)
+	}
+	return nil
 }

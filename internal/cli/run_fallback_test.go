@@ -84,6 +84,71 @@ func TestRunTargetWithFallbackRestoresAndReruns(t *testing.T) {
 	}
 }
 
+func TestRunTargetWithFallbackCallsPatchFallbackOnStartupRollback(t *testing.T) {
+	requireExePatchEnabled(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script test on windows")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.bin")
+	backup := filepath.Join(dir, "target.bin.bak")
+
+	if err := os.WriteFile(target, []byte("patched"), 0o700); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if err := os.WriteFile(backup, []byte("original"), 0o700); err != nil {
+		t.Fatalf("write backup: %v", err)
+	}
+
+	script := filepath.Join(dir, "run.sh")
+	scriptBody := []byte("#!/bin/sh\n" +
+		"if [ \"$(cat \"" + target + "\")\" = \"original\" ]; then exit 0; fi\n" +
+		"echo \"error: Module not found '/ @bun @bytecode @b'\" 1>&2\n" +
+		"exit 1\n")
+	if err := os.WriteFile(script, scriptBody, 0o700); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	store, err := config.NewPatchHistoryStore(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatalf("NewPatchHistoryStore error: %v", err)
+	}
+	if err := store.Update(func(h *config.PatchHistory) error {
+		h.Upsert(config.PatchHistoryEntry{
+			Path:          target,
+			SpecsSHA256:   "spec-hash",
+			PatchedSHA256: "patched-hash",
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("seed history error: %v", err)
+	}
+
+	outcome := &patchOutcome{
+		Applied:                  true,
+		TargetPath:               target,
+		BackupPath:               backup,
+		SpecsHash:                "spec-hash",
+		HistoryStore:             store,
+		RollbackOnStartupFailure: true,
+	}
+
+	called := false
+	opts := runTargetOptions{
+		UseProxy: false,
+		OnPatchFallback: func() error {
+			called = true
+			return nil
+		},
+	}
+	if err := runTargetWithFallbackWithOptions(context.Background(), []string{script}, "", nil, outcome, nil, opts); err != nil {
+		t.Fatalf("runTargetWithFallbackWithOptions error: %v", err)
+	}
+	if !called {
+		t.Fatalf("expected patch fallback callback to be called")
+	}
+}
+
 func TestRunTargetWithFallbackWaitsForReadiness(t *testing.T) {
 	requireExePatchEnabled(t)
 	withExePatchTestHooks(t)

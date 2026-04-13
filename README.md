@@ -237,6 +237,7 @@ Controls:
 - New session: `(New Agent)` entry or `Ctrl+N` (in selected project or current dir)
 - Subagents: `Ctrl+O` expand/collapse selected session
 - Proxy mode: `Ctrl+P` toggle (status shows `Proxy mode (Ctrl+P): on/off`)
+- YOLO mode: `Ctrl+Y` cycles `off -> bypass -> rules`; if the current Claude build does not expose bypass flags, `claude-proxy` falls back to `rules` automatically when built-in patching is available
 - Refresh: `r` (or `Ctrl+R`)
 - Quit: `q`, `Esc`, `Ctrl+C`
 - In-app update: `Ctrl+U` (when an update is available)

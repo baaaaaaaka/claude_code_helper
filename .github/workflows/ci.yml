@@ -133,6 +133,14 @@ jobs:
           set -euo pipefail
           go test ./internal/cli -run '^(TestHistory(List|Show|Open)CmdCancellationIsFatal)$' -count=1
 
+      - name: YOLO fallback regression suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./internal/cli \
+            -run '^(TestRunTargetWithFallbackCallsPatchFallbackOnStartupRollback|TestRunClaude(Session|NewSession)(FallsBackTo(RulesWhenNoFlagsExposed|OffWhenAutoRulesPatchDoesNotActivate)|KeepsYoloOffAfterAutoRulesStartupRollback))$' \
+            -count=1
+
       - name: Managed Claude regression suite
         shell: bash
         run: |

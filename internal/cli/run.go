@@ -265,6 +265,7 @@ type runTargetOptions struct {
 	YoloEnabled        bool
 	OnYoloFallback     func() error
 	OnYoloRetryPrepare func([]string) (*patchOutcome, error)
+	OnPatchFallback    func() error
 }
 
 type runTargetIO struct {
@@ -477,6 +478,9 @@ func runTargetWithFallbackWithOptions(
 				}
 				if recordErr := recordPatchFailure(patchOutcome.ConfigPath, patchOutcome, formatFailureReason(err, out)); recordErr != nil {
 					_, _ = fmt.Fprintf(statusWriter, "exe-patch: failed to record patch failure: %v\n", recordErr)
+				}
+				if opts.OnPatchFallback != nil {
+					_ = opts.OnPatchFallback()
 				}
 				patchOutcome = nil
 				continue

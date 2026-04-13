@@ -517,6 +517,168 @@ func TestRunClaudeSessionDisablesBypassWhenNoFlagsExposed(t *testing.T) {
 	}
 }
 
+func TestRunClaudeSessionFallsBackToRulesWhenNoFlagsExposed(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	claudePath := writeClaudeHelpStubWithOutput(t, "usage: claude")
+	store := newTempStore(t)
+	root := &rootOptions{
+		configPath: store.Path(),
+		exePatch: exePatchOptions{
+			enabledFlag:    true,
+			policySettings: true,
+		},
+	}
+	projectDir := t.TempDir()
+	session := claudehistory.Session{SessionID: "sess-1", ProjectPath: projectDir}
+	project := claudehistory.Project{Path: projectDir}
+
+	var patchCalls [][]string
+	var patchOpts []exePatchOptions
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		patchCalls = append(patchCalls, cloneArgs(cmdArgs))
+		patchOpts = append(patchOpts, opts)
+		return &patchOutcome{TargetPath: "patch-rules", BuiltInClaudePatchActive: true}, nil
+	}
+	runTargetWithFallbackWithOptionsFn = func(ctx context.Context, cmdArgs []string, proxyURL string, healthCheck func() error, patchOutcome *patchOutcome, fatalCh <-chan error, opts runTargetOptions) error {
+		requireArgsEqual(t, cmdArgs, []string{claudePath, "--resume", "sess-1"})
+		if opts.YoloEnabled {
+			t.Fatalf("expected rules fallback not to keep bypass mode enabled")
+		}
+		if patchOutcome == nil || patchOutcome.TargetPath != "patch-rules" {
+			t.Fatalf("expected rules patch outcome, got %#v", patchOutcome)
+		}
+		return nil
+	}
+
+	if err := runClaudeSession(context.Background(), root, store, nil, nil, session, project, claudePath, "", false, config.YoloModeBypass, io.Discard); err != nil {
+		t.Fatalf("runClaudeSession error: %v", err)
+	}
+	if len(patchCalls) != 1 {
+		t.Fatalf("expected 1 patch call, got %d", len(patchCalls))
+	}
+	requireArgsEqual(t, patchCalls[0], []string{claudePath, "--resume", "sess-1"})
+	if len(patchOpts) != 1 || !patchOpts[0].allowBuiltInWithoutBypass {
+		t.Fatalf("expected rules fallback to force built-in patch without bypass, got %+v", patchOpts)
+	}
+
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if got := resolveYoloMode(cfg); got != config.YoloModeRules {
+		t.Fatalf("expected yolo mode rules after bypass fallback, got %s", got)
+	}
+}
+
+func TestRunClaudeSessionFallsBackToOffWhenAutoRulesPatchDoesNotActivate(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	claudePath := writeClaudeHelpStubWithOutput(t, "usage: claude")
+	store := newTempStore(t)
+	root := &rootOptions{
+		configPath: store.Path(),
+		exePatch: exePatchOptions{
+			enabledFlag:    true,
+			policySettings: true,
+		},
+	}
+	projectDir := t.TempDir()
+	session := claudehistory.Session{SessionID: "sess-1", ProjectPath: projectDir}
+	project := claudehistory.Project{Path: projectDir}
+
+	var patchCalls [][]string
+	var patchOpts []exePatchOptions
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		patchCalls = append(patchCalls, cloneArgs(cmdArgs))
+		patchOpts = append(patchOpts, opts)
+		if len(patchCalls) == 1 {
+			return &patchOutcome{TargetPath: "patch-rules"}, nil
+		}
+		return &patchOutcome{TargetPath: claudePath}, nil
+	}
+	runTargetWithFallbackWithOptionsFn = func(ctx context.Context, cmdArgs []string, proxyURL string, healthCheck func() error, patchOutcome *patchOutcome, fatalCh <-chan error, opts runTargetOptions) error {
+		requireArgsEqual(t, cmdArgs, []string{claudePath, "--resume", "sess-1"})
+		if opts.YoloEnabled {
+			t.Fatalf("expected yolo to be disabled after inactive rules fallback")
+		}
+		if patchOutcome == nil || patchOutcome.TargetPath != claudePath {
+			t.Fatalf("expected off-mode patch outcome, got %#v", patchOutcome)
+		}
+		return nil
+	}
+
+	if err := runClaudeSession(context.Background(), root, store, nil, nil, session, project, claudePath, "", false, config.YoloModeBypass, io.Discard); err != nil {
+		t.Fatalf("runClaudeSession error: %v", err)
+	}
+	if len(patchCalls) != 2 {
+		t.Fatalf("expected 2 patch calls, got %d", len(patchCalls))
+	}
+	requireArgsEqual(t, patchCalls[0], []string{claudePath, "--resume", "sess-1"})
+	requireArgsEqual(t, patchCalls[1], []string{claudePath, "--resume", "sess-1"})
+	if len(patchOpts) != 2 {
+		t.Fatalf("expected 2 patch option sets, got %d", len(patchOpts))
+	}
+	if !patchOpts[0].allowBuiltInWithoutBypass {
+		t.Fatalf("expected first patch attempt to allow built-in rules fallback")
+	}
+	if patchOpts[1].allowBuiltInWithoutBypass {
+		t.Fatalf("expected second patch attempt to disable rules fallback")
+	}
+
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if got := resolveYoloMode(cfg); got != config.YoloModeOff {
+		t.Fatalf("expected yolo mode off after inactive rules fallback, got %s", got)
+	}
+}
+
+func TestRunClaudeSessionKeepsYoloOffAfterAutoRulesStartupRollback(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	claudePath := writeClaudeHelpStubWithOutput(t, "usage: claude")
+	store := newTempStore(t)
+	root := &rootOptions{
+		configPath: store.Path(),
+		exePatch: exePatchOptions{
+			enabledFlag:    true,
+			policySettings: true,
+		},
+	}
+	projectDir := t.TempDir()
+	session := claudehistory.Session{SessionID: "sess-1", ProjectPath: projectDir}
+	project := claudehistory.Project{Path: projectDir}
+
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		return &patchOutcome{
+			TargetPath:               "patch-rules",
+			BuiltInClaudePatchActive: true,
+			RollbackOnStartupFailure: true,
+		}, nil
+	}
+	runTargetWithFallbackWithOptionsFn = func(ctx context.Context, cmdArgs []string, proxyURL string, healthCheck func() error, patchOutcome *patchOutcome, fatalCh <-chan error, opts runTargetOptions) error {
+		requireArgsEqual(t, cmdArgs, []string{claudePath, "--resume", "sess-1"})
+		if opts.OnPatchFallback == nil {
+			t.Fatalf("expected patch fallback callback")
+		}
+		return opts.OnPatchFallback()
+	}
+
+	if err := runClaudeSession(context.Background(), root, store, nil, nil, session, project, claudePath, "", false, config.YoloModeBypass, io.Discard); err != nil {
+		t.Fatalf("runClaudeSession error: %v", err)
+	}
+
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if got := resolveYoloMode(cfg); got != config.YoloModeOff {
+		t.Fatalf("expected yolo mode off after startup rollback fallback, got %s", got)
+	}
+}
+
 func TestRunClaudeNewSessionDisablesBypassWhenNoFlagsExposed(t *testing.T) {
 	withExePatchTestHooks(t)
 
@@ -552,6 +714,162 @@ func TestRunClaudeNewSessionDisablesBypassWhenNoFlagsExposed(t *testing.T) {
 	}
 	if got := resolveYoloMode(cfg); got != config.YoloModeOff {
 		t.Fatalf("expected yolo mode off after bypass disable, got %s", got)
+	}
+}
+
+func TestRunClaudeNewSessionFallsBackToRulesWhenNoFlagsExposed(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	claudePath := writeClaudeHelpStubWithOutput(t, "usage: claude")
+	store := newTempStore(t)
+	root := &rootOptions{
+		configPath: store.Path(),
+		exePatch: exePatchOptions{
+			enabledFlag:    true,
+			policySettings: true,
+		},
+	}
+	projectDir := t.TempDir()
+
+	var patchCalls [][]string
+	var patchOpts []exePatchOptions
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		patchCalls = append(patchCalls, cloneArgs(cmdArgs))
+		patchOpts = append(patchOpts, opts)
+		return &patchOutcome{TargetPath: "patch-rules", BuiltInClaudePatchActive: true}, nil
+	}
+	runTargetWithFallbackWithOptionsFn = func(ctx context.Context, cmdArgs []string, proxyURL string, healthCheck func() error, patchOutcome *patchOutcome, fatalCh <-chan error, opts runTargetOptions) error {
+		requireArgsEqual(t, cmdArgs, []string{claudePath})
+		if opts.YoloEnabled {
+			t.Fatalf("expected rules fallback not to keep bypass mode enabled")
+		}
+		if patchOutcome == nil || patchOutcome.TargetPath != "patch-rules" {
+			t.Fatalf("expected rules patch outcome, got %#v", patchOutcome)
+		}
+		return nil
+	}
+
+	if err := runClaudeNewSession(context.Background(), root, store, nil, nil, projectDir, claudePath, "", false, config.YoloModeBypass, io.Discard); err != nil {
+		t.Fatalf("runClaudeNewSession error: %v", err)
+	}
+	if len(patchCalls) != 1 {
+		t.Fatalf("expected 1 patch call, got %d", len(patchCalls))
+	}
+	requireArgsEqual(t, patchCalls[0], []string{claudePath})
+	if len(patchOpts) != 1 || !patchOpts[0].allowBuiltInWithoutBypass {
+		t.Fatalf("expected rules fallback to force built-in patch without bypass, got %+v", patchOpts)
+	}
+
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if got := resolveYoloMode(cfg); got != config.YoloModeRules {
+		t.Fatalf("expected yolo mode rules after bypass fallback, got %s", got)
+	}
+}
+
+func TestRunClaudeNewSessionFallsBackToOffWhenAutoRulesPatchDoesNotActivate(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	claudePath := writeClaudeHelpStubWithOutput(t, "usage: claude")
+	store := newTempStore(t)
+	root := &rootOptions{
+		configPath: store.Path(),
+		exePatch: exePatchOptions{
+			enabledFlag:    true,
+			policySettings: true,
+		},
+	}
+	projectDir := t.TempDir()
+
+	var patchCalls [][]string
+	var patchOpts []exePatchOptions
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		patchCalls = append(patchCalls, cloneArgs(cmdArgs))
+		patchOpts = append(patchOpts, opts)
+		if len(patchCalls) == 1 {
+			return &patchOutcome{TargetPath: "patch-rules"}, nil
+		}
+		return &patchOutcome{TargetPath: claudePath}, nil
+	}
+	runTargetWithFallbackWithOptionsFn = func(ctx context.Context, cmdArgs []string, proxyURL string, healthCheck func() error, patchOutcome *patchOutcome, fatalCh <-chan error, opts runTargetOptions) error {
+		requireArgsEqual(t, cmdArgs, []string{claudePath})
+		if opts.YoloEnabled {
+			t.Fatalf("expected yolo to be disabled after inactive rules fallback")
+		}
+		if patchOutcome == nil || patchOutcome.TargetPath != claudePath {
+			t.Fatalf("expected off-mode patch outcome, got %#v", patchOutcome)
+		}
+		return nil
+	}
+
+	if err := runClaudeNewSession(context.Background(), root, store, nil, nil, projectDir, claudePath, "", false, config.YoloModeBypass, io.Discard); err != nil {
+		t.Fatalf("runClaudeNewSession error: %v", err)
+	}
+	if len(patchCalls) != 2 {
+		t.Fatalf("expected 2 patch calls, got %d", len(patchCalls))
+	}
+	requireArgsEqual(t, patchCalls[0], []string{claudePath})
+	requireArgsEqual(t, patchCalls[1], []string{claudePath})
+	if len(patchOpts) != 2 {
+		t.Fatalf("expected 2 patch option sets, got %d", len(patchOpts))
+	}
+	if !patchOpts[0].allowBuiltInWithoutBypass {
+		t.Fatalf("expected first patch attempt to allow built-in rules fallback")
+	}
+	if patchOpts[1].allowBuiltInWithoutBypass {
+		t.Fatalf("expected second patch attempt to disable rules fallback")
+	}
+
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if got := resolveYoloMode(cfg); got != config.YoloModeOff {
+		t.Fatalf("expected yolo mode off after inactive rules fallback, got %s", got)
+	}
+}
+
+func TestRunClaudeNewSessionKeepsYoloOffAfterAutoRulesStartupRollback(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	claudePath := writeClaudeHelpStubWithOutput(t, "usage: claude")
+	store := newTempStore(t)
+	root := &rootOptions{
+		configPath: store.Path(),
+		exePatch: exePatchOptions{
+			enabledFlag:    true,
+			policySettings: true,
+		},
+	}
+	projectDir := t.TempDir()
+
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		return &patchOutcome{
+			TargetPath:               "patch-rules",
+			BuiltInClaudePatchActive: true,
+			RollbackOnStartupFailure: true,
+		}, nil
+	}
+	runTargetWithFallbackWithOptionsFn = func(ctx context.Context, cmdArgs []string, proxyURL string, healthCheck func() error, patchOutcome *patchOutcome, fatalCh <-chan error, opts runTargetOptions) error {
+		requireArgsEqual(t, cmdArgs, []string{claudePath})
+		if opts.OnPatchFallback == nil {
+			t.Fatalf("expected patch fallback callback")
+		}
+		return opts.OnPatchFallback()
+	}
+
+	if err := runClaudeNewSession(context.Background(), root, store, nil, nil, projectDir, claudePath, "", false, config.YoloModeBypass, io.Discard); err != nil {
+		t.Fatalf("runClaudeNewSession error: %v", err)
+	}
+
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if got := resolveYoloMode(cfg); got != config.YoloModeOff {
+		t.Fatalf("expected yolo mode off after startup rollback fallback, got %s", got)
 	}
 }
 
