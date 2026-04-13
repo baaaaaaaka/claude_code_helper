@@ -311,6 +311,10 @@ func runClaudeJSONSpec(
 		}
 	}
 
+	if useProxy && profile == nil {
+		return fmt.Errorf("proxy mode enabled but no profile configured")
+	}
+
 	claudePathResolved, err := ensureClaudeInstalled(ctx, claudePath, launcherLog, installProxyOptions{
 		UseProxy:  useProxy,
 		Profile:   profile,
@@ -373,9 +377,6 @@ func runClaudeJSONSpec(
 		},
 	}
 	if useProxy {
-		if profile == nil {
-			return fmt.Errorf("proxy mode enabled but no profile configured")
-		}
 		return runWithProfileOptionsFn(ctx, store, *profile, instances, cmdArgs, exePatchOutcome, opts)
 	}
 	return runTargetWithFallbackWithOptionsFn(ctx, cmdArgs, "", nil, exePatchOutcome, nil, opts)
