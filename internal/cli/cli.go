@@ -56,6 +56,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(
 		newInitCmd(opts),
 		newRunCmd(opts),
+		newRunJSONCmd(opts),
 		newTuiCmd(opts),
 		newProxyCmd(opts),
 		newUpgradeCmd(opts),

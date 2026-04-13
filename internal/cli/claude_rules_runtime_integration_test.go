@@ -83,6 +83,7 @@ type runtimeResultEvent struct {
 
 type runtimePromptResult struct {
 	InitPermissionMode string
+	SessionID          string
 	PermissionRequests []runtimePermissionRequest
 	ToolUses           []runtimeToolUse
 	ToolResults        []runtimeToolResult
@@ -571,12 +572,14 @@ func runClaudePromptCaseWithExtraArgs(
 			var event struct {
 				Subtype        string `json:"subtype"`
 				PermissionMode string `json:"permissionMode"`
+				SessionID      string `json:"session_id"`
 			}
 			if err := json.Unmarshal([]byte(line), &event); err != nil {
 				continue
 			}
 			if event.Subtype == "init" {
 				result.InitPermissionMode = strings.TrimSpace(event.PermissionMode)
+				result.SessionID = strings.TrimSpace(event.SessionID)
 			}
 		case "control_request":
 			var req struct {

@@ -147,6 +147,41 @@ func TestRunTargetOnceWithOptionsNoProxyKeepsEnv(t *testing.T) {
 	}
 }
 
+func TestRunTargetOnceWithOptionsUsesCustomStdio(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script test on windows")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "stdio.sh")
+	body := "#!/bin/sh\nIFS= read -r line\nprintf 'out:%s' \"$line\"\nprintf 'err:%s' \"$line\" >&2\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	opts := runTargetOptions{
+		UseProxy:    false,
+		PreserveTTY: false,
+		PrepareIO: func() (*runTargetIO, error) {
+			return &runTargetIO{
+				Stdin:  strings.NewReader("hello\n"),
+				Stdout: &stdout,
+				Stderr: &stderr,
+			}, nil
+		},
+	}
+	if err := runTargetOnceWithOptions(context.Background(), []string{script}, "", nil, nil, nil, nil, opts); err != nil {
+		t.Fatalf("runTargetOnceWithOptions error: %v", err)
+	}
+	if got := stdout.String(); got != "out:hello" {
+		t.Fatalf("expected stdout %q, got %q", "out:hello", got)
+	}
+	if got := stderr.String(); got != "err:hello" {
+		t.Fatalf("expected stderr %q, got %q", "err:hello", got)
+	}
+}
+
 func TestTerminateProcess(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skip process signal test on windows")

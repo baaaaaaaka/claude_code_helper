@@ -54,6 +54,42 @@ tool create a dedicated key if needed. You can toggle proxy mode later with
 - Force SSH proxy mode with a profile:
   `claude-proxy run <profile> -- <cmd> [args...]`.
 - Example: `claude-proxy run pdx -- curl https://example.com`.
+- Run Claude from a JSON spec:
+  `claude-proxy run-json path/to/spec.json`.
+
+Example `spec.json`:
+
+```json
+{
+  "cwd": ".",
+  "args": ["--print", "--output-format", "json"],
+  "prompt": "Summarize the current directory",
+  "headless": true,
+  "preserveRetryOutputs": true,
+  "stdoutPath": "out/result.json",
+  "stderrPath": "out/result.err"
+}
+```
+
+`run-json` passes Claude arguments from `args`. If the first token is
+`claude`, it is ignored so copied Claude commands still work. `cwd` is
+required; use `"."` to run in the spec file directory. `stdinPath`,
+`stdoutPath`, and `stderrPath` are resolved relative to the spec file
+directory. Relative paths inside raw Claude `args` are still resolved by
+Claude from the launched working directory (`cwd`). If the user has
+previously unlocked YOLO mode in the TUI, `run-json` will try Claude's
+bypass-permissions launch mode automatically when the spec does not already
+provide explicit Claude permission flags, and will fall back to normal mode
+without changing the saved YOLO setting. By default, only the stdio paths
+declared in the spec are redirected; omitted streams keep their normal stdio
+behavior. Set `"headless": true` to make omitted stdio streams use `/dev/null`
+instead and suppress helper status output from the terminal. Set
+`"preserveRetryOutputs": true` to archive outputs from failed attempts before a
+retry as `*.attempt-N`, while leaving the final `stdoutPath` and `stderrPath`
+for the last attempt. If proxy preference has not been configured yet,
+`run-json` does not prompt: it defaults to direct mode when no SSH profiles
+exist, and requires an explicit saved preference or `--profile` when profiles
+do exist.
 
 ### Optional: preconfigure a proxy profile
 

@@ -183,6 +183,56 @@ func TestRunTargetWithFallbackRuntimeYoloRetryKeepsResumeArgs(t *testing.T) {
 	}
 }
 
+func TestRunTargetWithFallbackRuntimeYoloRetryWithCustomIO(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "launches.log")
+	claudePath := writeRuntimeYoloFailureStub(t, logPath)
+	stdinPath := filepath.Join(t.TempDir(), "input.txt")
+	if err := os.WriteFile(stdinPath, []byte("hello\n"), 0o600); err != nil {
+		t.Fatalf("write stdin: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	fallbackCalled := false
+	err := runTargetWithFallbackWithOptions(
+		ctx,
+		[]string{claudePath, "--permission-mode", "bypassPermissions"},
+		"",
+		nil,
+		nil,
+		nil,
+		runTargetOptions{
+			UseProxy:    false,
+			PrepareIO:   newFileRunTargetIO(stdinPath, "", ""),
+			YoloEnabled: true,
+			OnYoloFallback: func() error {
+				fallbackCalled = true
+				return nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("runTargetWithFallbackWithOptions error: %v", err)
+	}
+	if !fallbackCalled {
+		t.Fatalf("expected yolo fallback callback")
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 launches, got %d: %q", len(lines), string(data))
+	}
+	if lines[0] != "--permission-mode bypassPermissions" {
+		t.Fatalf("unexpected first launch args: %q", lines[0])
+	}
+	if lines[1] != "--continue" {
+		t.Fatalf("expected runtime retry to use --continue, got %q", lines[1])
+	}
+}
+
 func TestPrepareTTYRelayMakesTerminalRawAndRestores(t *testing.T) {
 	origIsTerminal := ttyRelayIsTerminalFn
 	origMakeRaw := ttyRelayMakeRawFn

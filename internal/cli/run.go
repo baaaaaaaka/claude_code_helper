@@ -260,13 +260,42 @@ type runTargetOptions struct {
 	// PreserveTTY keeps stdout/stderr attached to the terminal for interactive CLIs.
 	PreserveTTY        bool
 	CaptureTTYOutput   bool
+	PrepareIO          func() (*runTargetIO, error)
+	StatusWriter       io.Writer
 	YoloEnabled        bool
 	OnYoloFallback     func() error
 	OnYoloRetryPrepare func([]string) (*patchOutcome, error)
 }
 
+type runTargetIO struct {
+	Stdin   io.Reader
+	Stdout  io.Writer
+	Stderr  io.Writer
+	Closers []io.Closer
+}
+
+func (files *runTargetIO) Close() error {
+	if files == nil {
+		return nil
+	}
+	var firstErr error
+	for _, closer := range files.Closers {
+		if err := closer.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 func defaultRunTargetOptions() runTargetOptions {
 	return runTargetOptions{UseProxy: true}
+}
+
+func (opts runTargetOptions) statusWriter() io.Writer {
+	if opts.StatusWriter != nil {
+		return opts.StatusWriter
+	}
+	return os.Stderr
 }
 
 func runTargetSupervised(
@@ -398,6 +427,7 @@ func runTargetWithFallbackWithOptions(
 	attempt := 0
 	yoloRetried := false
 	patchChecked := false
+	statusWriter := opts.statusWriter()
 	for {
 		attempt++
 		stdoutBuf := &synchronizedLimitedBuffer{max: maxOutputCaptureBytes}
@@ -416,7 +446,7 @@ func runTargetWithFallbackWithOptions(
 			yoloRetried = true
 			nextArgs := prepareYoloRetryArgs(cmdArgs, isYoloRuntimeFailure(err))
 			if isYoloRuntimeFailure(err) {
-				_, _ = fmt.Fprintln(os.Stderr, "yolo: bypass permission mode failed at runtime; retrying without bypass")
+				_, _ = fmt.Fprintln(statusWriter, "yolo: bypass permission mode failed at runtime; retrying without bypass")
 			}
 			if opts.OnYoloFallback != nil {
 				_ = opts.OnYoloFallback()
@@ -438,7 +468,7 @@ func runTargetWithFallbackWithOptions(
 		if patchOutcome != nil && patchOutcome.RollbackOnStartupFailure && !patchChecked {
 			patchChecked = true
 			if isPatchedBinaryStartupFailure(err, out) {
-				_, _ = fmt.Fprintln(os.Stderr, "exe-patch: detected startup failure; restoring backup")
+				_, _ = fmt.Fprintln(statusWriter, "exe-patch: detected startup failure; restoring backup")
 				if restoreErr := restoreExecutableFromBackup(patchOutcome); restoreErr != nil {
 					return fmt.Errorf("restore patched executable: %w", restoreErr)
 				}
@@ -446,7 +476,7 @@ func runTargetWithFallbackWithOptions(
 					return fmt.Errorf("cleanup patch history: %w", historyErr)
 				}
 				if recordErr := recordPatchFailure(patchOutcome.ConfigPath, patchOutcome, formatFailureReason(err, out)); recordErr != nil {
-					_, _ = fmt.Fprintf(os.Stderr, "exe-patch: failed to record patch failure: %v\n", recordErr)
+					_, _ = fmt.Fprintf(statusWriter, "exe-patch: failed to record patch failure: %v\n", recordErr)
 				}
 				patchOutcome = nil
 				continue
@@ -486,11 +516,22 @@ func runTargetOnceWithOptions(
 		envVars = append(envVars, opts.ExtraEnv...)
 	}
 
-	if opts.PreserveTTY && opts.CaptureTTYOutput {
+	hasCustomIO := opts.PrepareIO != nil
+	if opts.PreserveTTY && !hasCustomIO && opts.CaptureTTYOutput {
 		err := runTargetOnceWithCapturedTTYOutput(ctx, cmdArgs, envVars, healthCheck, fatalCh, stdoutBuf, stderrBuf, opts)
 		if err == nil || !errors.Is(err, errTTYCaptureUnavailable) {
 			return err
 		}
+	}
+
+	var ioFiles *runTargetIO
+	if opts.PrepareIO != nil {
+		var err error
+		ioFiles, err = opts.PrepareIO()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = ioFiles.Close() }()
 	}
 
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
@@ -498,20 +539,32 @@ func runTargetOnceWithOptions(
 		cmd.Dir = opts.Cwd
 	}
 	cmd.Env = envVars
-	cmd.Stdin = os.Stdin
-	if opts.PreserveTTY {
+	stdin := io.Reader(os.Stdin)
+	if ioFiles != nil && ioFiles.Stdin != nil {
+		stdin = ioFiles.Stdin
+	}
+	cmd.Stdin = stdin
+	if opts.PreserveTTY && !hasCustomIO {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 	} else {
+		stdoutTarget := io.Writer(os.Stdout)
+		if ioFiles != nil && ioFiles.Stdout != nil {
+			stdoutTarget = ioFiles.Stdout
+		}
 		if stdoutBuf != nil {
-			cmd.Stdout = io.MultiWriter(os.Stdout, stdoutBuf)
+			cmd.Stdout = io.MultiWriter(stdoutTarget, stdoutBuf)
 		} else {
-			cmd.Stdout = os.Stdout
+			cmd.Stdout = stdoutTarget
+		}
+		stderrTarget := io.Writer(os.Stderr)
+		if ioFiles != nil && ioFiles.Stderr != nil {
+			stderrTarget = ioFiles.Stderr
 		}
 		if stderrBuf != nil {
-			cmd.Stderr = io.MultiWriter(os.Stderr, stderrBuf)
+			cmd.Stderr = io.MultiWriter(stderrTarget, stderrBuf)
 		} else {
-			cmd.Stderr = os.Stderr
+			cmd.Stderr = stderrTarget
 		}
 	}
 
@@ -524,6 +577,11 @@ func runTargetOnceWithOptions(
 
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
+	var runtimeTicker *time.Ticker
+	if hasCustomIO && opts.YoloEnabled && (stdoutBuf != nil || stderrBuf != nil) {
+		runtimeTicker = time.NewTicker(100 * time.Millisecond)
+		defer runtimeTicker.Stop()
+	}
 
 	failures := 0
 	for {
@@ -552,8 +610,22 @@ func runTargetOnceWithOptions(
 				continue
 			}
 			failures = 0
+		case <-tickerChan(runtimeTicker):
+			if !looksLikeYoloRuntimeFailure(capturedTTYOutput(stdoutBuf, stderrBuf)) {
+				continue
+			}
+			_ = terminateProcess(cmd.Process, 2*time.Second)
+			waitForTTYSessionExit(done)
+			return errYoloRuntimeFailure
 		}
 	}
+}
+
+func tickerChan(t *time.Ticker) <-chan time.Time {
+	if t == nil {
+		return nil
+	}
+	return t.C
 }
 
 func prepareYoloRetryArgs(cmdArgs []string, runtimeFailure bool) []string {

@@ -112,6 +112,12 @@ jobs:
         run: |
           go test -coverprofile=coverage.out ./...
 
+      - name: Run-json/IO regression suite
+        run: |
+          go test ./internal/cli \
+            -run '^(Test(LoadClaudeRunJSONSpec|RunJSONCmd|RunClaudeJSONSpec|ResolveRunJSONProxyPreference|HasExplicitClaudePermissionArgs|RunTargetOnceWith(FileRunTargetIO|PrepareIODisablesTTYPreserve|HeadlessFileRunTargetIOUsesDevNullDefaults)|RunTargetWithFallback(ArchivesRetryOutputs|RuntimeYoloRetryWithCustomIO)|ArchiveRunTargetOutput|NewFileRunTargetIOWithOptions|AppendFileWriter))$' \
+            -count=1
+
       - name: History/TUI regression suite
         shell: bash
         run: |
