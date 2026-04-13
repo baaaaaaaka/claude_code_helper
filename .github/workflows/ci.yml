@@ -113,6 +113,7 @@ jobs:
           go test -coverprofile=coverage.out ./...
 
       - name: Run-json/IO regression suite
+        shell: bash
         run: |
           go test ./internal/cli \
             -run '^(Test(LoadClaudeRunJSONSpec|RunJSONCmd|RunClaudeJSONSpec|ResolveRunJSONProxyPreference|HasExplicitClaudePermissionArgs|RunTargetOnceWith(FileRunTargetIO|PrepareIODisablesTTYPreserve|HeadlessFileRunTargetIOUsesDevNullDefaults)|RunTargetWithFallback(ArchivesRetryOutputs|RuntimeYoloRetryWithCustomIO)|ArchiveRunTargetOutput|NewFileRunTargetIOWithOptions|AppendFileWriter))$' \
