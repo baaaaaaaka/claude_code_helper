@@ -5,17 +5,44 @@ repo="${REPO:?}"
 tag="${TAG:?}"
 fetcher="${FETCHER:?}"
 
+retry_cmd() {
+  local max_attempts="${CI_RETRY_ATTEMPTS:-5}"
+  local delay="${CI_RETRY_DELAY_SECONDS:-5}"
+  local attempt=1
+
+  while true; do
+    if "$@"; then
+      return 0
+    fi
+    if [[ "$attempt" -ge "$max_attempts" ]]; then
+      echo "Command failed after ${attempt} attempts: $*" >&2
+      return 1
+    fi
+    echo "Command failed (attempt ${attempt}/${max_attempts}): $*" >&2
+    sleep "$delay"
+    attempt=$((attempt + 1))
+  done
+}
+
 install_deps() {
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update
     local pkgs=(ca-certificates openssh-client openssh-server)
     if [[ "$fetcher" == "curl" ]]; then
       pkgs+=(curl)
     else
       pkgs+=(wget)
     fi
-    apt-get install -y --no-install-recommends "${pkgs[@]}"
+    retry_cmd apt-get \
+      -o Acquire::Retries=3 \
+      -o Acquire::http::Timeout=30 \
+      -o Acquire::https::Timeout=30 \
+      update
+    retry_cmd apt-get \
+      -o Acquire::Retries=3 \
+      -o Acquire::http::Timeout=30 \
+      -o Acquire::https::Timeout=30 \
+      install -y --no-install-recommends "${pkgs[@]}"
     return
   fi
 
@@ -26,7 +53,7 @@ install_deps() {
     else
       pkgs+=(wget)
     fi
-    dnf -y install "${pkgs[@]}"
+    retry_cmd dnf -y --setopt=retries=3 install "${pkgs[@]}"
     return
   fi
 
@@ -42,7 +69,7 @@ install_deps() {
     else
       pkgs+=(wget)
     fi
-    yum -y install "${pkgs[@]}"
+    retry_cmd yum -y --setopt=retries=3 install "${pkgs[@]}"
     return
   fi
 
@@ -205,4 +232,3 @@ install_deps
 force_fetcher
 setup_sshd
 run_install_and_smoke_as_user
-
