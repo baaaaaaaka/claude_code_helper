@@ -9,11 +9,13 @@ TEST_USER="${TEST_USER:-testuser}"
 SSHD_PORT="${SSHD_PORT:-2222}"
 HOST_ID="${CLAUDE_PROXY_HOST_ID:?CLAUDE_PROXY_HOST_ID must be set}"
 GLIBC_COMPAT_REPO="${GLIBC_COMPAT_REPO:-baaaaaaaka/claude_code_helper}"
-GLIBC_COMPAT_TAG="${GLIBC_COMPAT_TAG:-glibc-compat-v2.31}"
+GLIBC_COMPAT_TAG="${GLIBC_COMPAT_TAG:-glibc-compat-v2.31.1}"
+GLIBC_COMPAT_BUNDLE="${GLIBC_COMPAT_BUNDLE:-}"
 SHARED_UID="${SHARED_UID:-}"
 SHARED_GID="${SHARED_GID:-}"
 
 sshd_pid=""
+glibc_compat_root=""
 
 patch_base_repo() {
   if [[ -f /etc/yum.repos.d/CentOS-Base.repo ]]; then
@@ -26,8 +28,12 @@ install_deps() {
   local -a base_packages=(ca-certificates openssh-server openssh-client)
   local -a rpm_base_packages=(ca-certificates openssh-server openssh-clients)
   local needs_patchelf=0
+  local needs_tar=0
   if [[ "$EXPECT_MODE" == "compat" ]]; then
     needs_patchelf=1
+  fi
+  if [[ "$EXPECT_MODE" == "compat" && -n "$GLIBC_COMPAT_BUNDLE" ]]; then
+    needs_tar=1
   fi
 
   if command -v apt-get >/dev/null 2>&1; then
@@ -35,6 +41,9 @@ install_deps() {
     apt-get update
     if [[ "$needs_patchelf" -eq 1 ]]; then
       base_packages+=(patchelf)
+    fi
+    if [[ "$needs_tar" -eq 1 ]]; then
+      base_packages+=(tar)
     fi
     apt-get install -y --no-install-recommends "${base_packages[@]}"
     return
@@ -44,13 +53,18 @@ install_deps() {
     if [[ "$needs_patchelf" -eq 1 ]]; then
       rpm_base_packages+=(patchelf)
     fi
+    if [[ "$needs_tar" -eq 1 ]]; then
+      rpm_base_packages+=(tar)
+    fi
     dnf -y install "${rpm_base_packages[@]}"
     return
   fi
 
   if command -v yum >/dev/null 2>&1; then
     patch_base_repo
-    yum -y install "${rpm_base_packages[@]}" $([[ "$needs_patchelf" -eq 1 ]] && printf '%s' epel-release)
+    yum -y install "${rpm_base_packages[@]}" \
+      $([[ "$needs_patchelf" -eq 1 ]] && printf '%s' epel-release) \
+      $([[ "$needs_tar" -eq 1 ]] && printf '%s' tar)
     if [[ "$needs_patchelf" -eq 1 ]]; then
       yum -y install patchelf
     fi
@@ -59,6 +73,28 @@ install_deps() {
 
   echo "No supported package manager found" >&2
   exit 1
+}
+
+prepare_glibc_compat_runtime() {
+  if [[ "$EXPECT_MODE" != "compat" || -z "$GLIBC_COMPAT_BUNDLE" ]]; then
+    return
+  fi
+  if [[ ! -f "$GLIBC_COMPAT_BUNDLE" ]]; then
+    echo "configured glibc compat bundle does not exist: $GLIBC_COMPAT_BUNDLE" >&2
+    exit 1
+  fi
+  if ! command -v tar >/dev/null 2>&1; then
+    echo "tar is required to extract $GLIBC_COMPAT_BUNDLE" >&2
+    exit 1
+  fi
+
+  glibc_compat_root="/tmp/claude-proxy-glibc-compat"
+  rm -rf "$glibc_compat_root"
+  mkdir -p "$glibc_compat_root"
+  tar -xJf "$GLIBC_COMPAT_BUNDLE" -C "$glibc_compat_root"
+  export CLAUDE_PROXY_GLIBC_COMPAT_ROOT="$glibc_compat_root"
+
+  echo "Using glibc compat runtime from ${GLIBC_COMPAT_BUNDLE} via ${CLAUDE_PROXY_GLIBC_COMPAT_ROOT}"
 }
 
 setup_sshd() {
@@ -176,11 +212,17 @@ run_smoke() {
   local -a run_env=(
     "CLAUDE_PROXY_GLIBC_COMPAT=1"
     "CLAUDE_PROXY_HOST_ID=${HOST_ID}"
-    "CLAUDE_PROXY_GLIBC_COMPAT_REPO=${GLIBC_COMPAT_REPO}"
-    "CLAUDE_PROXY_GLIBC_COMPAT_TAG=${GLIBC_COMPAT_TAG}"
     "HOME=${SHARED_HOME}"
     "XDG_CACHE_HOME=${SHARED_HOME}/.cache"
   )
+  if [[ -n "${CLAUDE_PROXY_GLIBC_COMPAT_ROOT:-}" ]]; then
+    run_env+=("CLAUDE_PROXY_GLIBC_COMPAT_ROOT=${CLAUDE_PROXY_GLIBC_COMPAT_ROOT}")
+  else
+    run_env+=(
+      "CLAUDE_PROXY_GLIBC_COMPAT_REPO=${GLIBC_COMPAT_REPO}"
+      "CLAUDE_PROXY_GLIBC_COMPAT_TAG=${GLIBC_COMPAT_TAG}"
+    )
+  fi
 
   set +e
   run_out="$(
@@ -294,6 +336,9 @@ run_smoke() {
 }
 
 cleanup() {
+  if [[ -n "$glibc_compat_root" ]]; then
+    rm -rf "$glibc_compat_root" 2>/dev/null || true
+  fi
   if [[ -n "$SHARED_UID" && -n "$SHARED_GID" && -d /shared ]]; then
     chown -R "${SHARED_UID}:${SHARED_GID}" /shared 2>/dev/null || true
   fi
@@ -304,6 +349,7 @@ cleanup() {
 trap cleanup EXIT
 
 install_deps
+prepare_glibc_compat_runtime
 setup_sshd
 write_config
 run_smoke

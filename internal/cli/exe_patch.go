@@ -300,7 +300,6 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 	if err != nil {
 		return nil, err
 	}
-	glibcCompat := opts.glibcCompatConfigured()
 
 	exePath, err := execLookPathFn(cmdArgs[0])
 	if err != nil {
@@ -313,12 +312,16 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 	}
 
 	isClaude := isClaudeExecutable(cmdArgs[0], resolvedPath)
+	managedNPMClaude := isClaude && isManagedNPMClaudeLauncherPath(resolvedPath, os.Getenv)
+	glibcCompat := opts.glibcCompatConfigured() && !managedNPMClaude
 	if !isClaude {
+		builtinSpecs = nil
+	} else if managedNPMClaude {
 		builtinSpecs = nil
 	}
 	yoloRequested := hasYoloBypassPermissionsArg(cmdArgs)
 	builtinPatchAllowed := (yoloRequested || opts.allowBuiltInWithoutBypass) && len(builtinSpecs) > 0
-	glibcCompatHost := isClaude && glibcCompat && glibcCompatHostEligibleFn()
+	glibcCompatHost := isClaude && !managedNPMClaude && glibcCompat && glibcCompatHostEligibleFn()
 	patchTargetPath := resolvedPath
 	var compatOutcome *patchOutcome
 	// Claude's built-in byte patches are only allowed when a launch both
@@ -328,7 +331,7 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 	// is enabled for this launch. When built-in patching is not available, any
 	// previously-applied Claude byte patch must be restored before launch, but
 	// Linux glibc-compat rescue remains available below.
-	if isClaude && !builtinPatchAllowed {
+	if isClaude && !managedNPMClaude && !builtinPatchAllowed {
 		if err := disableClaudeBytePatch(resolvedPath, configPath, log, opts.dryRun); err != nil {
 			return nil, err
 		}
@@ -350,7 +353,7 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 		if compatOutcome != nil && strings.TrimSpace(compatOutcome.TargetPath) != "" {
 			patchTargetPath = compatOutcome.TargetPath
 		}
-		if isClaude && !builtinPatchAllowed && !config.PathsEqual(patchTargetPath, resolvedPath) {
+		if isClaude && !managedNPMClaude && !builtinPatchAllowed && !config.PathsEqual(patchTargetPath, resolvedPath) {
 			if err := disableClaudeBytePatch(patchTargetPath, configPath, log, opts.dryRun); err != nil {
 				return nil, err
 			}
@@ -491,6 +494,11 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 	}
 	if needProbe {
 		out, probeErr := runClaudeProbeOutcome(outcome, resolvedPath, "--version")
+		if probeErr != nil {
+			if kernelErr := bunLinuxKernelStartupError(out, probeErr); kernelErr != nil {
+				return nil, kernelErr
+			}
+		}
 		if probeErr != nil && glibcCompat && isMissingGlibcSymbolError(out) {
 			patchedOutcome, compatApplied, compatErr := applyClaudeGlibcCompatPatchFn(resolvedPath, opts, log, opts.dryRun, outcome)
 			outcome = patchedOutcome

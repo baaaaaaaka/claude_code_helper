@@ -3,6 +3,9 @@ set -euo pipefail
 
 # Build glibc 2.31 in a CentOS 7 container without replacing system glibc.
 # The result is an isolated runtime bundle that can be used as a compat layer.
+# After the CentOS 7 build completes, augment the bundle with Rocky Linux 8
+# libstdc++/libgcc runtime libraries so Node/npm can also run on EL7 through
+# the same launcher.
 #
 # Example:
 #   bash scripts/glibc/build_glibc_231_centos7.sh
@@ -10,17 +13,31 @@ set -euo pipefail
 
 GLIBC_VERSION="${GLIBC_VERSION:-2.31}"
 CENTOS_IMAGE="${CENTOS_IMAGE:-centos:7}"
+CPP_RUNTIME_IMAGE="${CPP_RUNTIME_IMAGE:-rockylinux:8}"
 JOBS="${JOBS:-4}"
 OUT_DIR="${OUT_DIR:-$(pwd)/dist/glibc-compat}"
+BUNDLE_BASE="glibc-${GLIBC_VERSION}-centos7-runtime-cxx-x86_64"
+BUNDLE_PATH="${OUT_DIR}/${BUNDLE_BASE}.tar.xz"
+BUNDLE_SHA_PATH="${BUNDLE_PATH}.sha256"
+CPP_RUNTIME_MIN_GLIBCXX="${CPP_RUNTIME_MIN_GLIBCXX:-GLIBCXX_3.4.21}"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "docker is required" >&2
+  exit 1
+fi
+if ! command -v tar >/dev/null 2>&1; then
+  echo "tar is required" >&2
+  exit 1
+fi
+if ! command -v sha256sum >/dev/null 2>&1; then
+  echo "sha256sum is required" >&2
   exit 1
 fi
 
 mkdir -p "$OUT_DIR"
 
 echo "Building glibc ${GLIBC_VERSION} in ${CENTOS_IMAGE}"
+echo "Vendoring C++ runtime from ${CPP_RUNTIME_IMAGE}"
 echo "Output directory: ${OUT_DIR}"
 
 docker run --rm \
@@ -96,7 +113,7 @@ package_runtime() {
   local stage="/tmp/glibc-stage"
   local runtime_root="/tmp/glibc-runtime"
   local runtime_dir="${runtime_root}/glibc-${GLIBC_VERSION}"
-  local bundle_base="glibc-${GLIBC_VERSION}-centos7-runtime-x86_64"
+  local bundle_base="glibc-${GLIBC_VERSION}-centos7-runtime-cxx-x86_64"
   local tar_path="/out/${bundle_base}.tar.xz"
 
   rm -rf "$runtime_root"
@@ -133,6 +150,57 @@ build_glibc
 package_runtime
 '
 
+augment_bundle_with_cpp_runtime() {
+  local stage_dir="${OUT_DIR}/.bundle-stage-${GLIBC_VERSION}"
+  local runtime_root="${stage_dir}/glibc-${GLIBC_VERSION}"
+  local lib_dir="${runtime_root}/lib"
+
+  rm -rf "$stage_dir"
+  mkdir -p "$stage_dir"
+  tar -C "$stage_dir" -xJf "$BUNDLE_PATH"
+  if [[ ! -d "$lib_dir" ]]; then
+    echo "missing extracted runtime lib dir: $lib_dir" >&2
+    rm -rf "$stage_dir"
+    exit 1
+  fi
+
+  docker run --rm \
+    -v "$lib_dir:/bundle-lib:rw" \
+    "$CPP_RUNTIME_IMAGE" \
+    bash -lc '
+set -euo pipefail
+test -f /lib64/libstdc++.so.6
+test -f /lib64/libgcc_s.so.1
+cp -L /lib64/libstdc++.so.6 /bundle-lib/libstdc++.so.6
+cp -L /lib64/libgcc_s.so.1 /bundle-lib/libgcc_s.so.1
+chmod 0644 /bundle-lib/libstdc++.so.6 /bundle-lib/libgcc_s.so.1
+'
+
+  if ! grep -aq "$CPP_RUNTIME_MIN_GLIBCXX" "${lib_dir}/libstdc++.so.6"; then
+    echo "vendored libstdc++.so.6 does not expose ${CPP_RUNTIME_MIN_GLIBCXX}" >&2
+    rm -rf "$stage_dir"
+    exit 1
+  fi
+  if [[ ! -f "${lib_dir}/libgcc_s.so.1" ]]; then
+    echo "vendored libgcc_s.so.1 is missing from bundle" >&2
+    rm -rf "$stage_dir"
+    exit 1
+  fi
+
+  rm -f "$BUNDLE_PATH" "$BUNDLE_SHA_PATH"
+  tar -C "$stage_dir" -cJf "$BUNDLE_PATH" .
+  (
+    cd "$OUT_DIR"
+    sha256sum "${BUNDLE_BASE}.tar.xz" > "${BUNDLE_BASE}.tar.xz.sha256"
+  )
+  rm -rf "$stage_dir"
+
+  echo "Vendored Rocky Linux 8 C++ runtime into bundle:"
+  ls -lh "$BUNDLE_PATH" "$BUNDLE_SHA_PATH"
+}
+
+augment_bundle_with_cpp_runtime
+
 echo
 echo "Done. Bundle files:"
-ls -lh "$OUT_DIR"/glibc-2.31-centos7-runtime-x86_64.tar.xz*
+ls -lh "$OUT_DIR"/"${BUNDLE_BASE}".tar.xz*

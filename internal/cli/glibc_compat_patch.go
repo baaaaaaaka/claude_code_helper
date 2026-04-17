@@ -26,10 +26,13 @@ const (
 	glibcCompatRepoEnv = "CLAUDE_PROXY_GLIBC_COMPAT_REPO"
 	glibcCompatTagEnv  = "CLAUDE_PROXY_GLIBC_COMPAT_TAG"
 
-	glibcCompatDefaultTag      = "glibc-compat-v2.31"
-	glibcCompatExtractedDir    = "glibc-2.31"
-	glibcCompatDownloadTimeout = 2 * time.Minute
-	glibcCompatMirrorKeep      = 2
+	glibcCompatDefaultTag       = "glibc-compat-v2.31.1"
+	glibcCompatDefaultAsset     = "glibc-2.31-centos7-runtime-cxx-x86_64.tar.xz"
+	glibcCompatExtractedDir     = "glibc-2.31"
+	glibcCompatDownloadTimeout  = 2 * time.Minute
+	glibcCompatMirrorKeep       = 2
+	glibcCompatRequiredCPPStubA = "libstdc++.so.6"
+	glibcCompatRequiredCPPStubB = "libgcc_s.so.1"
 )
 
 type glibcCompatLayout struct {
@@ -308,12 +311,12 @@ func ensureDefaultGlibcCompatRuntime(log io.Writer) (string, error) {
 	}
 	cacheRoot := filepath.Join(hostRoot, "glibc-compat", sanitizePathComponent(tag))
 	runtimeRoot := filepath.Join(cacheRoot, "runtime")
-	if _, err := resolveGlibcCompatLayout(runtimeRoot); err == nil {
+	if _, err := resolveDefaultGlibcCompatRuntime(runtimeRoot); err == nil {
 		return runtimeRoot, nil
 	}
 	lockPath := filepath.Join(cacheRoot, ".runtime.lock")
 	if err := withFileLock(lockPath, func() error {
-		if _, err := resolveGlibcCompatLayout(runtimeRoot); err == nil {
+		if _, err := resolveDefaultGlibcCompatRuntime(runtimeRoot); err == nil {
 			return nil
 		}
 		if err := os.MkdirAll(cacheRoot, 0o755); err != nil {
@@ -332,7 +335,7 @@ func ensureDefaultGlibcCompatRuntime(log io.Writer) (string, error) {
 		if err := extractGlibcCompatBundle(bundlePath, stageDir); err != nil {
 			return err
 		}
-		if _, err := resolveGlibcCompatLayout(stageDir); err != nil {
+		if _, err := resolveDefaultGlibcCompatRuntime(stageDir); err != nil {
 			return err
 		}
 		if err := installPreparedGlibcCompatRuntime(stageDir, runtimeRoot); err != nil {
@@ -342,7 +345,7 @@ func ensureDefaultGlibcCompatRuntime(log io.Writer) (string, error) {
 	}); err != nil {
 		return "", err
 	}
-	if _, err := resolveGlibcCompatLayout(runtimeRoot); err != nil {
+	if _, err := resolveDefaultGlibcCompatRuntime(runtimeRoot); err != nil {
 		return "", err
 	}
 	if log != nil {
@@ -352,7 +355,7 @@ func ensureDefaultGlibcCompatRuntime(log io.Writer) (string, error) {
 }
 
 func installPreparedGlibcCompatRuntime(stageDir string, runtimeRoot string) error {
-	if _, err := resolveGlibcCompatLayout(runtimeRoot); err == nil {
+	if _, err := resolveDefaultGlibcCompatRuntime(runtimeRoot); err == nil {
 		return nil
 	}
 	if info, err := os.Stat(runtimeRoot); err == nil {
@@ -367,7 +370,7 @@ func installPreparedGlibcCompatRuntime(stageDir string, runtimeRoot string) erro
 		return fmt.Errorf("stat existing glibc compat runtime: %w", err)
 	}
 	if err := os.Rename(stageDir, runtimeRoot); err != nil {
-		if _, statErr := resolveGlibcCompatLayout(runtimeRoot); statErr == nil {
+		if _, statErr := resolveDefaultGlibcCompatRuntime(runtimeRoot); statErr == nil {
 			return nil
 		}
 		return fmt.Errorf("install glibc compat runtime: %w", err)
@@ -673,7 +676,7 @@ func glibcCompatAssetName(goos string, goarch string) (string, error) {
 	if goos != "linux" || goarch != "amd64" {
 		return "", fmt.Errorf("unsupported glibc compat platform: %s/%s", goos, goarch)
 	}
-	return "glibc-2.31-centos7-runtime-x86_64.tar.xz", nil
+	return glibcCompatDefaultAsset, nil
 }
 
 func glibcCompatReleaseURL(repo string, tag string, asset string) string {
@@ -853,6 +856,19 @@ func resolveGlibcCompatLayout(root string) (glibcCompatLayout, error) {
 		}
 	}
 	return glibcCompatLayout{}, fmt.Errorf("glibc compat runtime not found under %s", root)
+}
+
+func resolveDefaultGlibcCompatRuntime(root string) (glibcCompatLayout, error) {
+	layout, err := resolveGlibcCompatLayout(root)
+	if err != nil {
+		return glibcCompatLayout{}, err
+	}
+	for _, name := range []string{glibcCompatRequiredCPPStubA, glibcCompatRequiredCPPStubB} {
+		if !fileExists(filepath.Join(layout.LibDir, name)) {
+			return glibcCompatLayout{}, fmt.Errorf("glibc compat runtime missing %s under %s", name, layout.LibDir)
+		}
+	}
+	return layout, nil
 }
 
 func isMissingGlibcSymbolError(output string) bool {

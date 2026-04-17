@@ -112,7 +112,7 @@ for img in $images; do
       -e CLAUDE_INSTALL_NEEDS_PATCHELF=1
       -e CLAUDE_INSTALL_NEEDS_TAR=1
       -e CLAUDE_PROXY_GLIBC_COMPAT_REPO="${CLAUDE_PROXY_GLIBC_COMPAT_REPO:-baaaaaaaka/claude_code_helper}"
-      -e CLAUDE_PROXY_GLIBC_COMPAT_TAG="${CLAUDE_PROXY_GLIBC_COMPAT_TAG:-glibc-compat-v2.31}"
+      -e CLAUDE_PROXY_GLIBC_COMPAT_TAG="${CLAUDE_PROXY_GLIBC_COMPAT_TAG:-glibc-compat-v2.31.1}"
     )
   fi
   docker run --rm "${docker_network_args[@]}" \

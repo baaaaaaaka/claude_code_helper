@@ -16,6 +16,7 @@ TEST_USER="${TEST_USER:-testuser}"
 SSHD_PORT="${SSHD_PORT:-2222}"
 GLIBC_COMPAT_REPO="${GLIBC_COMPAT_REPO:-}"
 GLIBC_COMPAT_TAG="${GLIBC_COMPAT_TAG:-}"
+GLIBC_COMPAT_BUNDLE="${GLIBC_COMPAT_BUNDLE:-}"
 HOST_ID="${CLAUDE_PROXY_HOST_ID:-centos7-smoke}"
 CACHE_ROOT="${XDG_CACHE_HOME:-/tmp/claude-proxy-cache}"
 
@@ -30,7 +31,7 @@ patch_base_repo() {
 
 install_deps() {
   patch_base_repo
-  yum -y install ca-certificates curl openssh-server openssh-clients epel-release
+  yum -y install ca-certificates curl openssh-server openssh-clients epel-release $([[ -n "$GLIBC_COMPAT_BUNDLE" ]] && printf '%s' tar)
   yum -y install patchelf
 }
 
@@ -152,10 +153,16 @@ EOF
     "CLAUDE_PROXY_HOST_ID=${HOST_ID}"
     "XDG_CACHE_HOME=${CACHE_ROOT}"
   )
-  if [[ -n "$GLIBC_COMPAT_REPO" ]]; then
+  if [[ -n "$GLIBC_COMPAT_BUNDLE" ]]; then
+    local compat_root="/tmp/glibc-compat-root"
+    rm -rf "$compat_root"
+    mkdir -p "$compat_root"
+    tar -C "$compat_root" -xJf "$GLIBC_COMPAT_BUNDLE"
+    run_env+=("CLAUDE_PROXY_GLIBC_COMPAT_ROOT=$compat_root")
+  elif [[ -n "$GLIBC_COMPAT_REPO" ]]; then
     run_env+=("CLAUDE_PROXY_GLIBC_COMPAT_REPO=$GLIBC_COMPAT_REPO")
   fi
-  if [[ -n "$GLIBC_COMPAT_TAG" ]]; then
+  if [[ -z "$GLIBC_COMPAT_BUNDLE" && -n "$GLIBC_COMPAT_TAG" ]]; then
     run_env+=("CLAUDE_PROXY_GLIBC_COMPAT_TAG=$GLIBC_COMPAT_TAG")
   fi
 

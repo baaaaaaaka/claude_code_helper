@@ -28,6 +28,12 @@ func writeGlibcCompatRuntimeFixture(t *testing.T, root string, loaderData string
 	if err := os.WriteFile(filepath.Join(libDir, "libc.so.6"), []byte(libcData), 0o644); err != nil {
 		t.Fatalf("write libc: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(libDir, glibcCompatRequiredCPPStubA), []byte("libstdc++"), 0o644); err != nil {
+		t.Fatalf("write libstdc++: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(libDir, glibcCompatRequiredCPPStubB), []byte("libgcc"), 0o644); err != nil {
+		t.Fatalf("write libgcc: %v", err)
+	}
 	layout, err := resolveGlibcCompatLayout(root)
 	if err != nil {
 		t.Fatalf("resolveGlibcCompatLayout error: %v", err)
@@ -67,6 +73,12 @@ func TestResolveGlibcCompatLayout(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(libDir, "libc.so.6"), []byte("x"), 0o644); err != nil {
 			t.Fatalf("write libc: %v", err)
 		}
+		if err := os.WriteFile(filepath.Join(libDir, glibcCompatRequiredCPPStubA), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write libstdc++: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(libDir, glibcCompatRequiredCPPStubB), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write libgcc: %v", err)
+		}
 
 		layout, err := resolveGlibcCompatLayout(root)
 		if err != nil {
@@ -89,6 +101,12 @@ func TestResolveGlibcCompatLayout(t *testing.T) {
 		}
 		if err := os.WriteFile(filepath.Join(libDir, "libc.so.6"), []byte("x"), 0o644); err != nil {
 			t.Fatalf("write libc: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(libDir, glibcCompatRequiredCPPStubA), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write libstdc++: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(libDir, glibcCompatRequiredCPPStubB), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write libgcc: %v", err)
 		}
 
 		layout, err := resolveGlibcCompatLayout(root)
@@ -213,7 +231,7 @@ func TestResolveGlibcCompatRepoAndTag(t *testing.T) {
 		if err != nil {
 			t.Fatalf("glibcCompatAssetName error: %v", err)
 		}
-		if asset != "glibc-2.31-centos7-runtime-x86_64.tar.xz" {
+		if asset != glibcCompatDefaultAsset {
 			t.Fatalf("unexpected asset name: %q", asset)
 		}
 		if _, err := glibcCompatAssetName("darwin", "arm64"); err == nil {
@@ -370,7 +388,7 @@ func TestEnsureDefaultGlibcCompatRuntimeUsesSeededBundle(t *testing.T) {
 	}
 
 	recordPath := filepath.Join(stubDir, "tar.args")
-	unix := "#!/bin/sh\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"-C\" ]; then\n    out=\"$2\"\n    shift 2\n    continue\n  fi\n  shift\n done\nprintf '%s\\n' \"$@\" > \"" + recordPath + "\"\nmkdir -p \"$out/glibc-2.31/lib\"\nprintf loader > \"$out/glibc-2.31/lib/ld-linux-x86-64.so.2\"\nprintf libc > \"$out/glibc-2.31/lib/libc.so.6\"\nexit 0\n"
+	unix := "#!/bin/sh\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"-C\" ]; then\n    out=\"$2\"\n    shift 2\n    continue\n  fi\n  shift\n done\nprintf '%s\\n' \"$@\" > \"" + recordPath + "\"\nmkdir -p \"$out/glibc-2.31/lib\"\nprintf loader > \"$out/glibc-2.31/lib/ld-linux-x86-64.so.2\"\nprintf libc > \"$out/glibc-2.31/lib/libc.so.6\"\nprintf libstdcxx > \"$out/glibc-2.31/lib/" + glibcCompatRequiredCPPStubA + "\"\nprintf libgcc > \"$out/glibc-2.31/lib/" + glibcCompatRequiredCPPStubB + "\"\nexit 0\n"
 	win := "@echo off\r\nexit /b 1\r\n"
 	writeStub(t, stubDir, "tar", unix, win)
 	setStubPath(t, stubDir)
@@ -393,6 +411,75 @@ func TestEnsureDefaultGlibcCompatRuntimeUsesSeededBundle(t *testing.T) {
 	}
 	if secondRoot != runtimeRoot {
 		t.Fatalf("expected cached runtime root %q, got %q", runtimeRoot, secondRoot)
+	}
+}
+
+func TestEnsureDefaultGlibcCompatRuntimeRejectsCachedRuntimeMissingCPPRuntime(t *testing.T) {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		t.Skip("automatic glibc compat runtime only applies on linux/amd64")
+	}
+	cacheBase := t.TempDir()
+	stubDir := t.TempDir()
+	tag := "glibc-compat-test"
+	t.Setenv("XDG_CACHE_HOME", cacheBase)
+	t.Setenv(claudeProxyHostIDEnv, "host-a")
+	t.Setenv(glibcCompatTagEnv, tag)
+
+	hostRoot, _, err := resolveClaudeProxyHostRoot()
+	if err != nil {
+		t.Fatalf("resolveClaudeProxyHostRoot error: %v", err)
+	}
+	cacheRoot := filepath.Join(hostRoot, "glibc-compat", sanitizePathComponent(tag))
+	runtimeRoot := filepath.Join(cacheRoot, "runtime")
+	libDir := filepath.Join(runtimeRoot, "glibc-2.31", "lib")
+	if err := os.MkdirAll(libDir, 0o755); err != nil {
+		t.Fatalf("mkdir cached runtime lib dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(libDir, "ld-linux-x86-64.so.2"), []byte("loader"), 0o644); err != nil {
+		t.Fatalf("write cached loader: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(libDir, "libc.so.6"), []byte("libc"), 0o644); err != nil {
+		t.Fatalf("write cached libc: %v", err)
+	}
+
+	asset, err := glibcCompatAssetName(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("glibcCompatAssetName error: %v", err)
+	}
+	bundlePayload := []byte("seeded bundle")
+	bundlePath := filepath.Join(cacheRoot, asset)
+	checksumPath := bundlePath + ".sha256"
+	if err := os.MkdirAll(cacheRoot, 0o755); err != nil {
+		t.Fatalf("mkdir cache root: %v", err)
+	}
+	if err := os.WriteFile(bundlePath, bundlePayload, 0o644); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	sum := sha256.Sum256(bundlePayload)
+	if err := os.WriteFile(checksumPath, []byte(hex.EncodeToString(sum[:])+"  "+asset+"\n"), 0o644); err != nil {
+		t.Fatalf("write checksum: %v", err)
+	}
+
+	recordPath := filepath.Join(stubDir, "tar.args")
+	unix := "#!/bin/sh\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"-C\" ]; then\n    out=\"$2\"\n    shift 2\n    continue\n  fi\n  shift\n done\nprintf rebuilt > \"" + recordPath + "\"\nmkdir -p \"$out/glibc-2.31/lib\"\nprintf loader > \"$out/glibc-2.31/lib/ld-linux-x86-64.so.2\"\nprintf libc > \"$out/glibc-2.31/lib/libc.so.6\"\nprintf libstdcxx > \"$out/glibc-2.31/lib/" + glibcCompatRequiredCPPStubA + "\"\nprintf libgcc > \"$out/glibc-2.31/lib/" + glibcCompatRequiredCPPStubB + "\"\nexit 0\n"
+	win := "@echo off\r\nexit /b 1\r\n"
+	writeStub(t, stubDir, "tar", unix, win)
+	setStubPath(t, stubDir)
+
+	gotRoot, err := ensureDefaultGlibcCompatRuntime(io.Discard)
+	if err != nil {
+		t.Fatalf("ensureDefaultGlibcCompatRuntime error: %v", err)
+	}
+	if gotRoot != runtimeRoot {
+		t.Fatalf("expected runtime root %q, got %q", runtimeRoot, gotRoot)
+	}
+	for _, name := range []string{glibcCompatRequiredCPPStubA, glibcCompatRequiredCPPStubB} {
+		if _, err := os.Stat(filepath.Join(runtimeRoot, "glibc-2.31", "lib", name)); err != nil {
+			t.Fatalf("expected rebuilt runtime to contain %s: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(recordPath); err != nil {
+		t.Fatalf("expected tar extraction to rerun for stale cache: %v", err)
 	}
 }
 

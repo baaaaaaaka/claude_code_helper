@@ -176,6 +176,81 @@ func TestClaudeInstallEL7RecoveryIntegration(t *testing.T) {
 	}
 }
 
+func TestClaudeInstallNPMFallbackIntegration(t *testing.T) {
+	requireClaudeInstallIntegration(t, "CLAUDE_INSTALL_TEST_NPM_FALLBACK")
+	if runtime.GOOS != "linux" {
+		t.Skip("npm fallback integration only applies on linux")
+	}
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node is required for npm fallback integration")
+	}
+	if _, err := exec.LookPath("npm"); err != nil {
+		t.Skip("npm is required for npm fallback integration")
+	}
+	if glibcCompatHostEligibleFn() {
+		if _, err := exec.LookPath("patchelf"); err != nil {
+			t.Skip("patchelf is required when npm fallback needs glibc compat")
+		}
+		if _, err := exec.LookPath("tar"); err != nil {
+			t.Skip("tar is required when npm fallback needs glibc compat")
+		}
+	}
+
+	homeDir := resolveClaudeInstallTestHome(t)
+	localBinDir, _ := configureClaudeInstallTestEnv(t, homeDir)
+	if err := os.MkdirAll(localBinDir, 0o755); err != nil {
+		t.Fatalf("mkdir local bin: %v", err)
+	}
+	applyInstallProxyEnv(t)
+	cacheRoot := filepath.Join(homeDir, ".cache")
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	hostID := strings.TrimSpace(os.Getenv("CLAUDE_INSTALL_TEST_HOST_ID"))
+	if hostID == "" {
+		hostID = "npm-fallback-test"
+	}
+	t.Setenv("CLAUDE_PROXY_HOST_ID", hostID)
+
+	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
+	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
+	t.Cleanup(func() { readLinuxKernelReleaseFn = prevReadKernelReleaseFn })
+
+	if path, err := exec.LookPath("claude"); err == nil {
+		t.Fatalf("expected claude to be absent from PATH before installation, found %q", path)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), claudeInstallIntegrationTimeout)
+	defer cancel()
+
+	var installLog bytes.Buffer
+	path, err := ensureClaudeInstalled(ctx, "", &installLog, installProxyOptions{})
+	if err != nil {
+		t.Fatalf("ensureClaudeInstalled: %v\ninstaller output:\n%s", err, installLog.String())
+	}
+	if strings.TrimSpace(path) == "" {
+		t.Fatalf("ensureClaudeInstalled returned empty path")
+	}
+
+	hostRoot, _, err := resolveClaudeProxyHostRoot()
+	if err != nil {
+		t.Fatalf("resolveClaudeProxyHostRoot: %v", err)
+	}
+	wantLauncher := filepath.Join(hostRoot, claudeNPMInstallDirName, "claude")
+	if !samePath(path, wantLauncher) {
+		t.Fatalf("expected npm fallback launcher %q, got %q", wantLauncher, path)
+	}
+
+	out, err := runClaudeProbe(path, "--version")
+	if err != nil {
+		t.Fatalf("claude --version via npm fallback: %v\noutput: %s\ninstaller output:\n%s", err, out, installLog.String())
+	}
+	if got := extractVersion(out); got == "" {
+		t.Fatalf("failed to parse claude version from npm fallback output %q", strings.TrimSpace(out))
+	}
+	if !strings.Contains(installLog.String(), "installing the npm distribution") {
+		t.Fatalf("expected npm fallback log, got:\n%s", installLog.String())
+	}
+}
+
 func requireClaudeInstallIntegration(t *testing.T, envName string) {
 	t.Helper()
 	if os.Getenv(envName) != "1" {

@@ -4,13 +4,13 @@ set -euo pipefail
 # Validate that a CentOS 7 container can run Claude with a glibc compat bundle.
 #
 # Example:
-#   BUNDLE=/tmp/glibc-compat-out/glibc-2.31-centos7-runtime-x86_64.tar.xz \
+#   BUNDLE=/tmp/glibc-compat-out/glibc-2.31-centos7-runtime-cxx-x86_64.tar.xz \
 #   bash scripts/glibc/test_centos7_claude_with_glibc_compat.sh
 
 CENTOS_IMAGE="${CENTOS_IMAGE:-centos:7}"
 CLAUDE_VERSION="${CLAUDE_VERSION:-2.1.38}"
 CLAUDE_BUCKET="${CLAUDE_BUCKET:-https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases}"
-BUNDLE="${BUNDLE:-$(pwd)/dist/glibc-compat/glibc-2.31-centos7-runtime-x86_64.tar.xz}"
+BUNDLE="${BUNDLE:-$(pwd)/dist/glibc-compat/glibc-2.31-centos7-runtime-cxx-x86_64.tar.xz}"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "docker is required" >&2

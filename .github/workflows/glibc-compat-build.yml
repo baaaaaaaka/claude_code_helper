@@ -22,8 +22,8 @@ jobs:
     name: Build and publish glibc 2.31 compat bundle
     runs-on: ubuntu-latest
     env:
-      GLIBC_COMPAT_TAG: "glibc-compat-v2.31"
-      GLIBC_COMPAT_BUNDLE: "glibc-2.31-centos7-runtime-x86_64.tar.xz"
+      GLIBC_COMPAT_TAG: "glibc-compat-v2.31.1"
+      GLIBC_COMPAT_BUNDLE: "glibc-2.31-centos7-runtime-cxx-x86_64.tar.xz"
 
     steps:
       - name: Checkout
@@ -64,6 +64,45 @@ jobs:
             exit 1
           fi
 
+      - name: Verify bundled C++ runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage_dir="$(mktemp -d)"
+          trap 'rm -rf "$stage_dir"' EXIT
+          tar -C "$stage_dir" -xJf "dist/glibc-compat/$GLIBC_COMPAT_BUNDLE"
+          lib_dir="$stage_dir/glibc-2.31/lib"
+          test -f "$lib_dir/libstdc++.so.6"
+          test -f "$lib_dir/libgcc_s.so.1"
+          grep -aq 'GLIBCXX_3.4.21' "$lib_dir/libstdc++.so.6"
+          max_glibc() {
+            local file="$1"
+            objdump -T "$file" \
+              | awk '/GLIBC_2\./{gsub(/[()]/, "", $5); print $5}' \
+              | sort -Vu \
+              | tail -n 1
+          }
+          check_max_glibc() {
+            local file="$1"
+            local allowed="$2"
+            local actual
+            actual="$(max_glibc "$file")"
+            if [ -n "$actual" ] && [ "$(printf '%s\n%s\n' "$actual" "$allowed" | sort -V | tail -n 1)" != "$allowed" ]; then
+              echo "$file depends on $actual, expected <= $allowed" >&2
+              exit 1
+            fi
+          }
+          check_max_glibc "$lib_dir/libstdc++.so.6" "GLIBC_2.31"
+          check_max_glibc "$lib_dir/libgcc_s.so.1" "GLIBC_2.31"
+
+      - name: Smoke test Node.js on CentOS7 with compat bundle
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          BUNDLE="$PWD/dist/glibc-compat/$GLIBC_COMPAT_BUNDLE" \
+            bash scripts/glibc/test_centos7_node_with_glibc_compat.sh
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -81,8 +120,8 @@ jobs:
           if ! gh release view "$GLIBC_COMPAT_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$GLIBC_COMPAT_TAG" \
               --repo "$GITHUB_REPOSITORY" \
-              --title "glibc compat bundle v2.31" \
-              --notes "Automated CentOS7-compatible glibc 2.31 runtime bundle for Claude startup smoke tests."
+              --title "glibc compat bundle v2.31.1" \
+              --notes "Automated CentOS7-compatible glibc 2.31 runtime bundle with vendored libstdc++/libgcc for Claude startup smoke tests."
           fi
 
       - name: Publish release assets

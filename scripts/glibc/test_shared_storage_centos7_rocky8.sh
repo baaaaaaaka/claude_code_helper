@@ -5,7 +5,8 @@ CLAUDE_PROXY_BIN="${CLAUDE_PROXY_BIN:-$(pwd)/dist/claude-proxy}"
 CLAUDE_VERSION="${CLAUDE_VERSION:-2.1.38}"
 CLAUDE_BUCKET="${CLAUDE_BUCKET:-https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases}"
 GLIBC_COMPAT_REPO="${GLIBC_COMPAT_REPO:-baaaaaaaka/claude_code_helper}"
-GLIBC_COMPAT_TAG="${GLIBC_COMPAT_TAG:-glibc-compat-v2.31}"
+GLIBC_COMPAT_TAG="${GLIBC_COMPAT_TAG:-glibc-compat-v2.31.1}"
+GLIBC_COMPAT_BUNDLE="${GLIBC_COMPAT_BUNDLE:-}"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"
@@ -63,6 +64,7 @@ run_host() {
     -e SHARED_GID="$(id -g)" \
     -e GLIBC_COMPAT_REPO="${GLIBC_COMPAT_REPO}" \
     -e GLIBC_COMPAT_TAG="${GLIBC_COMPAT_TAG}" \
+    -e GLIBC_COMPAT_BUNDLE="${GLIBC_COMPAT_BUNDLE}" \
     "${image}" bash /scripts/shared_storage_host_smoke.sh
 }
 

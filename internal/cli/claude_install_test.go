@@ -459,6 +459,155 @@ func TestFindManagedClaudePathIncludesRecoveredLauncherWithoutHomeEnv(t *testing
 	}
 }
 
+func writeManagedNPMClaudeFixture(t *testing.T, layout managedNPMClaudeLayout, nodeTarget string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(nodeTarget), 0o755); err != nil {
+		t.Fatalf("mkdir node target dir: %v", err)
+	}
+	if err := os.WriteFile(nodeTarget, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write node target: %v", err)
+	}
+	if err := os.MkdirAll(layout.LauncherDir, 0o755); err != nil {
+		t.Fatalf("mkdir npm launcher dir: %v", err)
+	}
+	if err := writeManagedNPMExecWrapper(layout.NodePath, []string{nodeTarget}); err != nil {
+		t.Fatalf("write managed npm node launcher: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.CLIPath), 0o755); err != nil {
+		t.Fatalf("mkdir npm cli dir: %v", err)
+	}
+	if err := os.WriteFile(layout.CLIPath, []byte("#!/usr/bin/env node\n"), 0o755); err != nil {
+		t.Fatalf("write npm cli: %v", err)
+	}
+	if err := writeManagedNPMExecWrapper(layout.WrapperPath, []string{layout.NodePath, layout.CLIPath}); err != nil {
+		t.Fatalf("write managed npm Claude wrapper: %v", err)
+	}
+}
+
+func TestFindManagedClaudePathUsesNPMWrapperOnUnsupportedKernel(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("kernel-gated npm wrapper path only applies on linux")
+	}
+	withClaudeInstallGOOS(t, "linux")
+
+	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
+	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
+	t.Cleanup(func() { readLinuxKernelReleaseFn = prevReadKernelReleaseFn })
+
+	home := t.TempDir()
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	hostID := "test-host"
+
+	nativeClaude := filepath.Join(home, ".local", "bin", "claude")
+	if err := os.MkdirAll(filepath.Dir(nativeClaude), 0o755); err != nil {
+		t.Fatalf("mkdir native claude dir: %v", err)
+	}
+	if err := os.WriteFile(nativeClaude, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write native claude: %v", err)
+	}
+
+	getenv := func(key string) string {
+		switch key {
+		case "HOME":
+			return home
+		case "XDG_CACHE_HOME":
+			return cacheRoot
+		case claudeProxyHostIDEnv:
+			return hostID
+		default:
+			return ""
+		}
+	}
+	layout, ok := defaultManagedNPMClaudeLayout("linux", getenv)
+	if !ok {
+		t.Fatalf("expected managed npm layout")
+	}
+	nodeTarget := filepath.Join(t.TempDir(), "node-bin", "node")
+	writeManagedNPMClaudeFixture(t, layout, nodeTarget)
+
+	got, ok := findManagedClaudePath("linux", "", getenv)
+	if !ok {
+		t.Fatalf("expected managed Claude discovery to resolve npm wrapper %q", layout.WrapperPath)
+	}
+	if got != layout.WrapperPath {
+		t.Fatalf("expected %q, got %q", layout.WrapperPath, got)
+	}
+}
+
+func TestFindManagedClaudePathSkipsNPMWrapperWhenCLIPathMissing(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("kernel-gated npm wrapper path only applies on linux")
+	}
+	withClaudeInstallGOOS(t, "linux")
+
+	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
+	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
+	t.Cleanup(func() { readLinuxKernelReleaseFn = prevReadKernelReleaseFn })
+
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	hostID := "test-host"
+	getenv := func(key string) string {
+		switch key {
+		case "XDG_CACHE_HOME":
+			return cacheRoot
+		case claudeProxyHostIDEnv:
+			return hostID
+		default:
+			return ""
+		}
+	}
+	layout, ok := defaultManagedNPMClaudeLayout("linux", getenv)
+	if !ok {
+		t.Fatalf("expected managed npm layout")
+	}
+	nodeTarget := filepath.Join(t.TempDir(), "node-bin", "node")
+	writeManagedNPMClaudeFixture(t, layout, nodeTarget)
+	if err := os.Remove(layout.CLIPath); err != nil {
+		t.Fatalf("remove CLI path: %v", err)
+	}
+
+	if got, ok := findManagedClaudePath("linux", "", getenv); ok {
+		t.Fatalf("expected stale npm wrapper to be ignored, got %q", got)
+	}
+}
+
+func TestFindManagedClaudePathSkipsNPMWrapperWhenPinnedNodeTargetMissing(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("kernel-gated npm wrapper path only applies on linux")
+	}
+	withClaudeInstallGOOS(t, "linux")
+
+	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
+	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
+	t.Cleanup(func() { readLinuxKernelReleaseFn = prevReadKernelReleaseFn })
+
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	hostID := "test-host"
+	getenv := func(key string) string {
+		switch key {
+		case "XDG_CACHE_HOME":
+			return cacheRoot
+		case claudeProxyHostIDEnv:
+			return hostID
+		default:
+			return ""
+		}
+	}
+	layout, ok := defaultManagedNPMClaudeLayout("linux", getenv)
+	if !ok {
+		t.Fatalf("expected managed npm layout")
+	}
+	nodeTarget := filepath.Join(t.TempDir(), "node-bin", "node")
+	writeManagedNPMClaudeFixture(t, layout, nodeTarget)
+	if err := os.Remove(nodeTarget); err != nil {
+		t.Fatalf("remove pinned node target: %v", err)
+	}
+
+	if got, ok := findManagedClaudePath("linux", "", getenv); ok {
+		t.Fatalf("expected stale npm wrapper to be ignored, got %q", got)
+	}
+}
+
 func TestFindInstalledClaudePathPrefersLookPathWhenManagedLocationMissing(t *testing.T) {
 	prevLookPath := claudeInstallLookPathFn
 	t.Cleanup(func() { claudeInstallLookPathFn = prevLookPath })
@@ -570,6 +719,316 @@ func TestEnsureClaudeInstalledReusesRecoveredLauncher(t *testing.T) {
 	}
 	if got != launcherPath {
 		t.Fatalf("expected recovered launcher %q, got %q", launcherPath, got)
+	}
+}
+
+func TestEnsureClaudeInstalledUsesNPMFallbackOnUnsupportedKernel(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("kernel-gated npm fallback only applies on linux")
+	}
+
+	prevInstaller := runClaudeInstallerWithEnvFn
+	t.Cleanup(func() { runClaudeInstallerWithEnvFn = prevInstaller })
+	withClaudeInstallGOOS(t, "linux")
+
+	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
+	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
+	t.Cleanup(func() { readLinuxKernelReleaseFn = prevReadKernelReleaseFn })
+
+	home := t.TempDir()
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	hostID := "test-host"
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv(claudeProxyHostIDEnv, hostID)
+
+	nativeClaude := filepath.Join(home, ".local", "bin", "claude")
+	if err := os.MkdirAll(filepath.Dir(nativeClaude), 0o755); err != nil {
+		t.Fatalf("mkdir native claude dir: %v", err)
+	}
+	if err := os.WriteFile(nativeClaude, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write native claude: %v", err)
+	}
+
+	layout, ok := defaultManagedNPMClaudeLayout("linux", os.Getenv)
+	if !ok {
+		t.Fatalf("expected managed npm layout")
+	}
+	expectedWrapper := layout.WrapperPath
+	installCalls := 0
+	runClaudeInstallerWithEnvFn = func(ctx context.Context, out io.Writer, opts installProxyOptions, extraEnv []string) error {
+		installCalls++
+		nodeTarget := filepath.Join(t.TempDir(), "node-bin", "node")
+		writeManagedNPMClaudeFixture(t, layout, nodeTarget)
+		return nil
+	}
+
+	got, err := ensureClaudeInstalled(context.Background(), "", io.Discard, installProxyOptions{})
+	if err != nil {
+		t.Fatalf("ensureClaudeInstalled error: %v", err)
+	}
+	if got != expectedWrapper {
+		t.Fatalf("expected npm wrapper %q, got %q", expectedWrapper, got)
+	}
+	if got == nativeClaude {
+		t.Fatalf("expected unsupported-kernel install not to reuse native claude %q", nativeClaude)
+	}
+	if installCalls != 1 {
+		t.Fatalf("expected installer to run once, got %d", installCalls)
+	}
+}
+
+func TestShouldApplyManagedNPMNodeGlibcCompat(t *testing.T) {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		t.Skip("managed npm glibc compat gating is linux/amd64-specific")
+	}
+
+	prevEligible := glibcCompatHostEligibleFn
+	glibcCompatHostEligibleFn = func() bool { return true }
+	t.Cleanup(func() { glibcCompatHostEligibleFn = prevEligible })
+
+	t.Setenv(exePatchEnabledEnv, "true")
+	t.Setenv(exePatchGlibcCompatEnv, "true")
+
+	if !shouldApplyManagedNPMNodeGlibcCompat(fmt.Errorf("probe node version: GLIBC_2.28 not found")) {
+		t.Fatalf("expected glibc symbol failure to trigger compat")
+	}
+	if !shouldApplyManagedNPMNodeGlibcCompat(fmt.Errorf("probe node version: GLIBCXX_3.4.21 not found")) {
+		t.Fatalf("expected GLIBCXX failure to trigger compat")
+	}
+
+	t.Setenv(exePatchGlibcCompatEnv, "false")
+	if shouldApplyManagedNPMNodeGlibcCompat(fmt.Errorf("probe node version: GLIBCXX_3.4.21 not found")) {
+		t.Fatalf("expected compat to stay disabled when glibc compat toggle is off")
+	}
+}
+
+func TestAnnotateManagedNPMNodeRuntimeError(t *testing.T) {
+	cppErr := fmt.Errorf("probe node version: exit status 127 (libstdc++.so.6: cannot open shared object file)")
+	got := annotateManagedNPMNodeRuntimeError(cppErr)
+	if !strings.Contains(got.Error(), "libstdc++/libgcc runtime") {
+		t.Fatalf("expected cpp runtime hint, got %q", got.Error())
+	}
+
+	plainErr := errors.New("node was not found in PATH")
+	if annotateManagedNPMNodeRuntimeError(plainErr) != plainErr {
+		t.Fatalf("expected unrelated error to be returned unchanged")
+	}
+}
+
+func TestClaudeNPMFallbackErrorIncludesKernelContext(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("kernel-gated npm fallback error only applies on linux")
+	}
+
+	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
+	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
+	t.Cleanup(func() { readLinuxKernelReleaseFn = prevReadKernelReleaseFn })
+
+	err := claudeNPMFallbackError(errors.New("node was not found in PATH"))
+	if err == nil {
+		t.Fatalf("expected wrapped error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "Linux kernel >= 5.1") {
+		t.Fatalf("expected kernel context in error, got %q", msg)
+	}
+	if !strings.Contains(msg, "Node.js >= 18 and npm in PATH") {
+		t.Fatalf("expected npm fallback requirements in error, got %q", msg)
+	}
+}
+
+func TestParseManagedNPMExecWrapperArgListRoundTrip(t *testing.T) {
+	want := []string{
+		"/tmp/compat-wrapper",
+		"/tmp/node's-bin/node",
+		"/tmp/cli.js",
+	}
+	got, ok := parseManagedNPMExecWrapperArgList(joinShellQuotedArgs(want))
+	if !ok {
+		t.Fatalf("expected wrapper arg list to parse")
+	}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d args, got %d (%q)", len(want), len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("expected arg %d to be %q, got %q", i, want[i], got[i])
+		}
+	}
+}
+
+func TestRunNPMClaudeInstallerRejectsTooOldNode(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("npm fallback Node version gating only applies on linux")
+	}
+
+	prevLookPath := claudeInstallLookPathFn
+	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
+	t.Cleanup(func() {
+		claudeInstallLookPathFn = prevLookPath
+		readLinuxKernelReleaseFn = prevReadKernelReleaseFn
+	})
+	withClaudeInstallGOOS(t, "linux")
+
+	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
+
+	home := t.TempDir()
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv(claudeProxyHostIDEnv, "npm-old-node-host")
+
+	stubDir := t.TempDir()
+	setStubPath(t, stubDir)
+	writeStub(
+		t,
+		stubDir,
+		"node",
+		"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo v16.20.2\n  exit 0\nfi\nexit 0\n",
+		"@echo off\r\nif \"%~1\"==\"--version\" (\r\necho v16.20.2\r\nexit /b 0\r\n)\r\nexit /b 0\r\n",
+	)
+	claudeInstallLookPathFn = exec.LookPath
+
+	err := runNPMClaudeInstallerWithEnv(context.Background(), io.Discard, "", nil)
+	if err == nil {
+		t.Fatalf("expected npm fallback to reject old Node.js")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "detected Node.js v16.20.2") {
+		t.Fatalf("expected old Node.js version in error, got %q", msg)
+	}
+	if !strings.Contains(msg, "Linux kernel >= 5.1") {
+		t.Fatalf("expected kernel context in error, got %q", msg)
+	}
+}
+
+func TestWriteManagedNPMExecWrapperRejectsEmptyCommand(t *testing.T) {
+	err := writeManagedNPMExecWrapper(filepath.Join(t.TempDir(), "wrapper"), nil)
+	if err == nil || !strings.Contains(err.Error(), "wrapper command is empty") {
+		t.Fatalf("expected empty command error, got %v", err)
+	}
+}
+
+func TestRunNPMClaudeInstallerUsesGlibcCompatNodeOnEL7(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("npm glibc compat fallback only applies on linux")
+	}
+
+	prevLookPath := claudeInstallLookPathFn
+	prevGlibcPatch := applyClaudeGlibcCompatPatchFn
+	prevGlibcEligible := glibcCompatHostEligibleFn
+	t.Cleanup(func() {
+		claudeInstallLookPathFn = prevLookPath
+		applyClaudeGlibcCompatPatchFn = prevGlibcPatch
+		glibcCompatHostEligibleFn = prevGlibcEligible
+	})
+	withClaudeInstallGOOS(t, "linux")
+
+	home := t.TempDir()
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	hostID := "npm-glibc-host"
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv(claudeProxyHostIDEnv, hostID)
+
+	stubDir := t.TempDir()
+	nodePath := filepath.Join(stubDir, "node")
+	npmPath := filepath.Join(stubDir, "npm")
+	compatWrapper := filepath.Join(stubDir, "compat-wrapper")
+	t.Setenv("PATH", stubDir)
+
+	nodeBody := "#!/bin/sh\n" +
+		"if [ \"${CLP_NODE_COMPAT:-0}\" != \"1\" ]; then\n" +
+		"  echo \"/lib64/libc.so.6: version \\`GLIBC_2.28' not found (required by $0)\" >&2\n" +
+		"  exit 1\n" +
+		"fi\n" +
+		"if [ \"$1\" = \"--version\" ]; then\n" +
+		"  echo v20.11.1\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"case \"${1##*/}\" in\n" +
+		"  npm)\n" +
+		"    prefix=\"${npm_config_prefix:-$NPM_CONFIG_PREFIX}\"\n" +
+		"    /bin/mkdir -p \"$prefix/lib/node_modules/@anthropic-ai/claude-code\"\n" +
+		"    printf '%s\\n' '#!/usr/bin/env node' > \"$prefix/lib/node_modules/@anthropic-ai/claude-code/cli.js\"\n" +
+		"    /bin/chmod 755 \"$prefix/lib/node_modules/@anthropic-ai/claude-code/cli.js\"\n" +
+		"    exit 0\n" +
+		"    ;;\n" +
+		"  cli.js)\n" +
+		"    if [ \"$2\" = \"--version\" ]; then\n" +
+		"      echo \"Claude Code 2.1.112\"\n" +
+		"      exit 0\n" +
+		"    fi\n" +
+		"    exit 0\n" +
+		"    ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	if err := os.WriteFile(nodePath, []byte(nodeBody), 0o700); err != nil {
+		t.Fatalf("write node stub: %v", err)
+	}
+	if err := os.WriteFile(npmPath, []byte("#!/usr/bin/env node\n"), 0o700); err != nil {
+		t.Fatalf("write npm stub: %v", err)
+	}
+	if err := os.WriteFile(compatWrapper, []byte("#!/bin/sh\nexport CLP_NODE_COMPAT=1\nexec \"$@\"\n"), 0o700); err != nil {
+		t.Fatalf("write compat wrapper: %v", err)
+	}
+
+	claudeInstallLookPathFn = exec.LookPath
+	glibcCompatHostEligibleFn = func() bool { return true }
+
+	compatCalls := 0
+	applyClaudeGlibcCompatPatchFn = func(path string, opts exePatchOptions, log io.Writer, dryRun bool, outcome *patchOutcome) (*patchOutcome, bool, error) {
+		compatCalls++
+		if !samePath(path, nodePath) {
+			t.Fatalf("expected glibc compat target %q, got %q", nodePath, path)
+		}
+		return &patchOutcome{
+			SourcePath:       path,
+			TargetPath:       path,
+			LaunchArgsPrefix: []string{compatWrapper, path},
+		}, true, nil
+	}
+
+	var out bytes.Buffer
+	if err := runNPMClaudeInstallerWithEnv(context.Background(), &out, "", nil); err != nil {
+		t.Fatalf("runNPMClaudeInstallerWithEnv error: %v\noutput:\n%s", err, out.String())
+	}
+	if compatCalls != 1 {
+		t.Fatalf("expected one glibc compat preparation, got %d", compatCalls)
+	}
+
+	layout, ok := defaultManagedNPMClaudeLayout("linux", os.Getenv)
+	if !ok {
+		t.Fatalf("expected managed npm layout")
+	}
+	if !executableExists(layout.NodePath) {
+		t.Fatalf("expected managed node launcher at %s", layout.NodePath)
+	}
+	if !executableExists(layout.WrapperPath) {
+		t.Fatalf("expected managed claude launcher at %s", layout.WrapperPath)
+	}
+
+	wrapperData, err := os.ReadFile(layout.NodePath)
+	if err != nil {
+		t.Fatalf("read managed node launcher: %v", err)
+	}
+	if !strings.Contains(string(wrapperData), compatWrapper) {
+		t.Fatalf("expected managed node launcher to reference compat wrapper, got:\n%s", string(wrapperData))
+	}
+
+	versionOut, err := runClaudeProbe(layout.WrapperPath, "--version")
+	if err != nil {
+		t.Fatalf("managed npm launcher --version: %v\n%s", err, versionOut)
+	}
+	if !strings.Contains(versionOut, "Claude Code 2.1.112") {
+		t.Fatalf("unexpected managed npm launcher output: %q", versionOut)
+	}
+	if !strings.Contains(out.String(), "needs glibc compat") {
+		t.Fatalf("expected glibc compat log in output, got:\n%s", out.String())
 	}
 }
 

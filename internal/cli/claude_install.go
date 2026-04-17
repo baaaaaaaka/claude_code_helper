@@ -276,6 +276,9 @@ func runClaudeInstallerWithEnv(ctx context.Context, out io.Writer, installOpts i
 	if proxyURL != "" && out != nil {
 		_, _ = fmt.Fprintln(out, "Using SSH proxy for Claude installer.")
 	}
+	if claudeRequiresNPMInstall(claudeInstallGOOS) {
+		return runNPMClaudeInstallerWithEnv(ctx, out, proxyURL, extraEnv)
+	}
 
 	candidates := installerCandidates(runtime.GOOS)
 	if len(candidates) == 0 {
@@ -576,10 +579,15 @@ func findInstalledClaudePath(goos string, installOutput string, getenv func(stri
 }
 
 func defaultClaudeInstallCandidates(goos string, getenv func(string) string) []string {
+	npmCandidate := defaultManagedNPMClaudeLauncherCandidate(goos, getenv)
+	if claudeRequiresNPMInstall(goos) {
+		return appendInstallCandidate(nil, goos, npmCandidate)
+	}
+
 	homes := installHomeCandidates(goos, getenv)
 
 	if !strings.EqualFold(goos, "windows") {
-		candidates := make([]string, 0, len(homes)*2+1)
+		candidates := make([]string, 0, len(homes)*2+2)
 		for _, home := range homes {
 			for _, candidate := range []string{
 				filepath.Join(home, ".local", "bin", "claude"),
@@ -590,6 +598,9 @@ func defaultClaudeInstallCandidates(goos string, getenv func(string) string) []s
 		}
 		if candidate := defaultRecoveredClaudeLauncherCandidate(goos, getenv); candidate != "" {
 			candidates = appendInstallCandidate(candidates, goos, candidate)
+		}
+		if npmCandidate != "" {
+			candidates = appendInstallCandidate(candidates, goos, npmCandidate)
 		}
 		return candidates
 	}
@@ -660,34 +671,11 @@ func appendInstallHomeCandidate(homes []string, goos string, candidate string) [
 }
 
 func defaultRecoveredClaudeLauncherCandidate(goos string, getenv func(string) string) string {
-	if !strings.EqualFold(goos, "linux") {
+	hostRoot := defaultManagedClaudeHostRoot(goos, getenv)
+	if hostRoot == "" {
 		return ""
 	}
-	cacheBase := strings.TrimSpace(getenv("XDG_CACHE_HOME"))
-	if cacheBase == "" {
-		if home := strings.TrimSpace(getenv("HOME")); home != "" {
-			cacheBase = filepath.Join(home, ".cache")
-		}
-	}
-	if cacheBase == "" {
-		var err error
-		cacheBase, err = resolveStableCacheBase()
-		if err != nil {
-			return ""
-		}
-	}
-
-	hostID := strings.TrimSpace(getenv(claudeProxyHostIDEnv))
-	if hostID != "" {
-		hostID = sanitizePathComponent(hostID)
-	} else {
-		hostID = resolveHostID()
-	}
-	if hostID == "" {
-		return ""
-	}
-
-	return filepath.Join(cacheBase, "claude-proxy", "hosts", hostID, "install-recovery", "claude")
+	return filepath.Join(hostRoot, "install-recovery", "claude")
 }
 
 func needsWindowsGitBash(goos string, output string) bool {

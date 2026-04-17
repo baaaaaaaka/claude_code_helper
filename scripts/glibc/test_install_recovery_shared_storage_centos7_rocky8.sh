@@ -4,7 +4,8 @@ set -euo pipefail
 CLAUDE_PROXY_BIN="${CLAUDE_PROXY_BIN:-$(pwd)/dist/claude-proxy}"
 CLAUDE_CLI_TEST_BIN="${CLAUDE_CLI_TEST_BIN:-$(pwd)/dist/claude_cli_test}"
 GLIBC_COMPAT_REPO="${GLIBC_COMPAT_REPO:-baaaaaaaka/claude_code_helper}"
-GLIBC_COMPAT_TAG="${GLIBC_COMPAT_TAG:-glibc-compat-v2.31}"
+GLIBC_COMPAT_TAG="${GLIBC_COMPAT_TAG:-glibc-compat-v2.31.1}"
+GLIBC_COMPAT_BUNDLE="${GLIBC_COMPAT_BUNDLE:-}"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"
@@ -51,6 +52,7 @@ run_centos7_install_recovery() {
     -e CLAUDE_INSTALL_NEEDS_TAR=1 \
     -e CLAUDE_PROXY_GLIBC_COMPAT_REPO="${GLIBC_COMPAT_REPO}" \
     -e CLAUDE_PROXY_GLIBC_COMPAT_TAG="${GLIBC_COMPAT_TAG}" \
+    -e CLAUDE_INSTALL_GLIBC_COMPAT_BUNDLE="${GLIBC_COMPAT_BUNDLE}" \
     -e CI=true \
     centos:7 bash /ci/container_claude_install_launch_smoke.sh
 }

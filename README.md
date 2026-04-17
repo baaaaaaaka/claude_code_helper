@@ -110,6 +110,10 @@ Config is stored under your OS user config directory (Linux typically
 - On Linux, if the glibc compat runtime must be auto-downloaded and extracted
   (`--exe-patch-glibc-root` unset and no cached runtime yet), `tar` is also
   required.
+- Claude Code's bundled Bun runtime requires Linux kernel `5.1+`
+  (`5.6+` recommended). Older kernels such as `4.18` can crash on startup with
+  Bun `SIGBUS`/`SIGILL`; the glibc compat flow does not fix an unsupported
+  kernel.
 
 Check the SSH/proxy prerequisites:
 
@@ -166,6 +170,11 @@ patch test results (linux/mac/windows + linux distros).
 - When opening Claude Code from the TUI or history commands, `claude-proxy`
   uses its managed Claude Code install by default. If that install is missing,
   it can install Claude automatically with the official installer.
+- On Linux hosts whose kernel is too old for Claude Code's bundled Bun
+  runtime, `claude-proxy` falls back to an npm-based Claude Code install under
+  `~/.cache/claude-proxy/hosts/<host-id>/npm-install/...` and launches it
+  through host-managed `node`/`claude` wrappers that pin the detected `node`
+  path.
 - On EL7/CentOS 7 hosts, if the official installer fails because the downloaded
   Claude binary needs a newer glibc, `claude-proxy` can reuse that downloaded
   binary through a private launcher and then continue with its glibc compat
@@ -187,6 +196,14 @@ patch test results (linux/mac/windows + linux distros).
   `claude-proxy` can apply a `patchelf`-based glibc compatibility patch.
   If `--exe-patch-glibc-root` is not set, the compat runtime is auto-downloaded
   from GitHub release assets on supported linux/amd64 builds.
+- The npm fallback install is treated as a wrapper launch path rather than a
+  native Claude binary, so built-in Claude byte patches stay disabled for that
+  route. On EL7/CentOS 7 hosts, if the selected `node` runtime itself needs a
+  newer glibc, `claude-proxy` can prepare a host-local glibc compat launch path
+  for `node` and reuse that both for `npm install` and the final npm Claude
+  launcher. The auto-downloaded compat bundle now also carries Rocky Linux 8
+  `libstdc++.so.6` and `libgcc_s.so.1`, so official Node.js 18+ binaries can
+  run on CentOS 7 through the same compat runtime.
 - Use `claude-proxy --help` to see the available `--exe-patch-*` flags if you
   want to tune or disable this behavior.
 

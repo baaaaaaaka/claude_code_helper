@@ -313,6 +313,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Detect glibc compat bundle changes
+        id: glibc_compat_changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            rebuild:
+              - 'scripts/glibc/**'
+              - '.github/workflows/glibc-compat-build.yml'
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -380,12 +389,104 @@ jobs:
               "$img" bash /ci/container_claude_install_launch_smoke.sh
           done
 
-      - name: Smoke test in CentOS7 (Claude install recovery + glibc compat launch)
+      - name: Smoke test in containers (Claude npm fallback on forced old kernel)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # These docker jobs still share the GitHub-hosted Ubuntu kernel, so
+          # none of them are true <5.1 host-kernel coverage. Force the old-kernel
+          # path here to keep the npm fallback exercised on representative
+          # non-EL7 Linux userlands.
+          for img in rockylinux:8 ubuntu:20.04; do
+            echo "==> $img"
+            docker run --rm \
+              -v "$PWD/dist:/dist:ro" \
+              -v "$PWD/scripts/ci:/ci:ro" \
+              -e CLAUDE_INSTALL_TEST_NPM_FALLBACK=1 \
+              -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallNPMFallbackIntegration \
+              -e CLAUDE_INSTALL_NEEDS_NODE=1 \
+              -e CI=true \
+              "$img" bash /ci/container_claude_install_launch_smoke.sh
+          done
+
+      - name: Build local glibc compat bundle for CentOS7 smoke tests
+        if: steps.glibc_compat_changes.outputs.rebuild == 'true'
+        shell: bash
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          mkdir -p dist/glibc-compat
+          OUT_DIR="$PWD/dist/glibc-compat" JOBS=4 bash scripts/glibc/build_glibc_231_centos7.sh
+
+      - name: Smoke test in CentOS7 (Claude npm fallback + glibc/C++ compat, local bundle)
+        if: steps.glibc_compat_changes.outputs.rebuild == 'true'
+        shell: bash
+        timeout-minutes: 20
+        env:
+          CLAUDE_INSTALL_GLIBC_COMPAT_BUNDLE: "/dist/glibc-compat/glibc-2.31-centos7-runtime-cxx-x86_64.tar.xz"
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/dist:/dist:ro" \
+            -v "$PWD/scripts/ci:/ci:ro" \
+            -e CLAUDE_INSTALL_TEST_NPM_FALLBACK=1 \
+            -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallNPMFallbackIntegration \
+            -e CLAUDE_INSTALL_NEEDS_NODE=1 \
+            -e CLAUDE_INSTALL_NEEDS_PATCHELF=1 \
+            -e CLAUDE_INSTALL_NEEDS_TAR=1 \
+            -e CLAUDE_INSTALL_GLIBC_COMPAT_BUNDLE \
+            -e CI=true \
+            centos:7 bash /ci/container_claude_install_launch_smoke.sh
+
+      - name: Smoke test in CentOS7 (Claude npm fallback + glibc/C++ compat, release asset)
+        if: steps.glibc_compat_changes.outputs.rebuild != 'true'
         shell: bash
         timeout-minutes: 20
         env:
           CLAUDE_PROXY_GLIBC_COMPAT_REPO: "baaaaaaaka/claude_code_helper"
-          CLAUDE_PROXY_GLIBC_COMPAT_TAG: "glibc-compat-v2.31"
+          CLAUDE_PROXY_GLIBC_COMPAT_TAG: "glibc-compat-v2.31.1"
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/dist:/dist:ro" \
+            -v "$PWD/scripts/ci:/ci:ro" \
+            -e CLAUDE_INSTALL_TEST_NPM_FALLBACK=1 \
+            -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallNPMFallbackIntegration \
+            -e CLAUDE_INSTALL_NEEDS_NODE=1 \
+            -e CLAUDE_INSTALL_NEEDS_PATCHELF=1 \
+            -e CLAUDE_INSTALL_NEEDS_TAR=1 \
+            -e CLAUDE_PROXY_GLIBC_COMPAT_REPO \
+            -e CLAUDE_PROXY_GLIBC_COMPAT_TAG \
+            -e CI=true \
+            centos:7 bash /ci/container_claude_install_launch_smoke.sh
+
+      - name: Smoke test in CentOS7 (Claude install recovery + glibc compat launch, local bundle)
+        if: steps.glibc_compat_changes.outputs.rebuild == 'true'
+        shell: bash
+        timeout-minutes: 20
+        env:
+          CLAUDE_INSTALL_GLIBC_COMPAT_BUNDLE: "/dist/glibc-compat/glibc-2.31-centos7-runtime-cxx-x86_64.tar.xz"
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/dist:/dist:ro" \
+            -v "$PWD/scripts/ci:/ci:ro" \
+            -e CLAUDE_INSTALL_TEST=1 \
+            -e CLAUDE_INSTALL_TEST_EL7_GLIBC_RECOVERY=1 \
+            -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallEL7RecoveryIntegration \
+            -e CLAUDE_INSTALL_NEEDS_PATCHELF=1 \
+            -e CLAUDE_INSTALL_NEEDS_TAR=1 \
+            -e CLAUDE_INSTALL_GLIBC_COMPAT_BUNDLE \
+            -e CI=true \
+            centos:7 bash /ci/container_claude_install_launch_smoke.sh
+
+      - name: Smoke test in CentOS7 (Claude install recovery + glibc compat launch, release asset)
+        if: steps.glibc_compat_changes.outputs.rebuild != 'true'
+        shell: bash
+        timeout-minutes: 20
+        env:
+          CLAUDE_PROXY_GLIBC_COMPAT_REPO: "baaaaaaaka/claude_code_helper"
+          CLAUDE_PROXY_GLIBC_COMPAT_TAG: "glibc-compat-v2.31.1"
         run: |
           set -euo pipefail
           docker run --rm \
@@ -418,12 +519,28 @@ jobs:
               "$img" bash /ci/container_claude_patch_smoke.sh
           done
 
-      - name: Smoke test in CentOS7 (Claude startup via host-local glibc mirror)
+      - name: Smoke test in CentOS7 (Claude startup via host-local glibc mirror, local bundle)
+        if: steps.glibc_compat_changes.outputs.rebuild == 'true'
+        shell: bash
+        timeout-minutes: 15
+        env:
+          GLIBC_COMPAT_BUNDLE: "/dist/glibc-compat/glibc-2.31-centos7-runtime-cxx-x86_64.tar.xz"
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/dist:/dist:ro" \
+            -v "$PWD/scripts/glibc:/scripts:ro" \
+            -e CLAUDE_VERSION="$CLAUDE_PATCH_VERSION" \
+            -e GLIBC_COMPAT_BUNDLE \
+            centos:7 bash /scripts/test_centos7_clp_autopatch.sh
+
+      - name: Smoke test in CentOS7 (Claude startup via host-local glibc mirror, release asset)
+        if: steps.glibc_compat_changes.outputs.rebuild != 'true'
         shell: bash
         timeout-minutes: 15
         env:
           GLIBC_COMPAT_REPO: "baaaaaaaka/claude_code_helper"
-          GLIBC_COMPAT_TAG: "glibc-compat-v2.31"
+          GLIBC_COMPAT_TAG: "glibc-compat-v2.31.1"
         run: |
           set -euo pipefail
           docker run --rm \
@@ -434,22 +551,44 @@ jobs:
             -e GLIBC_COMPAT_TAG \
             centos:7 bash /scripts/test_centos7_clp_autopatch.sh
 
-      - name: Smoke test shared storage across CentOS7 and Rocky8
+      - name: Smoke test shared storage across CentOS7 and Rocky8 (local bundle)
+        if: steps.glibc_compat_changes.outputs.rebuild == 'true'
         shell: bash
         timeout-minutes: 25
         env:
-          GLIBC_COMPAT_REPO: "baaaaaaaka/claude_code_helper"
-          GLIBC_COMPAT_TAG: "glibc-compat-v2.31"
+          GLIBC_COMPAT_BUNDLE: "/dist/glibc-compat/glibc-2.31-centos7-runtime-cxx-x86_64.tar.xz"
         run: |
           set -euo pipefail
           bash scripts/glibc/test_shared_storage_centos7_rocky8.sh
 
-      - name: Smoke test shared install recovery from CentOS7 to Rocky8
+      - name: Smoke test shared storage across CentOS7 and Rocky8 (release asset)
+        if: steps.glibc_compat_changes.outputs.rebuild != 'true'
         shell: bash
         timeout-minutes: 25
         env:
           GLIBC_COMPAT_REPO: "baaaaaaaka/claude_code_helper"
-          GLIBC_COMPAT_TAG: "glibc-compat-v2.31"
+          GLIBC_COMPAT_TAG: "glibc-compat-v2.31.1"
+        run: |
+          set -euo pipefail
+          bash scripts/glibc/test_shared_storage_centos7_rocky8.sh
+
+      - name: Smoke test shared install recovery from CentOS7 to Rocky8 (local bundle)
+        if: steps.glibc_compat_changes.outputs.rebuild == 'true'
+        shell: bash
+        timeout-minutes: 25
+        env:
+          GLIBC_COMPAT_BUNDLE: "/dist/glibc-compat/glibc-2.31-centos7-runtime-cxx-x86_64.tar.xz"
+        run: |
+          set -euo pipefail
+          bash scripts/glibc/test_install_recovery_shared_storage_centos7_rocky8.sh
+
+      - name: Smoke test shared install recovery from CentOS7 to Rocky8 (release asset)
+        if: steps.glibc_compat_changes.outputs.rebuild != 'true'
+        shell: bash
+        timeout-minutes: 25
+        env:
+          GLIBC_COMPAT_REPO: "baaaaaaaka/claude_code_helper"
+          GLIBC_COMPAT_TAG: "glibc-compat-v2.31.1"
         run: |
           set -euo pipefail
           bash scripts/glibc/test_install_recovery_shared_storage_centos7_rocky8.sh
