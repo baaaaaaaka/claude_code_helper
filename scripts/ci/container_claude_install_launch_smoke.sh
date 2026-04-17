@@ -6,6 +6,7 @@ test_name="${CLAUDE_INSTALL_TEST_NAME:-TestClaudeInstallLaunchIntegration}"
 needs_patchelf="${CLAUDE_INSTALL_NEEDS_PATCHELF:-0}"
 needs_tar="${CLAUDE_INSTALL_NEEDS_TAR:-0}"
 needs_node="${CLAUDE_INSTALL_NEEDS_NODE:-0}"
+drop_npm="${CLAUDE_INSTALL_DROP_NPM:-0}"
 node_version="${CLAUDE_INSTALL_NODE_VERSION:-v18.20.8}"
 glibc_compat_bundle="${CLAUDE_INSTALL_GLIBC_COMPAT_BUNDLE:-}"
 
@@ -127,6 +128,10 @@ install_node_runtime() {
   fi
   tar -xJf "$archive" -C /opt/node --strip-components=1
   export PATH="/opt/node/bin:$PATH"
+  if [[ "$drop_npm" == "1" ]]; then
+    rm -f /opt/node/bin/npm /opt/node/bin/npx
+    echo "Removed npm from the installed system Node runtime under /opt/node/bin to exercise the node-without-npm fallback path."
+  fi
   if node --version && npm --version; then
     return
   fi

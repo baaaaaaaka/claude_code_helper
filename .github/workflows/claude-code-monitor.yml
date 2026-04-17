@@ -304,6 +304,103 @@ jobs:
           chmod +x "$test_bin"
           echo "TEST_BIN_PATH=$test_bin" >> "$GITHUB_ENV"
 
+      - name: Smoke test npm fallback (containers)
+        shell: bash
+        env:
+          IMAGE: ${{ matrix.image }}
+          NEEDS_PATCHELF: ${{ matrix.needs_patchelf }}
+          GLIBC_COMPAT: ${{ matrix.glibc_compat }}
+        run: |
+          set -euo pipefail
+          extra_env=()
+          if [[ "${NEEDS_PATCHELF}" == "1" ]]; then
+            extra_env+=(
+              -e CLAUDE_INSTALL_NEEDS_PATCHELF=1
+              -e CLAUDE_INSTALL_NEEDS_TAR=1
+            )
+          fi
+          if [[ "${GLIBC_COMPAT}" == "1" ]]; then
+            extra_env+=(
+              -e CLAUDE_PROXY_GLIBC_COMPAT_REPO=baaaaaaaka/claude_code_helper
+              -e CLAUDE_PROXY_GLIBC_COMPAT_TAG=glibc-compat-v2.31.1
+            )
+          fi
+
+          docker run --rm \
+            -v "${TEST_BIN_PATH}:/claude_cli_test:ro" \
+            -v "$PWD/scripts/ci:/ci:ro" \
+            -e TEST_BIN_PATH=/claude_cli_test \
+            -e CLAUDE_INSTALL_TEST_NPM_FALLBACK=1 \
+            -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallNPMFallbackIntegration \
+            -e CI=true \
+            "${extra_env[@]}" \
+            "${IMAGE}" bash /ci/container_claude_install_launch_smoke.sh
+
+      - name: Smoke test npm fallback with system Node toolchain (containers)
+        shell: bash
+        env:
+          IMAGE: ${{ matrix.image }}
+          NEEDS_PATCHELF: ${{ matrix.needs_patchelf }}
+          GLIBC_COMPAT: ${{ matrix.glibc_compat }}
+        run: |
+          set -euo pipefail
+          extra_env=()
+          if [[ "${NEEDS_PATCHELF}" == "1" ]]; then
+            extra_env+=(
+              -e CLAUDE_INSTALL_NEEDS_PATCHELF=1
+              -e CLAUDE_INSTALL_NEEDS_TAR=1
+            )
+          fi
+          if [[ "${GLIBC_COMPAT}" == "1" ]]; then
+            extra_env+=(
+              -e CLAUDE_PROXY_GLIBC_COMPAT_REPO=baaaaaaaka/claude_code_helper
+              -e CLAUDE_PROXY_GLIBC_COMPAT_TAG=glibc-compat-v2.31.1
+            )
+          fi
+          docker run --rm \
+            -v "${TEST_BIN_PATH}:/claude_cli_test:ro" \
+            -v "$PWD/scripts/ci:/ci:ro" \
+            -e TEST_BIN_PATH=/claude_cli_test \
+            -e CLAUDE_INSTALL_TEST_NPM_FALLBACK_SYSTEM_NODE=1 \
+            -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallNPMFallbackSystemNodeIntegration \
+            -e CLAUDE_INSTALL_NEEDS_NODE=1 \
+            -e CI=true \
+            "${extra_env[@]}" \
+            "${IMAGE}" bash /ci/container_claude_install_launch_smoke.sh
+
+      - name: Smoke test npm fallback with system Node but no npm (containers)
+        shell: bash
+        env:
+          IMAGE: ${{ matrix.image }}
+          NEEDS_PATCHELF: ${{ matrix.needs_patchelf }}
+          GLIBC_COMPAT: ${{ matrix.glibc_compat }}
+        run: |
+          set -euo pipefail
+          extra_env=()
+          if [[ "${NEEDS_PATCHELF}" == "1" ]]; then
+            extra_env+=(
+              -e CLAUDE_INSTALL_NEEDS_PATCHELF=1
+              -e CLAUDE_INSTALL_NEEDS_TAR=1
+            )
+          fi
+          if [[ "${GLIBC_COMPAT}" == "1" ]]; then
+            extra_env+=(
+              -e CLAUDE_PROXY_GLIBC_COMPAT_REPO=baaaaaaaka/claude_code_helper
+              -e CLAUDE_PROXY_GLIBC_COMPAT_TAG=glibc-compat-v2.31.1
+            )
+          fi
+          docker run --rm \
+            -v "${TEST_BIN_PATH}:/claude_cli_test:ro" \
+            -v "$PWD/scripts/ci:/ci:ro" \
+            -e TEST_BIN_PATH=/claude_cli_test \
+            -e CLAUDE_INSTALL_TEST_NPM_FALLBACK_NODE_WITHOUT_NPM=1 \
+            -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallNPMFallbackNodeWithoutNPMIntegration \
+            -e CLAUDE_INSTALL_NEEDS_NODE=1 \
+            -e CLAUDE_INSTALL_DROP_NPM=1 \
+            -e CI=true \
+            "${extra_env[@]}" \
+            "${IMAGE}" bash /ci/container_claude_install_launch_smoke.sh
+
       - name: Run patch integration tests (containers)
         shell: bash
         env:

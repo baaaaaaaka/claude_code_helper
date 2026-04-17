@@ -178,14 +178,22 @@ func TestClaudeInstallEL7RecoveryIntegration(t *testing.T) {
 
 func TestClaudeInstallNPMFallbackIntegration(t *testing.T) {
 	requireClaudeInstallIntegration(t, "CLAUDE_INSTALL_TEST_NPM_FALLBACK")
+	runClaudeInstallNPMFallbackIntegration(t, false)
+}
+
+func TestClaudeInstallNPMFallbackSystemNodeIntegration(t *testing.T) {
+	requireClaudeInstallIntegration(t, "CLAUDE_INSTALL_TEST_NPM_FALLBACK_SYSTEM_NODE")
+	runClaudeInstallNPMFallbackIntegration(t, true)
+}
+
+func TestClaudeInstallNPMFallbackNodeWithoutNPMIntegration(t *testing.T) {
+	requireClaudeInstallIntegration(t, "CLAUDE_INSTALL_TEST_NPM_FALLBACK_NODE_WITHOUT_NPM")
+	runClaudeInstallNPMFallbackIntegration(t, false)
+}
+
+func runClaudeInstallNPMFallbackIntegration(t *testing.T, requireSystemNode bool) {
 	if runtime.GOOS != "linux" {
 		t.Skip("npm fallback integration only applies on linux")
-	}
-	if _, err := exec.LookPath("node"); err != nil {
-		t.Skip("node is required for npm fallback integration")
-	}
-	if _, err := exec.LookPath("npm"); err != nil {
-		t.Skip("npm is required for npm fallback integration")
 	}
 	if glibcCompatHostEligibleFn() {
 		if _, err := exec.LookPath("patchelf"); err != nil {
@@ -204,6 +212,9 @@ func TestClaudeInstallNPMFallbackIntegration(t *testing.T) {
 	applyInstallProxyEnv(t)
 	cacheRoot := filepath.Join(homeDir, ".cache")
 	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	ambientPrefix := filepath.Join(homeDir, "ambient-npm-prefix")
+	t.Setenv("npm_config_prefix", ambientPrefix)
+	t.Setenv("NPM_CONFIG_PREFIX", ambientPrefix)
 	hostID := strings.TrimSpace(os.Getenv("CLAUDE_INSTALL_TEST_HOST_ID"))
 	if hostID == "" {
 		hostID = "npm-fallback-test"
@@ -213,6 +224,15 @@ func TestClaudeInstallNPMFallbackIntegration(t *testing.T) {
 	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
 	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
 	t.Cleanup(func() { readLinuxKernelReleaseFn = prevReadKernelReleaseFn })
+
+	if os.Getenv("CLAUDE_INSTALL_TEST_NPM_FALLBACK_NODE_WITHOUT_NPM") == "1" {
+		if _, err := exec.LookPath("node"); err != nil {
+			t.Fatalf("expected node in PATH for node-without-npm integration: %v", err)
+		}
+		if npmPath, err := exec.LookPath("npm"); err == nil {
+			t.Fatalf("expected npm to be absent from PATH for node-without-npm integration, found %q", npmPath)
+		}
+	}
 
 	if path, err := exec.LookPath("claude"); err == nil {
 		t.Fatalf("expected claude to be absent from PATH before installation, found %q", path)
@@ -245,6 +265,52 @@ func TestClaudeInstallNPMFallbackIntegration(t *testing.T) {
 	}
 	if got := extractVersion(out); got == "" {
 		t.Fatalf("failed to parse claude version from npm fallback output %q", strings.TrimSpace(out))
+	}
+	layout, ok := defaultManagedNPMClaudeLayout("linux", os.Getenv)
+	if !ok {
+		t.Fatalf("expected managed npm layout")
+	}
+	if !samePath(layout.WrapperPath, path) {
+		t.Fatalf("expected wrapper path %q, got %q", layout.WrapperPath, path)
+	}
+	if fileExists(filepath.Join(ambientPrefix, "lib", "node_modules", "@anthropic-ai", "claude-code", "cli.js")) {
+		t.Fatalf("ambient npm prefix unexpectedly received the Claude Code install: %s", ambientPrefix)
+	}
+	if !fileExists(layout.CLIPath) {
+		t.Fatalf("expected managed npm CLI at %s", layout.CLIPath)
+	}
+	if requireSystemNode {
+		systemNodePath, err := exec.LookPath("node")
+		if err != nil {
+			t.Fatalf("expected system node in PATH for system-node integration: %v", err)
+		}
+		nodeWrapperArgs, ok := readManagedNPMExecWrapperArgs(layout.NodePath)
+		if !ok || len(nodeWrapperArgs) == 0 {
+			t.Fatalf("expected managed npm node launcher args in %s", layout.NodePath)
+		}
+		systemNodeReferenced := false
+		for _, arg := range nodeWrapperArgs {
+			if samePath(arg, systemNodePath) {
+				systemNodeReferenced = true
+				break
+			}
+		}
+		if !systemNodeReferenced {
+			t.Fatalf("expected managed npm node launcher args %q to reference system node %q", nodeWrapperArgs, systemNodePath)
+		}
+		if fileExists(layout.RuntimeNodePath) {
+			t.Fatalf("did not expect private Node runtime at %s when system node is available", layout.RuntimeNodePath)
+		}
+		if strings.Contains(strings.ToLower(installLog.String()), "retrying with a claude-proxy-managed node.js runtime") {
+			t.Fatalf("unexpected private runtime retry in system-node integration log:\n%s", installLog.String())
+		}
+	} else if os.Getenv("CLAUDE_INSTALL_TEST_NPM_FALLBACK_NODE_WITHOUT_NPM") == "1" {
+		if !fileExists(layout.RuntimeNodePath) {
+			t.Fatalf("expected private Node runtime at %s when npm is missing from PATH", layout.RuntimeNodePath)
+		}
+		if !strings.Contains(strings.ToLower(installLog.String()), "npm was not found in path") {
+			t.Fatalf("expected missing npm log in node-without-npm integration output, got:\n%s", installLog.String())
+		}
 	}
 	if !strings.Contains(installLog.String(), "installing the npm distribution") {
 		t.Fatalf("expected npm fallback log, got:\n%s", installLog.String())

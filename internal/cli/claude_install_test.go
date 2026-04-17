@@ -834,7 +834,7 @@ func TestClaudeNPMFallbackErrorIncludesKernelContext(t *testing.T) {
 	if !strings.Contains(msg, "Linux kernel >= 5.1") {
 		t.Fatalf("expected kernel context in error, got %q", msg)
 	}
-	if !strings.Contains(msg, "Node.js >= 18 and npm in PATH") {
+	if !strings.Contains(msg, "Node.js >= 18 runtime with npm") {
 		t.Fatalf("expected npm fallback requirements in error, got %q", msg)
 	}
 }
@@ -865,9 +865,11 @@ func TestRunNPMClaudeInstallerRejectsTooOldNode(t *testing.T) {
 	}
 
 	prevLookPath := claudeInstallLookPathFn
+	prevBootstrap := ensureManagedNPMBootstrapRuntimeFn
 	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
 	t.Cleanup(func() {
 		claudeInstallLookPathFn = prevLookPath
+		ensureManagedNPMBootstrapRuntimeFn = prevBootstrap
 		readLinuxKernelReleaseFn = prevReadKernelReleaseFn
 	})
 	withClaudeInstallGOOS(t, "linux")
@@ -891,6 +893,9 @@ func TestRunNPMClaudeInstallerRejectsTooOldNode(t *testing.T) {
 		"@echo off\r\nif \"%~1\"==\"--version\" (\r\necho v16.20.2\r\nexit /b 0\r\n)\r\nexit /b 0\r\n",
 	)
 	claudeInstallLookPathFn = exec.LookPath
+	ensureManagedNPMBootstrapRuntimeFn = func(ctx context.Context, layout managedNPMClaudeLayout, proxyURL string, log io.Writer) (managedNPMNodeRuntime, error) {
+		return managedNPMNodeRuntime{}, errors.New("bootstrap unavailable in test")
+	}
 
 	err := runNPMClaudeInstallerWithEnv(context.Background(), io.Discard, "", nil)
 	if err == nil {
@@ -900,8 +905,436 @@ func TestRunNPMClaudeInstallerRejectsTooOldNode(t *testing.T) {
 	if !strings.Contains(msg, "detected Node.js v16.20.2") {
 		t.Fatalf("expected old Node.js version in error, got %q", msg)
 	}
+	if !strings.Contains(msg, "automatic private Node.js bootstrap failed") {
+		t.Fatalf("expected bootstrap failure in error, got %q", msg)
+	}
 	if !strings.Contains(msg, "Linux kernel >= 5.1") {
 		t.Fatalf("expected kernel context in error, got %q", msg)
+	}
+}
+
+func TestRunNPMClaudeInstallerBootstrapsPrivateNodeWhenNodeMissing(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("managed Node.js bootstrap only applies on linux")
+	}
+
+	prevLookPath := claudeInstallLookPathFn
+	prevBootstrap := ensureManagedNPMBootstrapRuntimeFn
+	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
+	t.Cleanup(func() {
+		claudeInstallLookPathFn = prevLookPath
+		ensureManagedNPMBootstrapRuntimeFn = prevBootstrap
+		readLinuxKernelReleaseFn = prevReadKernelReleaseFn
+	})
+	withClaudeInstallGOOS(t, "linux")
+
+	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
+
+	home := t.TempDir()
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv(claudeProxyHostIDEnv, "npm-bootstrap-host")
+
+	runtimeDir := t.TempDir()
+	nodePath := filepath.Join(runtimeDir, "node")
+	npmPath := filepath.Join(runtimeDir, "npm")
+	nodeBody := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--version\" ]; then\n" +
+		"  echo v20.11.1\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"case \"${1##*/}\" in\n" +
+		"  cli.js)\n" +
+		"    if [ \"$2\" = \"--version\" ]; then\n" +
+		"      echo \"Claude Code 2.1.112\"\n" +
+		"      exit 0\n" +
+		"    fi\n" +
+		"    exit 0\n" +
+		"    ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	npmBody := "#!/bin/sh\n" +
+		"prefix=\"${npm_config_prefix:-$NPM_CONFIG_PREFIX}\"\n" +
+		"/bin/mkdir -p \"$prefix/lib/node_modules/@anthropic-ai/claude-code\"\n" +
+		"printf '%s\\n' '#!/usr/bin/env node' > \"$prefix/lib/node_modules/@anthropic-ai/claude-code/cli.js\"\n" +
+		"/bin/chmod 755 \"$prefix/lib/node_modules/@anthropic-ai/claude-code/cli.js\"\n" +
+		"exit 0\n"
+	if err := os.WriteFile(nodePath, []byte(nodeBody), 0o700); err != nil {
+		t.Fatalf("write node stub: %v", err)
+	}
+	if err := os.WriteFile(npmPath, []byte(npmBody), 0o700); err != nil {
+		t.Fatalf("write npm stub: %v", err)
+	}
+
+	claudeInstallLookPathFn = func(file string) (string, error) {
+		return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
+	}
+	ensureManagedNPMBootstrapRuntimeFn = func(ctx context.Context, layout managedNPMClaudeLayout, proxyURL string, log io.Writer) (managedNPMNodeRuntime, error) {
+		return managedNPMNodeRuntime{
+			NodePath: nodePath,
+			NPMPath:  npmPath,
+		}, nil
+	}
+
+	var out bytes.Buffer
+	if err := runNPMClaudeInstallerWithEnv(context.Background(), &out, "", nil); err != nil {
+		t.Fatalf("runNPMClaudeInstallerWithEnv error: %v\noutput:\n%s", err, out.String())
+	}
+
+	layout, ok := defaultManagedNPMClaudeLayout("linux", os.Getenv)
+	if !ok {
+		t.Fatalf("expected managed npm layout")
+	}
+	if !executableExists(layout.NodePath) {
+		t.Fatalf("expected managed node launcher at %s", layout.NodePath)
+	}
+	if !executableExists(layout.WrapperPath) {
+		t.Fatalf("expected managed claude launcher at %s", layout.WrapperPath)
+	}
+
+	versionOut, err := runClaudeProbe(layout.WrapperPath, "--version")
+	if err != nil {
+		t.Fatalf("managed npm launcher --version: %v\n%s", err, versionOut)
+	}
+	if !strings.Contains(versionOut, "Claude Code 2.1.112") {
+		t.Fatalf("unexpected managed npm launcher output: %q", versionOut)
+	}
+	if !strings.Contains(out.String(), "node was not found in PATH") {
+		t.Fatalf("expected bootstrap log in output, got:\n%s", out.String())
+	}
+}
+
+func TestRunNPMClaudeInstallerBootstrapsPrivateNodeWhenNPMMissing(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("managed Node.js bootstrap only applies on linux")
+	}
+
+	prevLookPath := claudeInstallLookPathFn
+	prevBootstrap := ensureManagedNPMBootstrapRuntimeFn
+	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
+	t.Cleanup(func() {
+		claudeInstallLookPathFn = prevLookPath
+		ensureManagedNPMBootstrapRuntimeFn = prevBootstrap
+		readLinuxKernelReleaseFn = prevReadKernelReleaseFn
+	})
+	withClaudeInstallGOOS(t, "linux")
+
+	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
+
+	home := t.TempDir()
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv(claudeProxyHostIDEnv, "npm-missing-host")
+
+	systemDir := t.TempDir()
+	nodeInPath := filepath.Join(systemDir, "node")
+	nodeBody := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo v20.11.1\n  exit 0\nfi\nexit 0\n"
+	if err := os.WriteFile(nodeInPath, []byte(nodeBody), 0o700); err != nil {
+		t.Fatalf("write system node stub: %v", err)
+	}
+
+	runtimeDir := t.TempDir()
+	nodePath := filepath.Join(runtimeDir, "node")
+	npmPath := filepath.Join(runtimeDir, "npm")
+	bootstrapNodeBody := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--version\" ]; then\n" +
+		"  echo v20.11.1\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"case \"${1##*/}\" in\n" +
+		"  cli.js)\n" +
+		"    if [ \"$2\" = \"--version\" ]; then\n" +
+		"      echo \"Claude Code 2.1.112\"\n" +
+		"      exit 0\n" +
+		"    fi\n" +
+		"    exit 0\n" +
+		"    ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	npmBody := "#!/bin/sh\n" +
+		"prefix=\"${npm_config_prefix:-$NPM_CONFIG_PREFIX}\"\n" +
+		"/bin/mkdir -p \"$prefix/lib/node_modules/@anthropic-ai/claude-code\"\n" +
+		"printf '%s\\n' '#!/usr/bin/env node' > \"$prefix/lib/node_modules/@anthropic-ai/claude-code/cli.js\"\n" +
+		"/bin/chmod 755 \"$prefix/lib/node_modules/@anthropic-ai/claude-code/cli.js\"\n" +
+		"exit 0\n"
+	if err := os.WriteFile(nodePath, []byte(bootstrapNodeBody), 0o700); err != nil {
+		t.Fatalf("write bootstrap node stub: %v", err)
+	}
+	if err := os.WriteFile(npmPath, []byte(npmBody), 0o700); err != nil {
+		t.Fatalf("write npm stub: %v", err)
+	}
+
+	claudeInstallLookPathFn = func(file string) (string, error) {
+		switch file {
+		case "node":
+			return nodeInPath, nil
+		case "npm":
+			return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
+		default:
+			return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
+		}
+	}
+	ensureManagedNPMBootstrapRuntimeFn = func(ctx context.Context, layout managedNPMClaudeLayout, proxyURL string, log io.Writer) (managedNPMNodeRuntime, error) {
+		return managedNPMNodeRuntime{
+			NodePath:     nodePath,
+			NPMPath:      npmPath,
+			Bootstrapped: true,
+		}, nil
+	}
+
+	var out bytes.Buffer
+	if err := runNPMClaudeInstallerWithEnv(context.Background(), &out, "", nil); err != nil {
+		t.Fatalf("runNPMClaudeInstallerWithEnv error: %v\noutput:\n%s", err, out.String())
+	}
+
+	layout, ok := defaultManagedNPMClaudeLayout("linux", os.Getenv)
+	if !ok {
+		t.Fatalf("expected managed npm layout")
+	}
+	versionOut, err := runClaudeProbe(layout.WrapperPath, "--version")
+	if err != nil {
+		t.Fatalf("managed npm launcher --version: %v\n%s", err, versionOut)
+	}
+	if !strings.Contains(versionOut, "Claude Code 2.1.112") {
+		t.Fatalf("unexpected managed npm launcher output: %q", versionOut)
+	}
+	if !strings.Contains(out.String(), "npm was not found in PATH") {
+		t.Fatalf("expected missing npm log in output, got:\n%s", out.String())
+	}
+}
+
+func TestSanitizeManagedNPMInstallEnvDropsAmbientPrefix(t *testing.T) {
+	input := []string{
+		"PATH=/usr/bin",
+		"npm_config_prefix=/tmp/system-prefix",
+		"NPM_CONFIG_PREFIX=/tmp/system-prefix-upper",
+		"FOO=bar",
+	}
+
+	got := sanitizeManagedNPMInstallEnv(input)
+	if value, ok := lookupInstallEnvValue(got, "PATH"); !ok || value != "/usr/bin" {
+		t.Fatalf("expected PATH to be preserved, got %q (present=%v)", value, ok)
+	}
+	if value, ok := lookupInstallEnvValue(got, "FOO"); !ok || value != "bar" {
+		t.Fatalf("expected FOO to be preserved, got %q (present=%v)", value, ok)
+	}
+	if _, ok := lookupInstallEnvValue(got, "npm_config_prefix"); ok {
+		t.Fatalf("expected lowercase npm prefix to be removed, got %v", got)
+	}
+	if _, ok := lookupInstallEnvValue(got, "NPM_CONFIG_PREFIX"); ok {
+		t.Fatalf("expected uppercase npm prefix to be removed, got %v", got)
+	}
+}
+
+func TestRunNPMClaudeInstallerFallsBackWhenSystemNPMIsBroken(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("managed Node.js bootstrap only applies on linux")
+	}
+
+	prevLookPath := claudeInstallLookPathFn
+	prevBootstrap := ensureManagedNPMBootstrapRuntimeFn
+	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
+	t.Cleanup(func() {
+		claudeInstallLookPathFn = prevLookPath
+		ensureManagedNPMBootstrapRuntimeFn = prevBootstrap
+		readLinuxKernelReleaseFn = prevReadKernelReleaseFn
+	})
+	withClaudeInstallGOOS(t, "linux")
+
+	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
+
+	home := t.TempDir()
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv(claudeProxyHostIDEnv, "npm-broken-system-host")
+
+	systemDir := t.TempDir()
+	setStubPath(t, systemDir)
+	writeStub(
+		t,
+		systemDir,
+		"node",
+		"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo v20.11.1\n  exit 0\nfi\nexit 0\n",
+		"@echo off\r\nif \"%~1\"==\"--version\" (\r\necho v20.11.1\r\nexit /b 0\r\n)\r\nexit /b 0\r\n",
+	)
+	writeStub(
+		t,
+		systemDir,
+		"npm",
+		"#!/bin/sh\necho broken system npm >&2\nexit 1\n",
+		"@echo off\r\necho broken system npm 1>&2\r\nexit /b 1\r\n",
+	)
+	claudeInstallLookPathFn = exec.LookPath
+
+	runtimeDir := t.TempDir()
+	nodePath := filepath.Join(runtimeDir, "node")
+	npmPath := filepath.Join(runtimeDir, "npm")
+	nodeBody := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--version\" ]; then\n" +
+		"  echo v20.11.1\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"case \"${1##*/}\" in\n" +
+		"  cli.js)\n" +
+		"    if [ \"$2\" = \"--version\" ]; then\n" +
+		"      echo \"Claude Code 2.1.112\"\n" +
+		"      exit 0\n" +
+		"    fi\n" +
+		"    exit 0\n" +
+		"    ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	npmBody := "#!/bin/sh\n" +
+		"prefix=\"${npm_config_prefix:-$NPM_CONFIG_PREFIX}\"\n" +
+		"/bin/mkdir -p \"$prefix/lib/node_modules/@anthropic-ai/claude-code\"\n" +
+		"printf '%s\\n' '#!/usr/bin/env node' > \"$prefix/lib/node_modules/@anthropic-ai/claude-code/cli.js\"\n" +
+		"/bin/chmod 755 \"$prefix/lib/node_modules/@anthropic-ai/claude-code/cli.js\"\n" +
+		"exit 0\n"
+	if err := os.WriteFile(nodePath, []byte(nodeBody), 0o700); err != nil {
+		t.Fatalf("write node stub: %v", err)
+	}
+	if err := os.WriteFile(npmPath, []byte(npmBody), 0o700); err != nil {
+		t.Fatalf("write npm stub: %v", err)
+	}
+
+	ensureManagedNPMBootstrapRuntimeFn = func(ctx context.Context, layout managedNPMClaudeLayout, proxyURL string, log io.Writer) (managedNPMNodeRuntime, error) {
+		return managedNPMNodeRuntime{
+			NodePath:     nodePath,
+			NPMPath:      npmPath,
+			Bootstrapped: true,
+		}, nil
+	}
+
+	var out bytes.Buffer
+	if err := runNPMClaudeInstallerWithEnv(context.Background(), &out, "", nil); err != nil {
+		t.Fatalf("runNPMClaudeInstallerWithEnv error: %v\noutput:\n%s", err, out.String())
+	}
+
+	layout, ok := defaultManagedNPMClaudeLayout("linux", os.Getenv)
+	if !ok {
+		t.Fatalf("expected managed npm layout")
+	}
+	versionOut, err := runClaudeProbe(layout.WrapperPath, "--version")
+	if err != nil {
+		t.Fatalf("managed npm launcher --version: %v\n%s", err, versionOut)
+	}
+	if !strings.Contains(versionOut, "Claude Code 2.1.112") {
+		t.Fatalf("unexpected managed npm launcher output: %q", versionOut)
+	}
+	if !strings.Contains(out.String(), "retrying with a claude-proxy-managed Node.js runtime") {
+		t.Fatalf("expected retry log in output, got:\n%s", out.String())
+	}
+}
+
+func TestRunNPMClaudeInstallerFallsBackWhenSystemInstallIsBroken(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("managed Node.js bootstrap only applies on linux")
+	}
+
+	prevLookPath := claudeInstallLookPathFn
+	prevBootstrap := ensureManagedNPMBootstrapRuntimeFn
+	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
+	t.Cleanup(func() {
+		claudeInstallLookPathFn = prevLookPath
+		ensureManagedNPMBootstrapRuntimeFn = prevBootstrap
+		readLinuxKernelReleaseFn = prevReadKernelReleaseFn
+	})
+	withClaudeInstallGOOS(t, "linux")
+
+	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
+
+	home := t.TempDir()
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv(claudeProxyHostIDEnv, "npm-broken-install-host")
+
+	systemDir := t.TempDir()
+	setStubPath(t, systemDir)
+	writeStub(
+		t,
+		systemDir,
+		"node",
+		"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo v20.11.1\n  exit 0\nfi\ncase \"${1##*/}\" in\n  cli.js)\n    echo broken installed claude >&2\n    exit 1\n    ;;\nesac\nexit 0\n",
+		"@echo off\r\nif \"%~1\"==\"--version\" (\r\necho v20.11.1\r\nexit /b 0\r\n)\r\necho broken installed claude 1>&2\r\nexit /b 1\r\n",
+	)
+	writeStub(
+		t,
+		systemDir,
+		"npm",
+		"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 10.8.2\n  exit 0\nfi\nprefix=\"${npm_config_prefix:-$NPM_CONFIG_PREFIX}\"\n/bin/mkdir -p \"$prefix/lib/node_modules/@anthropic-ai/claude-code\"\nprintf '%s\\n' '#!/usr/bin/env node' > \"$prefix/lib/node_modules/@anthropic-ai/claude-code/cli.js\"\n/bin/chmod 755 \"$prefix/lib/node_modules/@anthropic-ai/claude-code/cli.js\"\nexit 0\n",
+		"@echo off\r\nif \"%~1\"==\"--version\" (\r\necho 10.8.2\r\nexit /b 0\r\n)\r\nset prefix=%npm_config_prefix%\r\nif \"%prefix%\"==\"\" set prefix=%NPM_CONFIG_PREFIX%\r\nmkdir \"%prefix%\\lib\\node_modules\\@anthropic-ai\\claude-code\" >nul 2>&1\r\necho #!/usr/bin/env node> \"%prefix%\\lib\\node_modules\\@anthropic-ai\\claude-code\\cli.js\"\r\nexit /b 0\r\n",
+	)
+	claudeInstallLookPathFn = exec.LookPath
+
+	runtimeDir := t.TempDir()
+	nodePath := filepath.Join(runtimeDir, "node")
+	npmPath := filepath.Join(runtimeDir, "npm")
+	nodeBody := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--version\" ]; then\n" +
+		"  echo v20.11.1\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"case \"${1##*/}\" in\n" +
+		"  cli.js)\n" +
+		"    if [ \"$2\" = \"--version\" ]; then\n" +
+		"      echo \"Claude Code 2.1.112\"\n" +
+		"      exit 0\n" +
+		"    fi\n" +
+		"    exit 0\n" +
+		"    ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	npmBody := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--version\" ]; then\n" +
+		"  echo 10.8.2\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"prefix=\"${npm_config_prefix:-$NPM_CONFIG_PREFIX}\"\n" +
+		"/bin/mkdir -p \"$prefix/lib/node_modules/@anthropic-ai/claude-code\"\n" +
+		"printf '%s\\n' '#!/usr/bin/env node' > \"$prefix/lib/node_modules/@anthropic-ai/claude-code/cli.js\"\n" +
+		"/bin/chmod 755 \"$prefix/lib/node_modules/@anthropic-ai/claude-code/cli.js\"\n" +
+		"exit 0\n"
+	if err := os.WriteFile(nodePath, []byte(nodeBody), 0o700); err != nil {
+		t.Fatalf("write node stub: %v", err)
+	}
+	if err := os.WriteFile(npmPath, []byte(npmBody), 0o700); err != nil {
+		t.Fatalf("write npm stub: %v", err)
+	}
+
+	ensureManagedNPMBootstrapRuntimeFn = func(ctx context.Context, layout managedNPMClaudeLayout, proxyURL string, log io.Writer) (managedNPMNodeRuntime, error) {
+		return managedNPMNodeRuntime{
+			NodePath:     nodePath,
+			NPMPath:      npmPath,
+			Bootstrapped: true,
+		}, nil
+	}
+
+	var out bytes.Buffer
+	if err := runNPMClaudeInstallerWithEnv(context.Background(), &out, "", nil); err != nil {
+		t.Fatalf("runNPMClaudeInstallerWithEnv error: %v\noutput:\n%s", err, out.String())
+	}
+
+	layout, ok := defaultManagedNPMClaudeLayout("linux", os.Getenv)
+	if !ok {
+		t.Fatalf("expected managed npm layout")
+	}
+	versionOut, err := runClaudeProbe(layout.WrapperPath, "--version")
+	if err != nil {
+		t.Fatalf("managed npm launcher --version: %v\n%s", err, versionOut)
+	}
+	if !strings.Contains(versionOut, "Claude Code 2.1.112") {
+		t.Fatalf("unexpected managed npm launcher output: %q", versionOut)
+	}
+	if !strings.Contains(out.String(), "retrying with a claude-proxy-managed Node.js runtime") {
+		t.Fatalf("expected retry log in output, got:\n%s", out.String())
 	}
 }
 

@@ -404,7 +404,39 @@ jobs:
               -v "$PWD/scripts/ci:/ci:ro" \
               -e CLAUDE_INSTALL_TEST_NPM_FALLBACK=1 \
               -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallNPMFallbackIntegration \
+              -e CI=true \
+              "$img" bash /ci/container_claude_install_launch_smoke.sh
+          done
+
+      - name: Smoke test in containers (Claude npm fallback with system Node toolchain)
+        shell: bash
+        run: |
+          set -euo pipefail
+          for img in rockylinux:8 ubuntu:20.04; do
+            echo "==> $img"
+            docker run --rm \
+              -v "$PWD/dist:/dist:ro" \
+              -v "$PWD/scripts/ci:/ci:ro" \
+              -e CLAUDE_INSTALL_TEST_NPM_FALLBACK_SYSTEM_NODE=1 \
+              -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallNPMFallbackSystemNodeIntegration \
               -e CLAUDE_INSTALL_NEEDS_NODE=1 \
+              -e CI=true \
+              "$img" bash /ci/container_claude_install_launch_smoke.sh
+          done
+
+      - name: Smoke test in containers (Claude npm fallback with system Node but no npm)
+        shell: bash
+        run: |
+          set -euo pipefail
+          for img in rockylinux:8 ubuntu:20.04; do
+            echo "==> $img"
+            docker run --rm \
+              -v "$PWD/dist:/dist:ro" \
+              -v "$PWD/scripts/ci:/ci:ro" \
+              -e CLAUDE_INSTALL_TEST_NPM_FALLBACK_NODE_WITHOUT_NPM=1 \
+              -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallNPMFallbackNodeWithoutNPMIntegration \
+              -e CLAUDE_INSTALL_NEEDS_NODE=1 \
+              -e CLAUDE_INSTALL_DROP_NPM=1 \
               -e CI=true \
               "$img" bash /ci/container_claude_install_launch_smoke.sh
           done
@@ -431,7 +463,47 @@ jobs:
             -v "$PWD/scripts/ci:/ci:ro" \
             -e CLAUDE_INSTALL_TEST_NPM_FALLBACK=1 \
             -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallNPMFallbackIntegration \
+            -e CLAUDE_INSTALL_NEEDS_PATCHELF=1 \
+            -e CLAUDE_INSTALL_NEEDS_TAR=1 \
+            -e CLAUDE_INSTALL_GLIBC_COMPAT_BUNDLE \
+            -e CI=true \
+            centos:7 bash /ci/container_claude_install_launch_smoke.sh
+
+      - name: Smoke test in CentOS7 (Claude npm fallback with system Node + glibc/C++ compat, local bundle)
+        if: steps.glibc_compat_changes.outputs.rebuild == 'true'
+        shell: bash
+        timeout-minutes: 20
+        env:
+          CLAUDE_INSTALL_GLIBC_COMPAT_BUNDLE: "/dist/glibc-compat/glibc-2.31-centos7-runtime-cxx-x86_64.tar.xz"
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/dist:/dist:ro" \
+            -v "$PWD/scripts/ci:/ci:ro" \
+            -e CLAUDE_INSTALL_TEST_NPM_FALLBACK_SYSTEM_NODE=1 \
+            -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallNPMFallbackSystemNodeIntegration \
             -e CLAUDE_INSTALL_NEEDS_NODE=1 \
+            -e CLAUDE_INSTALL_NEEDS_PATCHELF=1 \
+            -e CLAUDE_INSTALL_NEEDS_TAR=1 \
+            -e CLAUDE_INSTALL_GLIBC_COMPAT_BUNDLE \
+            -e CI=true \
+            centos:7 bash /ci/container_claude_install_launch_smoke.sh
+
+      - name: Smoke test in CentOS7 (Claude npm fallback with system Node but no npm + glibc/C++ compat, local bundle)
+        if: steps.glibc_compat_changes.outputs.rebuild == 'true'
+        shell: bash
+        timeout-minutes: 20
+        env:
+          CLAUDE_INSTALL_GLIBC_COMPAT_BUNDLE: "/dist/glibc-compat/glibc-2.31-centos7-runtime-cxx-x86_64.tar.xz"
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/dist:/dist:ro" \
+            -v "$PWD/scripts/ci:/ci:ro" \
+            -e CLAUDE_INSTALL_TEST_NPM_FALLBACK_NODE_WITHOUT_NPM=1 \
+            -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallNPMFallbackNodeWithoutNPMIntegration \
+            -e CLAUDE_INSTALL_NEEDS_NODE=1 \
+            -e CLAUDE_INSTALL_DROP_NPM=1 \
             -e CLAUDE_INSTALL_NEEDS_PATCHELF=1 \
             -e CLAUDE_INSTALL_NEEDS_TAR=1 \
             -e CLAUDE_INSTALL_GLIBC_COMPAT_BUNDLE \
@@ -452,7 +524,51 @@ jobs:
             -v "$PWD/scripts/ci:/ci:ro" \
             -e CLAUDE_INSTALL_TEST_NPM_FALLBACK=1 \
             -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallNPMFallbackIntegration \
+            -e CLAUDE_INSTALL_NEEDS_PATCHELF=1 \
+            -e CLAUDE_INSTALL_NEEDS_TAR=1 \
+            -e CLAUDE_PROXY_GLIBC_COMPAT_REPO \
+            -e CLAUDE_PROXY_GLIBC_COMPAT_TAG \
+            -e CI=true \
+            centos:7 bash /ci/container_claude_install_launch_smoke.sh
+
+      - name: Smoke test in CentOS7 (Claude npm fallback with system Node + glibc/C++ compat, release asset)
+        if: steps.glibc_compat_changes.outputs.rebuild != 'true'
+        shell: bash
+        timeout-minutes: 20
+        env:
+          CLAUDE_PROXY_GLIBC_COMPAT_REPO: "baaaaaaaka/claude_code_helper"
+          CLAUDE_PROXY_GLIBC_COMPAT_TAG: "glibc-compat-v2.31.1"
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/dist:/dist:ro" \
+            -v "$PWD/scripts/ci:/ci:ro" \
+            -e CLAUDE_INSTALL_TEST_NPM_FALLBACK_SYSTEM_NODE=1 \
+            -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallNPMFallbackSystemNodeIntegration \
             -e CLAUDE_INSTALL_NEEDS_NODE=1 \
+            -e CLAUDE_INSTALL_NEEDS_PATCHELF=1 \
+            -e CLAUDE_INSTALL_NEEDS_TAR=1 \
+            -e CLAUDE_PROXY_GLIBC_COMPAT_REPO \
+            -e CLAUDE_PROXY_GLIBC_COMPAT_TAG \
+            -e CI=true \
+            centos:7 bash /ci/container_claude_install_launch_smoke.sh
+
+      - name: Smoke test in CentOS7 (Claude npm fallback with system Node but no npm + glibc/C++ compat, release asset)
+        if: steps.glibc_compat_changes.outputs.rebuild != 'true'
+        shell: bash
+        timeout-minutes: 20
+        env:
+          CLAUDE_PROXY_GLIBC_COMPAT_REPO: "baaaaaaaka/claude_code_helper"
+          CLAUDE_PROXY_GLIBC_COMPAT_TAG: "glibc-compat-v2.31.1"
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/dist:/dist:ro" \
+            -v "$PWD/scripts/ci:/ci:ro" \
+            -e CLAUDE_INSTALL_TEST_NPM_FALLBACK_NODE_WITHOUT_NPM=1 \
+            -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallNPMFallbackNodeWithoutNPMIntegration \
+            -e CLAUDE_INSTALL_NEEDS_NODE=1 \
+            -e CLAUDE_INSTALL_DROP_NPM=1 \
             -e CLAUDE_INSTALL_NEEDS_PATCHELF=1 \
             -e CLAUDE_INSTALL_NEEDS_TAR=1 \
             -e CLAUDE_PROXY_GLIBC_COMPAT_REPO \
