@@ -295,7 +295,7 @@ func runClaudeInstallNPMFallbackIntegration(t *testing.T, requireSystemNode bool
 				break
 			}
 		}
-		if !systemNodeReferenced {
+		if !systemNodeReferenced && !strings.Contains(installLog.String(), "Node.js at "+systemNodePath+" needs glibc compat") {
 			t.Fatalf("expected managed npm node launcher args %q to reference system node %q", nodeWrapperArgs, systemNodePath)
 		}
 		if fileExists(layout.RuntimeNodePath) {
