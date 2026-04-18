@@ -262,16 +262,6 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 			}
 		}
 
-		resolvedClaudePath, err := ensureClaudeInstalled(ctx, claudePath, cmd.ErrOrStderr(), installProxyOptions{
-			UseProxy:  useProxy,
-			Profile:   profile,
-			Instances: cfg.Instances,
-		})
-		if err != nil {
-			return err
-		}
-		claudePath = resolvedClaudePath
-
 		defaultCwd, _ := os.Getwd()
 		selection, err := selectSession(ctx, tui.Options{
 			LoadProjects: func(ctx context.Context) ([]claudehistory.Project, error) {

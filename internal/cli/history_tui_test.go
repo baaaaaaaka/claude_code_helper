@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -33,6 +34,43 @@ func TestRunHistoryTuiFailsWhenConfigDirReadOnly(t *testing.T) {
 
 	if err := runHistoryTui(cmd, root, "", "", "", 0); err == nil {
 		t.Fatalf("expected error when config dir is read-only")
+	}
+}
+
+func TestRunHistoryTuiDoesNotInstallClaudeUntilLaunch(t *testing.T) {
+	store := newTempStore(t)
+	disabled := false
+	if err := store.Save(config.Config{Version: config.CurrentVersion, ProxyEnabled: &disabled}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	prevSelect := selectSession
+	prevInstaller := runClaudeInstallerWithEnvFn
+	t.Cleanup(func() {
+		selectSession = prevSelect
+		runClaudeInstallerWithEnvFn = prevInstaller
+	})
+
+	installerCalled := false
+	runClaudeInstallerWithEnvFn = func(ctx context.Context, out io.Writer, opts installProxyOptions, extraEnv []string) error {
+		installerCalled = true
+		return errors.New("unexpected installer call")
+	}
+	selectSession = func(ctx context.Context, opts tui.Options) (*tui.Selection, error) {
+		return nil, nil
+	}
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := runHistoryTui(cmd, &rootOptions{configPath: store.Path()}, "", "", "", 0); err != nil {
+		t.Fatalf("runHistoryTui error: %v", err)
+	}
+	if installerCalled {
+		t.Fatalf("expected TUI startup to avoid eager Claude installation")
 	}
 }
 

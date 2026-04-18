@@ -347,6 +347,45 @@ func TestRunClaudeNewSessionSuccess(t *testing.T) {
 	}
 }
 
+func TestRunClaudeNewSessionInstallsClaudeWhenPathEmpty(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script execution on windows")
+	}
+
+	store := newTempStore(t)
+	root := &rootOptions{configPath: store.Path()}
+	projectDir := t.TempDir()
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	prevGOOS := claudeInstallGOOS
+	prevInstaller := runClaudeInstallerWithEnvFn
+	t.Cleanup(func() {
+		claudeInstallGOOS = prevGOOS
+		runClaudeInstallerWithEnvFn = prevInstaller
+	})
+	claudeInstallGOOS = "linux"
+
+	installerCalled := 0
+	runClaudeInstallerWithEnvFn = func(ctx context.Context, out io.Writer, opts installProxyOptions, extraEnv []string) error {
+		installerCalled++
+		installPath := filepath.Join(homeDir, ".local", "bin", "claude")
+		if err := os.MkdirAll(filepath.Dir(installPath), 0o755); err != nil {
+			return err
+		}
+		body := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo \"Claude Code 1.2.3\"\n  exit 0\nfi\nif [ \"$1\" = \"--help\" ]; then\n  printf '%s\\n' '--permission-mode'\n  exit 0\nfi\nexit 0\n"
+		return os.WriteFile(installPath, []byte(body), 0o700)
+	}
+
+	if err := runClaudeNewSession(context.Background(), root, store, nil, nil, projectDir, "", "", false, config.YoloModeOff, io.Discard); err != nil {
+		t.Fatalf("runClaudeNewSession error: %v", err)
+	}
+	if installerCalled != 1 {
+		t.Fatalf("expected launch to install Claude once, got %d", installerCalled)
+	}
+}
+
 func TestRunClaudeSessionRequiresProfileWhenProxyEnabled(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skip shell script execution on windows")
