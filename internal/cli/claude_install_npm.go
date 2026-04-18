@@ -577,53 +577,13 @@ func downloadURLToFileWithProxy(rawURL string, targetPath string, timeout time.D
 	if strings.TrimSpace(proxyURL) == "" {
 		return downloadURLToFile(rawURL, targetPath, timeout)
 	}
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
-		return fmt.Errorf("create download dir: %w", err)
-	}
-	tmpPath := targetPath + ".tmp"
-	_ = os.Remove(tmpPath)
-
-	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("User-Agent", "claude-proxy")
-	req.Header.Set("Accept", "application/octet-stream")
-
 	proxyParsed, err := neturl.Parse(proxyURL)
 	if err != nil {
 		return fmt.Errorf("parse proxy url %q: %w", proxyURL, err)
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = http.ProxyURL(proxyParsed)
-	client := &http.Client{Timeout: timeout, Transport: transport}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("download %s failed: %s", rawURL, resp.Status)
-	}
-
-	out, err := os.Create(tmpPath)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, resp.Body); err != nil {
-		_ = out.Close()
-		_ = os.Remove(tmpPath)
-		return err
-	}
-	if err := out.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return err
-	}
-	if err := os.Rename(tmpPath, targetPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return err
-	}
-	return nil
+	return downloadURLToFileWithTransport(rawURL, targetPath, timeout, transport)
 }
 
 func extractManagedNPMNodeArchive(archivePath string, dest string) error {

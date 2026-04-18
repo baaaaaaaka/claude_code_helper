@@ -47,6 +47,8 @@ var (
 	userHomeDirFn             = os.UserHomeDir
 	tempDirFn                 = os.TempDir
 	readLinuxOSReleaseFn      = func() ([]byte, error) { return os.ReadFile("/etc/os-release") }
+	downloadURLRetryAttempts  = 3
+	downloadURLRetryDelay     = 2 * time.Second
 )
 
 const (
@@ -691,47 +693,84 @@ func downloadIfMissing(url string, targetPath string, timeout time.Duration) err
 }
 
 func downloadURLToFile(url string, targetPath string, timeout time.Duration) error {
+	return downloadURLToFileWithTransport(url, targetPath, timeout, nil)
+}
+
+func downloadURLToFileWithTransport(url string, targetPath string, timeout time.Duration, transport *http.Transport) error {
+	attempts := downloadURLRetryAttempts
+	if attempts < 1 {
+		attempts = 1
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		retriable, err := downloadURLToFileAttempt(url, targetPath, timeout, transport)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !retriable || attempt == attempts {
+			return err
+		}
+		if downloadURLRetryDelay > 0 {
+			time.Sleep(downloadURLRetryDelay)
+		}
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return fmt.Errorf("download %s failed", url)
+}
+
+func downloadURLToFileAttempt(url string, targetPath string, timeout time.Duration, transport *http.Transport) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
-		return fmt.Errorf("create download dir: %w", err)
+		return false, fmt.Errorf("create download dir: %w", err)
 	}
 	tmpPath := targetPath + ".tmp"
 	_ = os.Remove(tmpPath)
 
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	req.Header.Set("User-Agent", "claude-proxy")
 	req.Header.Set("Accept", "application/octet-stream")
 
 	client := &http.Client{Timeout: timeout}
+	if transport != nil {
+		client.Transport = transport
+	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return true, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("download %s failed: %s", url, resp.Status)
+		return retryableDownloadStatus(resp.StatusCode), fmt.Errorf("download %s failed: %s", url, resp.Status)
 	}
 
 	out, err := os.Create(tmpPath)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if _, err := io.Copy(out, resp.Body); err != nil {
 		_ = out.Close()
 		_ = os.Remove(tmpPath)
-		return err
+		return true, err
 	}
 	if err := out.Close(); err != nil {
 		_ = os.Remove(tmpPath)
-		return err
+		return false, err
 	}
 	if err := os.Rename(tmpPath, targetPath); err != nil {
 		_ = os.Remove(tmpPath)
-		return err
+		return false, err
 	}
-	return nil
+	return false, nil
+}
+
+func retryableDownloadStatus(code int) bool {
+	return code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500
 }
 
 func verifyBundleSHA256(bundlePath string, checksumPath string) error {

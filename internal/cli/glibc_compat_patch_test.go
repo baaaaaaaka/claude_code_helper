@@ -287,6 +287,74 @@ func TestDownloadAndVerifyGlibcCompatBundle(t *testing.T) {
 	}
 }
 
+func TestDownloadURLToFileRetriesGatewayTimeout(t *testing.T) {
+	prevAttempts := downloadURLRetryAttempts
+	prevDelay := downloadURLRetryDelay
+	downloadURLRetryAttempts = 3
+	downloadURLRetryDelay = 0
+	t.Cleanup(func() {
+		downloadURLRetryAttempts = prevAttempts
+		downloadURLRetryDelay = prevDelay
+	})
+
+	dir := t.TempDir()
+	payload := []byte("glibc bundle")
+	attempts := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 3 {
+			http.Error(w, "Gateway Timeout", http.StatusGatewayTimeout)
+			return
+		}
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+
+	bundlePath := filepath.Join(dir, "bundle.tar.xz")
+	if err := downloadURLToFile(server.URL, bundlePath, time.Second); err != nil {
+		t.Fatalf("downloadURLToFile error: %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("expected 3 download attempts, got %d", attempts)
+	}
+	got, err := os.ReadFile(bundlePath)
+	if err != nil {
+		t.Fatalf("read bundle: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("unexpected bundle payload: %q", string(got))
+	}
+}
+
+func TestDownloadURLToFileSkipsRetryOnNotFound(t *testing.T) {
+	prevAttempts := downloadURLRetryAttempts
+	prevDelay := downloadURLRetryDelay
+	downloadURLRetryAttempts = 3
+	downloadURLRetryDelay = 0
+	t.Cleanup(func() {
+		downloadURLRetryAttempts = prevAttempts
+		downloadURLRetryDelay = prevDelay
+	})
+
+	dir := t.TempDir()
+	attempts := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	err := downloadURLToFile(server.URL, filepath.Join(dir, "bundle.tar.xz"), time.Second)
+	if err == nil || !strings.Contains(err.Error(), "404") {
+		t.Fatalf("expected 404 download error, got %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected a single attempt for non-retriable 404, got %d", attempts)
+	}
+}
+
 func TestReadPatchelfValueAndPatchElfInterpreterAndRPath(t *testing.T) {
 	dir := t.TempDir()
 	recordPath := filepath.Join(dir, "patchelf.args")
