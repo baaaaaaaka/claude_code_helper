@@ -389,6 +389,40 @@ jobs:
               "$img" bash /ci/container_claude_install_launch_smoke.sh
           done
 
+      - name: Smoke test in containers (Claude native path on forced old kernel)
+        shell: bash
+        run: |
+          set -euo pipefail
+          for img in rockylinux:8 ubuntu:20.04; do
+            echo "==> $img"
+            docker run --rm \
+              -v "$PWD/dist:/dist:ro" \
+              -v "$PWD/scripts/ci:/ci:ro" \
+              -e CLAUDE_INSTALL_TEST_FORCE_OLD_KERNEL_NATIVE=1 \
+              -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallForcedOldKernelNativeIntegration \
+              -e CI=true \
+              "$img" bash /ci/container_claude_install_launch_smoke.sh
+          done
+
+      - name: Install strace for native Claude ENOSYS smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y strace
+
+      - name: Smoke test on runner (Claude native path on forced old kernel + ENOSYS)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This is still not a true <5.1 host-kernel run on GitHub-hosted infra.
+          # It combines the helper's forced old-kernel path with syscall-level
+          # ENOSYS injection so CI will fail if a newer native Claude build starts
+          # hard-requiring one of the probed newer Linux syscalls at startup.
+          CLAUDE_INSTALL_TEST_FORCE_OLD_KERNEL_NATIVE_ENOSYS=1 \
+          CI=true \
+          ./dist/claude_cli_test -test.run TestClaudeInstallForcedOldKernelNativeENOSYSIntegration -test.count=1 -test.v
+
       - name: Smoke test in containers (Claude npm fallback on forced old kernel)
         shell: bash
         run: |

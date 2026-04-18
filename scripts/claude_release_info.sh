@@ -5,8 +5,9 @@ usage() {
   cat <<'EOF'
 Usage: scripts/claude_release_info.sh [options]
 
-Fetch Claude Code install URLs and the GCS release bucket. Falls back to
-claude-proxy SSH proxy when direct access fails.
+Fetch Claude Code install URLs plus the current release download base URL.
+Also emits a GCS mirror URL for legacy version-enumeration flows. Falls back
+to claude-proxy SSH proxy when direct access fails.
 
 Options:
   --json                 Output JSON (default: text)
@@ -23,6 +24,7 @@ Environment overrides:
   CLAUDE_INSTALL_SH_URL
   CLAUDE_INSTALL_PS1_URL
   CLAUDE_INSTALL_CMD_URL
+  CLAUDE_RELEASE_GCS_BUCKET_URL
   CLAUDE_PROXY_BIN
   CLAUDE_PROXY_CONFIG
   CLAUDE_PROXY_PROFILE
@@ -38,6 +40,7 @@ proxy_bin="${CLAUDE_PROXY_BIN:-claude-proxy}"
 proxy_config="${CLAUDE_PROXY_CONFIG:-}"
 proxy_profile="${CLAUDE_PROXY_PROFILE:-}"
 use_proxy=1
+default_gcs_bucket_url="${CLAUDE_RELEASE_GCS_BUCKET_URL:-https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -206,8 +209,9 @@ extract_bucket_from_sh() {
   local line
   while IFS= read -r line; do
     case "$line" in
-      GCS_BUCKET=*)
+      GCS_BUCKET=*|DOWNLOAD_BASE_URL=*)
         line="${line#GCS_BUCKET=}"
+        line="${line#DOWNLOAD_BASE_URL=}"
         line="${line#\"}"
         line="${line%\"}"
         printf "%s" "$line"
@@ -223,7 +227,7 @@ extract_bucket_from_ps1() {
   local line
   while IFS= read -r line; do
     case "$line" in
-      '$GCS_BUCKET'*)
+      '$GCS_BUCKET'*|'$DOWNLOAD_BASE_URL'*)
         line="${line#*=}"
         line="${line# }"
         line="${line#\"}"
@@ -236,42 +240,61 @@ extract_bucket_from_ps1() {
   return 1
 }
 
+resolve_gcs_bucket() {
+  local release_bucket="$1"
+  release_bucket="${release_bucket%/}"
+  if [ -z "$release_bucket" ]; then
+    return 1
+  fi
+  case "$release_bucket" in
+    https://downloads.claude.ai/claude-code-releases)
+      printf "%s" "${default_gcs_bucket_url%/}"
+      return 0
+      ;;
+    *)
+      printf "%s" "$release_bucket"
+      return 0
+      ;;
+  esac
+}
+
 install_script=""
 if ! install_script="$(fetch_with_fallback "$install_sh_url")"; then
   install_script=""
 fi
 
-bucket=""
+release_bucket=""
 if [ -n "$install_script" ]; then
-  bucket="$(extract_bucket_from_sh "$install_script" || true)"
+  release_bucket="$(extract_bucket_from_sh "$install_script" || true)"
 fi
 
-if [ -z "$bucket" ]; then
+if [ -z "$release_bucket" ]; then
   if install_script="$(fetch_proxy_only "$install_sh_url" || true)"; then
-    bucket="$(extract_bucket_from_sh "$install_script" || true)"
+    release_bucket="$(extract_bucket_from_sh "$install_script" || true)"
   fi
 fi
 
-if [ -z "$bucket" ]; then
+if [ -z "$release_bucket" ]; then
   ps1_script="$(fetch_with_fallback "$install_ps1_url" || true)"
   if [ -n "${ps1_script:-}" ]; then
-    bucket="$(extract_bucket_from_ps1 "$ps1_script" || true)"
+    release_bucket="$(extract_bucket_from_ps1 "$ps1_script" || true)"
   fi
 fi
 
-if [ -z "$bucket" ]; then
+if [ -z "$release_bucket" ]; then
   if ps1_script="$(fetch_proxy_only "$install_ps1_url" || true)"; then
-    bucket="$(extract_bucket_from_ps1 "$ps1_script" || true)"
+    release_bucket="$(extract_bucket_from_ps1 "$ps1_script" || true)"
   fi
 fi
 
-if [ -z "$bucket" ]; then
-  echo "Failed to determine GCS bucket from install scripts." >&2
+if [ -z "$release_bucket" ]; then
+  echo "Failed to determine release bucket from install scripts." >&2
   exit 1
 fi
 
-bucket="${bucket%/}"
-latest_version="$(fetch_with_fallback "${bucket}/latest" || true)"
+release_bucket="${release_bucket%/}"
+gcs_bucket="$(resolve_gcs_bucket "$release_bucket" || true)"
+latest_version="$(fetch_with_fallback "${release_bucket}/latest" || true)"
 latest_version="$(printf "%s" "$latest_version" | tr -d '\r\n' || true)"
 
 if [ "$json" -eq 1 ]; then
@@ -280,20 +303,22 @@ if [ "$json" -eq 1 ]; then
   "install_sh_url": "$(printf "%s" "$install_sh_url")",
   "install_ps1_url": "$(printf "%s" "$install_ps1_url")",
   "install_cmd_url": "$(printf "%s" "$install_cmd_url")",
-  "gcs_bucket": "$(printf "%s" "$bucket")",
+  "release_bucket": "$(printf "%s" "$release_bucket")",
+  "gcs_bucket": "$(printf "%s" "$gcs_bucket")",
   "latest_version": "$(printf "%s" "$latest_version")",
-  "latest_manifest_url": "$(printf "%s/%s/manifest.json" "$bucket" "$latest_version")",
-  "platform_binary_url_template": "$(printf "%s/{version}/{platform}/claude" "$bucket")"
+  "latest_manifest_url": "$(printf "%s/%s/manifest.json" "$release_bucket" "$latest_version")",
+  "platform_binary_url_template": "$(printf "%s/{version}/{platform}/claude" "$release_bucket")"
 }
 EOF
 else
   echo "install_sh_url=${install_sh_url}"
   echo "install_ps1_url=${install_ps1_url}"
   echo "install_cmd_url=${install_cmd_url}"
-  echo "gcs_bucket=${bucket}"
+  echo "release_bucket=${release_bucket}"
+  echo "gcs_bucket=${gcs_bucket}"
   if [ -n "$latest_version" ]; then
     echo "latest_version=${latest_version}"
-    echo "latest_manifest_url=${bucket}/${latest_version}/manifest.json"
+    echo "latest_manifest_url=${release_bucket}/${latest_version}/manifest.json"
   fi
-  echo "platform_binary_url_template=${bucket}/{version}/{platform}/claude"
+  echo "platform_binary_url_template=${release_bucket}/{version}/{platform}/claude"
 fi

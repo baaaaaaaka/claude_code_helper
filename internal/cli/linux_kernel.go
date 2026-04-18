@@ -13,6 +13,7 @@ const (
 	bunMinimumLinuxKernelMinor     = 1
 	bunRecommendedLinuxKernelMajor = 5
 	bunRecommendedLinuxKernelMinor = 6
+	overrideBunKernelCheckEnv      = "CLAUDE_PROXY_OVERRIDE_BUN_KERNEL_CHECK"
 )
 
 var readLinuxKernelReleaseFn = func() ([]byte, error) { return os.ReadFile("/proc/sys/kernel/osrelease") }
@@ -37,6 +38,22 @@ func bunLinuxKernelCompatibilityProblem() (string, bool) {
 		bunRecommendedLinuxKernelMajor,
 		bunRecommendedLinuxKernelMinor,
 	), true
+}
+
+func overrideBunKernelCheckDefault() bool {
+	return parseBoolEnv(overrideBunKernelCheckEnv, true)
+}
+
+func unsupportedBunKernelHost(goos string) bool {
+	if !strings.EqualFold(strings.TrimSpace(goos), "linux") || runtime.GOOS != "linux" {
+		return false
+	}
+	_, unsupported := bunLinuxKernelCompatibilityProblem()
+	return unsupported
+}
+
+func overrideBunKernelCheckEnabled(goos string) bool {
+	return overrideBunKernelCheckDefault() && unsupportedBunKernelHost(goos)
 }
 
 func bunLinuxKernelStartupError(output string, err error) error {

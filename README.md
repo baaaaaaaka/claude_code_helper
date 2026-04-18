@@ -171,10 +171,12 @@ patch test results (linux/mac/windows + linux distros).
   uses its managed Claude Code install by default. If that install is missing,
   it can install Claude automatically with the official installer.
 - On Linux hosts whose kernel is too old for Claude Code's bundled Bun
-  runtime, `claude-proxy` falls back to an npm-based Claude Code install under
-  `~/.cache/claude-proxy/hosts/<host-id>/npm-install/...` and launches it
-  through host-managed `node`/`claude` wrappers that pin the detected `node`
-  path.
+  runtime, `claude-proxy` now tries the official Claude installer first by
+  default. If the installer succeeds and leaves behind a usable native Claude
+  launcher, that native path is preferred even when the helper itself is
+  simulating an old-kernel compatibility check. Set
+  `CLAUDE_PROXY_OVERRIDE_BUN_KERNEL_CHECK=false` to restore the previous
+  behavior that forces the npm fallback on `< 5.1` kernels.
 - On EL7/CentOS 7 hosts, if the official installer fails because the downloaded
   Claude binary needs a newer glibc, `claude-proxy` can reuse that downloaded
   binary through a private launcher and then continue with its glibc compat
@@ -198,12 +200,11 @@ patch test results (linux/mac/windows + linux distros).
   from GitHub release assets on supported linux/amd64 builds.
 - The npm fallback install is treated as a wrapper launch path rather than a
   native Claude binary, so built-in Claude byte patches stay disabled for that
-  route. On old-kernel Linux hosts where Claude Code's bundled Bun runtime is
-  unsupported, `claude-proxy` will first probe a usable `node`/`npm` toolchain
-  from PATH, keep the install isolated under its own npm prefix, and
-  automatically retry with a private Node.js runtime if the local npm toolchain
-  cannot install a working Claude Code CLI. When needed, it bootstraps that
-  private runtime under
+  route. When `claude-proxy` does need the npm fallback on Linux, it will first
+  probe a usable `node`/`npm` toolchain from PATH, keep the install isolated
+  under its own npm prefix, and automatically retry with a private Node.js
+  runtime if the local npm toolchain cannot install a working Claude Code CLI.
+  When needed, it bootstraps that private runtime under
   `~/.cache/claude-proxy/hosts/<host-id>/npm-install/runtime/...`. On
   EL7/CentOS 7 hosts, if that Node.js runtime itself needs a newer glibc,
   `claude-proxy` can prepare a host-local glibc compat launch path for `node`

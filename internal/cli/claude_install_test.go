@@ -484,7 +484,7 @@ func writeManagedNPMClaudeFixture(t *testing.T, layout managedNPMClaudeLayout, n
 	}
 }
 
-func TestFindManagedClaudePathUsesNPMWrapperOnUnsupportedKernel(t *testing.T) {
+func TestFindManagedClaudePathPrefersNativeClaudeOnUnsupportedKernelWhenOverrideEnabled(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("kernel-gated npm wrapper path only applies on linux")
 	}
@@ -493,6 +493,57 @@ func TestFindManagedClaudePathUsesNPMWrapperOnUnsupportedKernel(t *testing.T) {
 	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
 	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
 	t.Cleanup(func() { readLinuxKernelReleaseFn = prevReadKernelReleaseFn })
+
+	home := t.TempDir()
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	hostID := "test-host"
+
+	nativeClaude := filepath.Join(home, ".local", "bin", "claude")
+	if err := os.MkdirAll(filepath.Dir(nativeClaude), 0o755); err != nil {
+		t.Fatalf("mkdir native claude dir: %v", err)
+	}
+	if err := os.WriteFile(nativeClaude, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write native claude: %v", err)
+	}
+
+	getenv := func(key string) string {
+		switch key {
+		case "HOME":
+			return home
+		case "XDG_CACHE_HOME":
+			return cacheRoot
+		case claudeProxyHostIDEnv:
+			return hostID
+		default:
+			return ""
+		}
+	}
+	layout, ok := defaultManagedNPMClaudeLayout("linux", getenv)
+	if !ok {
+		t.Fatalf("expected managed npm layout")
+	}
+	nodeTarget := filepath.Join(t.TempDir(), "node-bin", "node")
+	writeManagedNPMClaudeFixture(t, layout, nodeTarget)
+
+	got, ok := findManagedClaudePath("linux", "", getenv)
+	if !ok {
+		t.Fatalf("expected managed Claude discovery to resolve native claude %q", nativeClaude)
+	}
+	if got != nativeClaude {
+		t.Fatalf("expected %q, got %q", nativeClaude, got)
+	}
+}
+
+func TestFindManagedClaudePathUsesNPMWrapperOnUnsupportedKernelWhenOverrideDisabled(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("kernel-gated npm wrapper path only applies on linux")
+	}
+	withClaudeInstallGOOS(t, "linux")
+
+	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
+	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
+	t.Cleanup(func() { readLinuxKernelReleaseFn = prevReadKernelReleaseFn })
+	t.Setenv(overrideBunKernelCheckEnv, "false")
 
 	home := t.TempDir()
 	cacheRoot := filepath.Join(t.TempDir(), "cache")
@@ -544,10 +595,15 @@ func TestFindManagedClaudePathSkipsNPMWrapperWhenCLIPathMissing(t *testing.T) {
 	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
 	t.Cleanup(func() { readLinuxKernelReleaseFn = prevReadKernelReleaseFn })
 
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	cacheRoot := filepath.Join(t.TempDir(), "cache")
 	hostID := "test-host"
 	getenv := func(key string) string {
 		switch key {
+		case "HOME":
+			return home
 		case "XDG_CACHE_HOME":
 			return cacheRoot
 		case claudeProxyHostIDEnv:
@@ -581,10 +637,15 @@ func TestFindManagedClaudePathSkipsNPMWrapperWhenPinnedNodeTargetMissing(t *test
 	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
 	t.Cleanup(func() { readLinuxKernelReleaseFn = prevReadKernelReleaseFn })
 
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	cacheRoot := filepath.Join(t.TempDir(), "cache")
 	hostID := "test-host"
 	getenv := func(key string) string {
 		switch key {
+		case "HOME":
+			return home
 		case "XDG_CACHE_HOME":
 			return cacheRoot
 		case claudeProxyHostIDEnv:
@@ -722,7 +783,7 @@ func TestEnsureClaudeInstalledReusesRecoveredLauncher(t *testing.T) {
 	}
 }
 
-func TestEnsureClaudeInstalledUsesNPMFallbackOnUnsupportedKernel(t *testing.T) {
+func TestEnsureClaudeInstalledPrefersNativeClaudeOnUnsupportedKernelWhenOverrideEnabled(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("kernel-gated npm fallback only applies on linux")
 	}
@@ -768,14 +829,78 @@ func TestEnsureClaudeInstalledUsesNPMFallbackOnUnsupportedKernel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensureClaudeInstalled error: %v", err)
 	}
-	if got != expectedWrapper {
-		t.Fatalf("expected npm wrapper %q, got %q", expectedWrapper, got)
+	if got != nativeClaude {
+		t.Fatalf("expected native Claude %q, got %q", nativeClaude, got)
 	}
-	if got == nativeClaude {
-		t.Fatalf("expected unsupported-kernel install not to reuse native claude %q", nativeClaude)
+	if got == expectedWrapper {
+		t.Fatalf("expected unsupported-kernel install not to prefer npm wrapper %q", expectedWrapper)
+	}
+	if installCalls != 0 {
+		t.Fatalf("expected installer to stay unused, got %d calls", installCalls)
+	}
+}
+
+func TestEnsureClaudeInstalledFallsBackToNPMWhenOfficialInstallerLeavesNoManagedLauncherOnUnsupportedKernel(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("kernel-gated npm fallback only applies on linux")
+	}
+
+	prevInstaller := runClaudeInstallerWithEnvFn
+	prevEnsureManagedNPM := ensureManagedNPMClaudeInstalledFn
+	t.Cleanup(func() {
+		runClaudeInstallerWithEnvFn = prevInstaller
+		ensureManagedNPMClaudeInstalledFn = prevEnsureManagedNPM
+	})
+	withClaudeInstallGOOS(t, "linux")
+
+	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
+	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
+	t.Cleanup(func() { readLinuxKernelReleaseFn = prevReadKernelReleaseFn })
+
+	home := t.TempDir()
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	hostID := "test-host"
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv(claudeProxyHostIDEnv, hostID)
+	t.Setenv(overrideBunKernelCheckEnv, "")
+
+	layout, ok := defaultManagedNPMClaudeLayout("linux", os.Getenv)
+	if !ok {
+		t.Fatalf("expected managed npm layout")
+	}
+
+	installCalls := 0
+	runClaudeInstallerWithEnvFn = func(ctx context.Context, out io.Writer, opts installProxyOptions, extraEnv []string) error {
+		installCalls++
+		_, _ = io.WriteString(out, "Claude Code successfully installed!\n")
+		return nil
+	}
+
+	npmFallbackCalls := 0
+	ensureManagedNPMClaudeInstalledFn = func(ctx context.Context, out io.Writer, opts installProxyOptions, extraEnv []string) (string, error) {
+		npmFallbackCalls++
+		_, _ = io.WriteString(out, "Location: "+layout.WrapperPath+"\n")
+		return layout.WrapperPath, nil
+	}
+
+	var out bytes.Buffer
+	got, err := ensureClaudeInstalled(context.Background(), "", &out, installProxyOptions{})
+	if err != nil {
+		t.Fatalf("ensureClaudeInstalled error: %v", err)
+	}
+	if got != layout.WrapperPath {
+		t.Fatalf("expected npm fallback launcher %q, got %q", layout.WrapperPath, got)
 	}
 	if installCalls != 1 {
-		t.Fatalf("expected installer to run once, got %d", installCalls)
+		t.Fatalf("expected official installer to run once, got %d calls", installCalls)
+	}
+	if npmFallbackCalls != 1 {
+		t.Fatalf("expected npm fallback to run once, got %d calls", npmFallbackCalls)
+	}
+	if !strings.Contains(out.String(), "did not leave behind a detectable managed launcher on this old-kernel host") {
+		t.Fatalf("expected missing-launcher fallback log, got:\n%s", out.String())
 	}
 }
 

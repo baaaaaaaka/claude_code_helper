@@ -75,6 +75,58 @@ func TestClaudeInstallLaunchIntegration(t *testing.T) {
 	}
 }
 
+func TestClaudeInstallForcedOldKernelNativeIntegration(t *testing.T) {
+	requireClaudeInstallIntegration(t, "CLAUDE_INSTALL_TEST_FORCE_OLD_KERNEL_NATIVE")
+	if runtime.GOOS != "linux" {
+		t.Skip("forced old-kernel native install integration only applies on linux")
+	}
+
+	path, installLog := installNativeClaudeWithForcedOldKernel(t)
+	if strings.Contains(strings.ToLower(installLog), "installing the npm distribution") {
+		t.Fatalf("expected forced old-kernel native integration not to fall back to npm, got:\n%s", installLog)
+	}
+	if isManagedNPMClaudeLauncherPath(path, os.Getenv) {
+		t.Fatalf("expected native Claude launcher on forced old-kernel path, got managed npm wrapper %q", path)
+	}
+}
+
+func TestClaudeInstallForcedOldKernelNativeENOSYSIntegration(t *testing.T) {
+	requireClaudeInstallIntegration(t, "CLAUDE_INSTALL_TEST_FORCE_OLD_KERNEL_NATIVE_ENOSYS")
+	if runtime.GOOS != "linux" {
+		t.Skip("forced old-kernel ENOSYS integration only applies on linux")
+	}
+
+	path, installLog := installNativeClaudeWithForcedOldKernel(t)
+	if strings.Contains(strings.ToLower(installLog), "installing the npm distribution") {
+		t.Fatalf("expected forced old-kernel native integration not to fall back to npm, got:\n%s", installLog)
+	}
+	if isManagedNPMClaudeLauncherPath(path, os.Getenv) {
+		t.Fatalf("expected native Claude launcher on forced old-kernel path, got managed npm wrapper %q", path)
+	}
+
+	commands := []string{"--version", "--help"}
+	sawInjectedENOSYS := false
+	for _, arg := range commands {
+		out, trace, err := runClaudeWithInjectedENOSYS(t, path, arg)
+		if err != nil {
+			t.Fatalf("Claude native ENOSYS probe %s failed: %v\noutput:\n%s\ntrace:\n%s", arg, err, out, trace)
+		}
+		if arg == "--version" {
+			if got := extractVersion(out); got == "" {
+				t.Fatalf("failed to parse Claude version from ENOSYS %s output %q", arg, strings.TrimSpace(out))
+			}
+		} else if strings.TrimSpace(out) == "" {
+			t.Fatalf("expected non-empty output from ENOSYS %s probe", arg)
+		}
+		if traceShowsInjectedENOSYS(trace) {
+			sawInjectedENOSYS = true
+		}
+	}
+	if !sawInjectedENOSYS {
+		t.Fatalf("expected strace ENOSYS injection to trigger for at least one native Claude probe")
+	}
+}
+
 func TestClaudeInstallEL7RecoveryIntegration(t *testing.T) {
 	requireClaudeInstallIntegration(t, "CLAUDE_INSTALL_TEST_EL7_GLIBC_RECOVERY")
 	if runtime.GOOS != "linux" {
@@ -220,6 +272,7 @@ func runClaudeInstallNPMFallbackIntegration(t *testing.T, requireSystemNode bool
 		hostID = "npm-fallback-test"
 	}
 	t.Setenv("CLAUDE_PROXY_HOST_ID", hostID)
+	t.Setenv(overrideBunKernelCheckEnv, "false")
 
 	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
 	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
@@ -389,6 +442,107 @@ func configureClaudeInstallTestEnv(t *testing.T, homeDir string) (string, bool) 
 
 	t.Setenv("PATH", pathValue)
 	return localBinDir, expectWindowsGitBashBootstrap
+}
+
+func installNativeClaudeWithForcedOldKernel(t *testing.T) (string, string) {
+	t.Helper()
+
+	homeDir := resolveClaudeInstallTestHome(t)
+	localBinDir, _ := configureClaudeInstallTestEnv(t, homeDir)
+	if err := os.MkdirAll(localBinDir, 0o755); err != nil {
+		t.Fatalf("mkdir local bin: %v", err)
+	}
+	applyInstallProxyEnv(t)
+	cacheRoot := filepath.Join(homeDir, ".cache")
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	hostID := strings.TrimSpace(os.Getenv("CLAUDE_INSTALL_TEST_HOST_ID"))
+	if hostID == "" {
+		hostID = "forced-old-kernel-native-test"
+	}
+	t.Setenv("CLAUDE_PROXY_HOST_ID", hostID)
+	t.Setenv(overrideBunKernelCheckEnv, "")
+
+	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
+	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
+	t.Cleanup(func() { readLinuxKernelReleaseFn = prevReadKernelReleaseFn })
+
+	if path, err := exec.LookPath("claude"); err == nil {
+		t.Fatalf("expected claude to be absent from PATH before installation, found %q", path)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), claudeInstallIntegrationTimeout)
+	defer cancel()
+
+	var installLog bytes.Buffer
+	path, err := ensureClaudeInstalled(ctx, "", &installLog, installProxyOptions{})
+	if err != nil {
+		t.Fatalf("ensureClaudeInstalled on forced old kernel: %v\ninstaller output:\n%s", err, installLog.String())
+	}
+	if strings.TrimSpace(path) == "" {
+		t.Fatalf("ensureClaudeInstalled returned empty path on forced old kernel")
+	}
+
+	layout, ok := defaultManagedNPMClaudeLayout("linux", os.Getenv)
+	if ok && samePath(path, layout.WrapperPath) {
+		t.Fatalf("expected forced old-kernel native path, got managed npm wrapper %q", path)
+	}
+	if isManagedNPMClaudeLauncherPath(path, os.Getenv) {
+		t.Fatalf("expected forced old-kernel native path, got managed npm wrapper %q", path)
+	}
+
+	out, err := runClaudeProbe(path, "--version")
+	if err != nil {
+		t.Fatalf("claude --version on forced old kernel: %v\noutput: %s\ninstaller output:\n%s", err, out, installLog.String())
+	}
+	if got := extractVersion(out); got == "" {
+		t.Fatalf("failed to parse claude version from forced old-kernel output %q", strings.TrimSpace(out))
+	}
+
+	return path, installLog.String()
+}
+
+func runClaudeWithInjectedENOSYS(t *testing.T, path string, arg string) (string, string, error) {
+	t.Helper()
+
+	stracePath, err := exec.LookPath("strace")
+	if err != nil {
+		t.Skip("strace is required for ENOSYS integration")
+	}
+
+	tracePath := filepath.Join(t.TempDir(), "strace.log")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	cmdArgs := []string{
+		"-f",
+		"-o", tracePath,
+		"-e", "inject=clone3:error=ENOSYS",
+		"-e", "inject=close_range:error=ENOSYS",
+		"-e", "inject=pidfd_open:error=ENOSYS",
+		"-e", "inject=openat2:error=ENOSYS",
+		"-e", "inject=futex_waitv:error=ENOSYS",
+		path,
+		arg,
+	}
+	cmd := exec.CommandContext(ctx, stracePath, cmdArgs...)
+	out, runErr := cmd.CombinedOutput()
+	traceData, traceErr := os.ReadFile(tracePath)
+	if traceErr != nil && runErr == nil {
+		runErr = traceErr
+	}
+	return string(out), string(traceData), runErr
+}
+
+func traceShowsInjectedENOSYS(trace string) bool {
+	if !strings.Contains(trace, "ENOSYS") {
+		return false
+	}
+	for _, syscall := range []string{"clone3(", "close_range(", "pidfd_open(", "openat2(", "futex_waitv("} {
+		if strings.Contains(trace, syscall) && strings.Contains(trace, "ENOSYS") {
+			return true
+		}
+	}
+	return false
 }
 
 type installTestPathOptions struct {

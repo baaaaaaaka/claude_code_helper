@@ -43,7 +43,83 @@ func TestBunLinuxKernelCompatibilityProblem(t *testing.T) {
 	}
 }
 
-func TestRunClaudeInstallerUsesNPMFallbackOnUnsupportedKernel(t *testing.T) {
+func TestOverrideBunKernelCheckEnabled(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("linux-only kernel compatibility check")
+	}
+
+	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
+	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
+	t.Cleanup(func() { readLinuxKernelReleaseFn = prevReadKernelReleaseFn })
+
+	t.Setenv(overrideBunKernelCheckEnv, "")
+	if !overrideBunKernelCheckEnabled("linux") {
+		t.Fatalf("expected override to be enabled by default on unsupported linux kernel")
+	}
+	if claudeRequiresNPMInstall("linux") {
+		t.Fatalf("expected unsupported linux kernel not to require npm install when override uses the default")
+	}
+
+	t.Setenv(overrideBunKernelCheckEnv, "true")
+	if !overrideBunKernelCheckEnabled("linux") {
+		t.Fatalf("expected override to be enabled on unsupported linux kernel")
+	}
+	if claudeRequiresNPMInstall("linux") {
+		t.Fatalf("expected unsupported linux kernel not to require npm install when override is enabled")
+	}
+
+	t.Setenv(overrideBunKernelCheckEnv, "false")
+	if overrideBunKernelCheckEnabled("linux") {
+		t.Fatalf("expected override to be disabled when env is false")
+	}
+	if !claudeRequiresNPMInstall("linux") {
+		t.Fatalf("expected unsupported linux kernel to require npm install when override is disabled")
+	}
+}
+
+func TestRunClaudeInstallerPrefersOfficialInstallerOnUnsupportedKernelWhenOverrideEnabled(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("linux-only installer compatibility check")
+	}
+	withClaudeInstallGOOS(t, "linux")
+
+	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
+	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
+	t.Cleanup(func() { readLinuxKernelReleaseFn = prevReadKernelReleaseFn })
+
+	dir := t.TempDir()
+	home := t.TempDir()
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	npmMarker := filepath.Join(dir, "npm-ran")
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv(claudeProxyHostIDEnv, "kernel-test-host")
+	setStubPath(t, dir)
+
+	bashBody := "#!/bin/sh\nmkdir -p \"" + filepath.Join(home, ".local", "bin") + "\"\nprintf '%s\\n' '#!/bin/sh' 'exit 0' > \"" + filepath.Join(home, ".local", "bin", "claude") + "\"\nchmod 755 \"" + filepath.Join(home, ".local", "bin", "claude") + "\"\nprintf 'official-ok\\n'\nexit 0\n"
+	npmBody := "#!/bin/sh\nprintf 'npm-ran' > \"" + npmMarker + "\"\nexit 1\n"
+	writeStub(t, dir, "bash", bashBody, "@echo off\r\nexit /b 0\r\n")
+	writeStub(t, dir, "npm", npmBody, "@echo off\r\nexit /b 1\r\n")
+
+	var out bytes.Buffer
+	err := runClaudeInstaller(context.Background(), &out, installProxyOptions{})
+	if err != nil {
+		t.Fatalf("expected official installer to succeed, got %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(home, ".local", "bin", "claude")); err != nil {
+		t.Fatalf("expected official installer to leave a native Claude launcher: %v", err)
+	}
+	if _, err := os.Stat(npmMarker); !os.IsNotExist(err) {
+		t.Fatalf("expected npm fallback to stay unused, marker err=%v", err)
+	}
+	if strings.Contains(out.String(), "falling back to the npm distribution") {
+		t.Fatalf("unexpected npm fallback log, got:\n%s", out.String())
+	}
+}
+
+func TestRunClaudeInstallerFallsBackToNPMOnUnsupportedKernelWhenOfficialInstallerFails(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("linux-only installer compatibility check")
 	}
@@ -61,6 +137,7 @@ func TestRunClaudeInstallerUsesNPMFallbackOnUnsupportedKernel(t *testing.T) {
 
 	nodeBody := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo v20.11.1\n  exit 0\nfi\nif [ \"$2\" = \"--version\" ]; then\n  echo \"Claude Code 2.1.112\"\n  exit 0\nfi\nexit 0\n"
 	npmBody := "#!/bin/sh\nprefix=\"${npm_config_prefix:-$NPM_CONFIG_PREFIX}\"\nif [ -z \"$prefix\" ]; then\n  echo missing prefix >&2\n  exit 1\nfi\nmkdir -p \"$prefix/lib/node_modules/@anthropic-ai/claude-code\"\nprintf '%s\\n' '#!/usr/bin/env node' > \"$prefix/lib/node_modules/@anthropic-ai/claude-code/cli.js\"\nchmod 755 \"$prefix/lib/node_modules/@anthropic-ai/claude-code/cli.js\"\nexit 0\n"
+	writeStub(t, dir, "bash", "#!/bin/sh\nexit 23\n", "@echo off\r\nexit /b 23\r\n")
 	writeStub(t, dir, "node", nodeBody, "@echo off\r\nif \"%~1\"==\"--version\" (\r\necho v20.11.1\r\nexit /b 0\r\n)\r\nif \"%~2\"==\"--version\" (\r\necho Claude Code 2.1.112\r\nexit /b 0\r\n)\r\nexit /b 0\r\n")
 	writeStub(t, dir, "npm", npmBody, "@echo off\r\nexit /b 1\r\n")
 
@@ -81,7 +158,7 @@ func TestRunClaudeInstallerUsesNPMFallbackOnUnsupportedKernel(t *testing.T) {
 	if !strings.Contains(versionOut, "Claude Code 2.1.112") {
 		t.Fatalf("unexpected npm wrapper output: %q", versionOut)
 	}
-	if !strings.Contains(out.String(), "installing the npm distribution") {
+	if !strings.Contains(out.String(), "falling back to the npm distribution") {
 		t.Fatalf("expected npm fallback log, got:\n%s", out.String())
 	}
 }

@@ -48,15 +48,16 @@ fi
 if [ -z "$bucket_url" ]; then
   info="$(scripts/claude_release_info.sh --json)"
   bucket_url="$(
-    printf "%s" "$info" | "$python_bin" - <<'PY'
+    CLAUDE_RELEASE_INFO_JSON="$info" "$python_bin" - <<'PY'
 import json
+import os
 import sys
 
 try:
-    data = json.load(sys.stdin)
+    data = json.loads(os.environ["CLAUDE_RELEASE_INFO_JSON"])
 except json.JSONDecodeError:
     sys.exit(1)
-print(data.get("gcs_bucket", ""))
+print(data.get("gcs_bucket") or data.get("release_bucket", ""))
 PY
   )"
 fi

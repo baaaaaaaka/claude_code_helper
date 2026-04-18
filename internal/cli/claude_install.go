@@ -19,12 +19,13 @@ import (
 )
 
 var (
-	claudeInstallGOOS           = runtime.GOOS
-	runClaudeInstallerWithEnvFn = runClaudeInstallerWithEnv
-	ensureWindowsGitBashFn      = ensureWindowsGitBash
-	claudeInstallLookPathFn     = exec.LookPath
-	claudeInstallSetenvFn       = os.Setenv
-	claudeInstallStackStart     = stack.Start
+	claudeInstallGOOS                 = runtime.GOOS
+	runClaudeInstallerWithEnvFn       = runClaudeInstallerWithEnv
+	ensureManagedNPMClaudeInstalledFn = ensureManagedNPMClaudeInstalled
+	ensureWindowsGitBashFn            = ensureWindowsGitBash
+	claudeInstallLookPathFn           = exec.LookPath
+	claudeInstallSetenvFn             = os.Setenv
+	claudeInstallStackStart           = stack.Start
 )
 
 type installCmd struct {
@@ -219,6 +220,12 @@ func ensureClaudeInstalled(ctx context.Context, claudePath string, out io.Writer
 		if path, ok := findManagedClaudePath(claudeInstallGOOS, installLog.String(), os.Getenv); ok {
 			return path, nil
 		}
+		if overrideBunKernelCheckEnabled(claudeInstallGOOS) {
+			if out != nil {
+				_, _ = fmt.Fprintln(out, "Claude's official installer did not leave behind a detectable managed launcher on this old-kernel host; falling back to the npm distribution.")
+			}
+			return ensureManagedNPMClaudeInstalledFn(ctx, installOut, installOpts, nil)
+		}
 	} else if !needsWindowsGitBash(claudeInstallGOOS, installLog.String()) {
 		return "", err
 	}
@@ -279,7 +286,22 @@ func runClaudeInstallerWithEnv(ctx context.Context, out io.Writer, installOpts i
 	if claudeRequiresNPMInstall(claudeInstallGOOS) {
 		return runNPMClaudeInstallerWithEnv(ctx, out, proxyURL, extraEnv)
 	}
+	if err := runOfficialClaudeInstallerWithEnv(ctx, out, proxyURL, extraEnv); err == nil {
+		return nil
+	} else if !overrideBunKernelCheckEnabled(claudeInstallGOOS) {
+		return err
+	} else {
+		if out != nil {
+			_, _ = fmt.Fprintf(out, "Claude's official installer failed on this old-kernel Linux host; falling back to the npm distribution. Error: %v\n", err)
+		}
+		if npmErr := runNPMClaudeInstallerWithEnv(ctx, out, proxyURL, extraEnv); npmErr != nil {
+			return fmt.Errorf("official Claude installer failed: %v; npm fallback failed: %w", err, npmErr)
+		}
+		return nil
+	}
+}
 
+func runOfficialClaudeInstallerWithEnv(ctx context.Context, out io.Writer, proxyURL string, extraEnv []string) error {
 	candidates := installerCandidates(runtime.GOOS)
 	if len(candidates) == 0 {
 		return fmt.Errorf("no supported installer available for %s", runtime.GOOS)
@@ -334,6 +356,26 @@ func runClaudeInstallerWithEnv(ctx context.Context, out io.Writer, installOpts i
 		return fmt.Errorf("no supported installer available for %s", runtime.GOOS)
 	}
 	return fmt.Errorf("failed to run Claude installer for %s (%s)", runtime.GOOS, strings.Join(attemptErrors, "; "))
+}
+
+func ensureManagedNPMClaudeInstalled(ctx context.Context, out io.Writer, installOpts installProxyOptions, extraEnv []string) (string, error) {
+	proxyURL, cleanup, err := resolveInstallerProxy(ctx, installOpts)
+	if err != nil {
+		return "", err
+	}
+	if cleanup != nil {
+		defer func() { _ = cleanup() }()
+	}
+	if proxyURL != "" && out != nil {
+		_, _ = fmt.Fprintln(out, "Using SSH proxy for Claude installer.")
+	}
+	if err := runNPMClaudeInstallerWithEnv(ctx, out, proxyURL, extraEnv); err != nil {
+		return "", err
+	}
+	if path, ok := findManagedNPMClaudePath(claudeInstallGOOS, getenvWithInstallOverrides(os.Getenv, envOverridesFromPairs(extraEnv))); ok {
+		return path, nil
+	}
+	return "", fmt.Errorf("managed npm Claude installation finished but the npm launcher was not found")
 }
 
 func appendInstallOutput(dst *bytes.Buffer, text string) {
@@ -815,6 +857,21 @@ func getenvWithInstallOverrides(base func(string) string, overrides map[string]s
 		}
 		return base(key)
 	}
+}
+
+func envOverridesFromPairs(extraEnv []string) map[string]string {
+	if len(extraEnv) == 0 {
+		return nil
+	}
+	overrides := make(map[string]string, len(extraEnv))
+	for _, kv := range extraEnv {
+		key, value, ok := strings.Cut(kv, "=")
+		if !ok || strings.TrimSpace(key) == "" {
+			continue
+		}
+		overrides[key] = value
+	}
+	return overrides
 }
 
 func setInstallEnvValue(env []string, key string, value string) []string {

@@ -61,11 +61,7 @@ var (
 )
 
 func claudeRequiresNPMInstall(goos string) bool {
-	if !strings.EqualFold(strings.TrimSpace(goos), "linux") || runtime.GOOS != "linux" {
-		return false
-	}
-	_, unsupported := bunLinuxKernelCompatibilityProblem()
-	return unsupported
+	return unsupportedBunKernelHost(goos) && !overrideBunKernelCheckEnabled(goos)
 }
 
 func defaultManagedClaudeHostRoot(goos string, getenv func(string) string) string {
@@ -136,6 +132,13 @@ func defaultManagedNPMClaudeLauncherCandidate(goos string, getenv func(string) s
 		return ""
 	}
 	return layout.WrapperPath
+}
+
+func findManagedNPMClaudePath(goos string, getenv func(string) string) (string, bool) {
+	if candidate := defaultManagedNPMClaudeLauncherCandidate(goos, getenv); candidate != "" {
+		return candidate, true
+	}
+	return "", false
 }
 
 func isManagedNPMClaudeLauncherPath(path string, getenv func(string) string) bool {
@@ -346,6 +349,9 @@ func runNPMClaudeInstallerWithEnv(ctx context.Context, out io.Writer, proxyURL s
 
 	installErr := installManagedNPMClaudeWithRuntime(ctx, out, layout, nodeRuntime, proxyURL, extraEnv)
 	if installErr == nil {
+		if out != nil {
+			_, _ = fmt.Fprintf(out, "Location: %s\n", layout.WrapperPath)
+		}
 		return nil
 	}
 
@@ -358,6 +364,9 @@ func runNPMClaudeInstallerWithEnv(ctx context.Context, out io.Writer, proxyURL s
 			return claudeNPMFallbackError(fmt.Errorf("%w; automatic private Node.js bootstrap failed after system npm fallback error: %w", installErr, bootstrapErr))
 		}
 		if retryErr := installManagedNPMClaudeWithRuntime(ctx, out, layout, bootstrapRuntime, proxyURL, extraEnv); retryErr == nil {
+			if out != nil {
+				_, _ = fmt.Fprintf(out, "Location: %s\n", layout.WrapperPath)
+			}
 			return nil
 		} else {
 			return claudeNPMFallbackError(fmt.Errorf("%w; retry with a claude-proxy-managed Node.js runtime also failed: %w", installErr, retryErr))
