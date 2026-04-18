@@ -24,7 +24,8 @@ import (
 
 const (
 	claudeNPMInstallDirName = "npm-install"
-	claudeNPMInstallPackage = "@anthropic-ai/claude-code@latest"
+	claudeNPMInstallPackageEnv = "CLAUDE_PROXY_NPM_INSTALL_PACKAGE"
+	claudeNPMInstallPackage    = "@anthropic-ai/claude-code@latest"
 	claudeNPMMinimumNode    = 18
 	claudeNPMBootstrapNode  = "v18.20.8"
 )
@@ -62,6 +63,15 @@ var (
 
 func claudeRequiresNPMInstall(goos string) bool {
 	return unsupportedBunKernelHost(goos) && !overrideBunKernelCheckEnabled(goos)
+}
+
+func managedNPMInstallPackage(getenv func(string) string) string {
+	if getenv != nil {
+		if value := strings.TrimSpace(getenv(claudeNPMInstallPackageEnv)); value != "" {
+			return value
+		}
+	}
+	return claudeNPMInstallPackage
 }
 
 func defaultManagedClaudeHostRoot(goos string, getenv func(string) string) string {
@@ -919,7 +929,7 @@ func installManagedNPMClaudeWithRuntime(
 		"--no-fund",
 		"--no-audit",
 		"--loglevel=error",
-		claudeNPMInstallPackage,
+		managedNPMInstallPackage(os.Getenv),
 	)
 	cmd.Env = envList
 	cmd.Stdout = out

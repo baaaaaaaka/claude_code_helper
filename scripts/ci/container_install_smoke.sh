@@ -169,14 +169,37 @@ repo="${REPO:?}"
 tag="${TAG:?}"
 fetcher="${FETCHER:?}"
 
+retry_cmd() {
+  local max_attempts="${CI_RETRY_ATTEMPTS:-5}"
+  local delay="${CI_RETRY_DELAY_SECONDS:-5}"
+  local attempt=1
+
+  while true; do
+    if "$@"; then
+      return 0
+    fi
+    if [[ "$attempt" -ge "$max_attempts" ]]; then
+      echo "Command failed after ${attempt} attempts: $*" >&2
+      return 1
+    fi
+    echo "Command failed (attempt ${attempt}/${max_attempts}): $*" >&2
+    sleep "$delay"
+    attempt=$((attempt + 1))
+  done
+}
+
 mkdir -p "$HOME/.local/bin"
 
 script_url="https://github.com/${repo}/releases/download/${tag}/install.sh"
+script_path="$(mktemp)"
 if [[ "$fetcher" == "curl" ]]; then
-  curl -fsSL "$script_url" | sh -s -- --repo "$repo" --version "$tag" --dir "$HOME/.local/bin"
+  retry_cmd curl -fsSL "$script_url" -o "$script_path"
 else
-  wget -qO- "$script_url" | sh -s -- --repo "$repo" --version "$tag" --dir "$HOME/.local/bin"
+  retry_cmd wget -qO "$script_path" "$script_url"
 fi
+trap 'rm -f "$script_path"' EXIT
+
+bash "$script_path" --repo "$repo" --version "$tag" --dir "$HOME/.local/bin"
 
 "$HOME/.local/bin/claude-proxy" --version | grep -q "${tag#v}"
 "$HOME/.local/bin/claude-proxy" proxy doctor || true

@@ -240,6 +240,7 @@ jobs:
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      CLAUDE_PROXY_NPM_INSTALL_PACKAGE: "@anthropic-ai/claude-code@2.1.112"
     strategy:
       fail-fast: false
       matrix:
@@ -330,6 +331,7 @@ jobs:
             -v "${TEST_BIN_PATH}:/claude_cli_test:ro" \
             -v "$PWD/scripts/ci:/ci:ro" \
             -e TEST_BIN_PATH=/claude_cli_test \
+            -e CLAUDE_PROXY_NPM_INSTALL_PACKAGE \
             -e CLAUDE_INSTALL_TEST_NPM_FALLBACK=1 \
             -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallNPMFallbackIntegration \
             -e CI=true \
@@ -361,6 +363,7 @@ jobs:
             -v "${TEST_BIN_PATH}:/claude_cli_test:ro" \
             -v "$PWD/scripts/ci:/ci:ro" \
             -e TEST_BIN_PATH=/claude_cli_test \
+            -e CLAUDE_PROXY_NPM_INSTALL_PACKAGE \
             -e CLAUDE_INSTALL_TEST_NPM_FALLBACK_SYSTEM_NODE=1 \
             -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallNPMFallbackSystemNodeIntegration \
             -e CLAUDE_INSTALL_NEEDS_NODE=1 \
@@ -393,6 +396,7 @@ jobs:
             -v "${TEST_BIN_PATH}:/claude_cli_test:ro" \
             -v "$PWD/scripts/ci:/ci:ro" \
             -e TEST_BIN_PATH=/claude_cli_test \
+            -e CLAUDE_PROXY_NPM_INSTALL_PACKAGE \
             -e CLAUDE_INSTALL_TEST_NPM_FALLBACK_NODE_WITHOUT_NPM=1 \
             -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallNPMFallbackNodeWithoutNPMIntegration \
             -e CLAUDE_INSTALL_NEEDS_NODE=1 \

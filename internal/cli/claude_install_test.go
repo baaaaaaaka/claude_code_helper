@@ -1255,6 +1255,22 @@ func TestSanitizeManagedNPMInstallEnvDropsAmbientPrefix(t *testing.T) {
 	}
 }
 
+func TestManagedNPMInstallPackageUsesOverride(t *testing.T) {
+	if got := managedNPMInstallPackage(func(string) string { return "" }); got != claudeNPMInstallPackage {
+		t.Fatalf("expected default npm package %q, got %q", claudeNPMInstallPackage, got)
+	}
+
+	getenv := func(key string) string {
+		if key == claudeNPMInstallPackageEnv {
+			return "  @anthropic-ai/claude-code@2.1.112  "
+		}
+		return ""
+	}
+	if got := managedNPMInstallPackage(getenv); got != "@anthropic-ai/claude-code@2.1.112" {
+		t.Fatalf("expected overridden npm package, got %q", got)
+	}
+}
+
 func TestRunNPMClaudeInstallerFallsBackWhenSystemNPMIsBroken(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("managed Node.js bootstrap only applies on linux")
