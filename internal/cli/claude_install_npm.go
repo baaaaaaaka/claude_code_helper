@@ -23,11 +23,11 @@ import (
 )
 
 const (
-	claudeNPMInstallDirName = "npm-install"
+	claudeNPMInstallDirName    = "npm-install"
 	claudeNPMInstallPackageEnv = "CLAUDE_PROXY_NPM_INSTALL_PACKAGE"
 	claudeNPMInstallPackage    = "@anthropic-ai/claude-code@latest"
-	claudeNPMMinimumNode    = 18
-	claudeNPMBootstrapNode  = "v18.20.8"
+	claudeNPMMinimumNode       = 18
+	claudeNPMBootstrapNode     = "v18.20.8"
 )
 
 const (
