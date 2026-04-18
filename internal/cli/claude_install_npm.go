@@ -25,9 +25,11 @@ import (
 const (
 	claudeNPMInstallDirName    = "npm-install"
 	claudeNPMInstallPackageEnv = "CLAUDE_PROXY_NPM_INSTALL_PACKAGE"
-	claudeNPMInstallPackage    = "@anthropic-ai/claude-code@latest"
-	claudeNPMMinimumNode       = 18
-	claudeNPMBootstrapNode     = "v18.20.8"
+	// 2.1.112 is the last Claude Code npm release that still ships the
+	// Node-based cli.js entrypoint required by the managed npm fallback.
+	claudeNPMInstallPackage = "@anthropic-ai/claude-code@2.1.112"
+	claudeNPMMinimumNode    = 18
+	claudeNPMBootstrapNode  = "v18.20.8"
 )
 
 const (
@@ -538,7 +540,7 @@ func installManagedNPMBootstrapRuntime(ctx context.Context, layout managedNPMCla
 	}
 
 	if !fileExists(layout.RuntimeArchivePath) {
-		if err := downloadManagedNPMNodeArchiveFn(archiveURL, layout.RuntimeArchivePath, claudeNPMBootstrapDownloadTimeout, proxyURL); err != nil {
+		if err := downloadManagedNPMNodeArchiveFn(ctx, archiveURL, layout.RuntimeArchivePath, claudeNPMBootstrapDownloadTimeout, proxyURL); err != nil {
 			return fmt.Errorf("download private Node.js runtime: %w", err)
 		}
 	}
@@ -573,9 +575,9 @@ func managedNPMNodeArchiveURL() (string, error) {
 	return fmt.Sprintf("https://nodejs.org/dist/%s/node-%s-linux-%s.tar.xz", claudeNPMBootstrapNode, claudeNPMBootstrapNode, arch), nil
 }
 
-func downloadURLToFileWithProxy(rawURL string, targetPath string, timeout time.Duration, proxyURL string) error {
+func downloadURLToFileWithProxy(ctx context.Context, rawURL string, targetPath string, timeout time.Duration, proxyURL string) error {
 	if strings.TrimSpace(proxyURL) == "" {
-		return downloadURLToFile(rawURL, targetPath, timeout)
+		return downloadURLToFileWithContext(ctx, rawURL, targetPath, timeout)
 	}
 	proxyParsed, err := neturl.Parse(proxyURL)
 	if err != nil {
@@ -583,7 +585,7 @@ func downloadURLToFileWithProxy(rawURL string, targetPath string, timeout time.D
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = http.ProxyURL(proxyParsed)
-	return downloadURLToFileWithTransport(rawURL, targetPath, timeout, transport)
+	return downloadURLToFileWithTransportAndContext(ctx, rawURL, targetPath, timeout, transport)
 }
 
 func extractManagedNPMNodeArchive(archivePath string, dest string) error {

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -352,6 +353,89 @@ func TestDownloadURLToFileSkipsRetryOnNotFound(t *testing.T) {
 	}
 	if attempts != 1 {
 		t.Fatalf("expected a single attempt for non-retriable 404, got %d", attempts)
+	}
+}
+
+func TestDownloadURLToFileWithContextStopsRetrySleepOnCancellation(t *testing.T) {
+	prevAttempts := downloadURLRetryAttempts
+	prevDelay := downloadURLRetryDelay
+	downloadURLRetryAttempts = 3
+	downloadURLRetryDelay = time.Second
+	t.Cleanup(func() {
+		downloadURLRetryAttempts = prevAttempts
+		downloadURLRetryDelay = prevDelay
+	})
+
+	dir := t.TempDir()
+	attempts := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		http.Error(w, "Gateway Timeout", http.StatusGatewayTimeout)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	start := time.Now()
+	err := downloadURLToFileWithContext(ctx, server.URL, filepath.Join(dir, "bundle.tar.xz"), time.Second)
+	elapsed := time.Since(start)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation error, got %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected cancellation to stop retries after the first attempt, got %d attempts", attempts)
+	}
+	if elapsed >= 500*time.Millisecond {
+		t.Fatalf("expected cancellation to interrupt retry delay quickly, took %s", elapsed)
+	}
+}
+
+func TestEnsureGlibcCompatBundleWithContextStopsRetrySleepOnCancellation(t *testing.T) {
+	prevAttempts := downloadURLRetryAttempts
+	prevDelay := downloadURLRetryDelay
+	prevReleaseURL := glibcCompatReleaseURLFn
+	downloadURLRetryAttempts = 3
+	downloadURLRetryDelay = time.Second
+	t.Cleanup(func() {
+		downloadURLRetryAttempts = prevAttempts
+		downloadURLRetryDelay = prevDelay
+		glibcCompatReleaseURLFn = prevReleaseURL
+	})
+
+	dir := t.TempDir()
+	attempts := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		http.Error(w, "Gateway Timeout", http.StatusGatewayTimeout)
+	}))
+	defer server.Close()
+	glibcCompatReleaseURLFn = func(repo string, tag string, asset string) string {
+		return server.URL
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	start := time.Now()
+	err := ensureGlibcCompatBundleWithContext(
+		ctx,
+		dir,
+		"owner/repo",
+		"tag",
+		"glibc.tar.xz",
+		filepath.Join(dir, "glibc.tar.xz"),
+		filepath.Join(dir, "glibc.tar.xz.sha256"),
+	)
+	elapsed := time.Since(start)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation error, got %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected cancellation to stop glibc bundle retries after the first attempt, got %d attempts", attempts)
+	}
+	if elapsed >= 500*time.Millisecond {
+		t.Fatalf("expected glibc bundle cancellation to interrupt retry delay quickly, took %s", elapsed)
 	}
 }
 

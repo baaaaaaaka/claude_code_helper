@@ -49,6 +49,7 @@ type exePatchOptions struct {
 	glibcCompatRoot           string
 	glibcCompatPreferWrapper  bool
 	allowBuiltInWithoutBypass bool
+	ctx                       context.Context
 }
 
 type patchOutcome struct {
@@ -92,6 +93,13 @@ func (o exePatchOptions) glibcCompatConfigured() bool {
 func (o exePatchOptions) withGlibcCompatWrapperFallback() exePatchOptions {
 	o.glibcCompatPreferWrapper = true
 	return o
+}
+
+func (o exePatchOptions) contextOrBackground() context.Context {
+	if o.ctx != nil {
+		return o.ctx
+	}
+	return context.Background()
 }
 
 func (o exePatchOptions) validate() error {
@@ -291,6 +299,10 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 	if log == nil {
 		log = io.Discard
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	opts.ctx = ctx
 
 	builtinSpecs, err := opts.compileBuiltinSpecs()
 	if err != nil {

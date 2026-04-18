@@ -502,7 +502,7 @@ func TestFindManagedClaudePathPrefersNativeClaudeOnUnsupportedKernelWhenOverride
 	if err := os.MkdirAll(filepath.Dir(nativeClaude), 0o755); err != nil {
 		t.Fatalf("mkdir native claude dir: %v", err)
 	}
-	if err := os.WriteFile(nativeClaude, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+	if err := os.WriteFile(nativeClaude, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'Claude Code 2.1.114'\n  exit 0\nfi\nexit 0\n"), 0o700); err != nil {
 		t.Fatalf("write native claude: %v", err)
 	}
 
@@ -553,7 +553,7 @@ func TestFindManagedClaudePathUsesNPMWrapperOnUnsupportedKernelWhenOverrideDisab
 	if err := os.MkdirAll(filepath.Dir(nativeClaude), 0o755); err != nil {
 		t.Fatalf("mkdir native claude dir: %v", err)
 	}
-	if err := os.WriteFile(nativeClaude, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+	if err := os.WriteFile(nativeClaude, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'Claude Code 2.1.114'\n  exit 0\nfi\nexit 0\n"), 0o700); err != nil {
 		t.Fatalf("write native claude: %v", err)
 	}
 
@@ -808,7 +808,7 @@ func TestEnsureClaudeInstalledPrefersNativeClaudeOnUnsupportedKernelWhenOverride
 	if err := os.MkdirAll(filepath.Dir(nativeClaude), 0o755); err != nil {
 		t.Fatalf("mkdir native claude dir: %v", err)
 	}
-	if err := os.WriteFile(nativeClaude, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+	if err := os.WriteFile(nativeClaude, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'Claude Code 2.1.114'\n  exit 0\nfi\nexit 0\n"), 0o700); err != nil {
 		t.Fatalf("write native claude: %v", err)
 	}
 
@@ -837,6 +837,68 @@ func TestEnsureClaudeInstalledPrefersNativeClaudeOnUnsupportedKernelWhenOverride
 	}
 	if installCalls != 0 {
 		t.Fatalf("expected installer to stay unused, got %d calls", installCalls)
+	}
+}
+
+func TestEnsureClaudeInstalledReinstallsBrokenNativeClaudeOnUnsupportedKernelWhenOverrideEnabled(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("kernel-gated npm fallback only applies on linux")
+	}
+
+	prevInstaller := runClaudeInstallerWithEnvFn
+	t.Cleanup(func() { runClaudeInstallerWithEnvFn = prevInstaller })
+	withClaudeInstallGOOS(t, "linux")
+
+	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
+	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
+	t.Cleanup(func() { readLinuxKernelReleaseFn = prevReadKernelReleaseFn })
+
+	home := t.TempDir()
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	hostID := "test-host"
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv(claudeProxyHostIDEnv, hostID)
+
+	nativeClaude := filepath.Join(home, ".local", "bin", "claude")
+	if err := os.MkdirAll(filepath.Dir(nativeClaude), 0o755); err != nil {
+		t.Fatalf("mkdir native claude dir: %v", err)
+	}
+	if err := os.WriteFile(nativeClaude, []byte("#!/bin/sh\necho 'Bun has crashed' >&2\nexit 135\n"), 0o700); err != nil {
+		t.Fatalf("write native claude: %v", err)
+	}
+
+	layout, ok := defaultManagedNPMClaudeLayout("linux", os.Getenv)
+	if !ok {
+		t.Fatalf("expected managed npm layout")
+	}
+	installCalls := 0
+	runClaudeInstallerWithEnvFn = func(ctx context.Context, out io.Writer, opts installProxyOptions, extraEnv []string) error {
+		installCalls++
+		if err := os.MkdirAll(filepath.Dir(layout.WrapperPath), 0o755); err != nil {
+			t.Fatalf("mkdir wrapper dir: %v", err)
+		}
+		if err := os.WriteFile(layout.WrapperPath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			t.Fatalf("write wrapper: %v", err)
+		}
+		_, _ = io.WriteString(out, "Location: "+layout.WrapperPath+"\n")
+		return nil
+	}
+
+	var out bytes.Buffer
+	got, err := ensureClaudeInstalled(context.Background(), "", &out, installProxyOptions{})
+	if err != nil {
+		t.Fatalf("ensureClaudeInstalled error: %v", err)
+	}
+	if got != layout.WrapperPath {
+		t.Fatalf("expected managed npm wrapper %q, got %q", layout.WrapperPath, got)
+	}
+	if installCalls != 1 {
+		t.Fatalf("expected installer to run once after rejecting broken native launcher, got %d calls", installCalls)
+	}
+	if !strings.Contains(out.String(), "Existing managed Claude launcher") {
+		t.Fatalf("expected unusable native launcher log, got:\n%s", out.String())
 	}
 }
 
@@ -1256,8 +1318,8 @@ func TestSanitizeManagedNPMInstallEnvDropsAmbientPrefix(t *testing.T) {
 }
 
 func TestManagedNPMInstallPackageUsesOverride(t *testing.T) {
-	if got := managedNPMInstallPackage(func(string) string { return "" }); got != claudeNPMInstallPackage {
-		t.Fatalf("expected default npm package %q, got %q", claudeNPMInstallPackage, got)
+	if got := managedNPMInstallPackage(func(string) string { return "" }); got != "@anthropic-ai/claude-code@2.1.112" {
+		t.Fatalf("expected default npm package %q, got %q", "@anthropic-ai/claude-code@2.1.112", got)
 	}
 
 	getenv := func(key string) string {

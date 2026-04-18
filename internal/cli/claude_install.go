@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
 	"github.com/baaaaaaaka/claude_code_helper/internal/env"
@@ -35,6 +36,7 @@ type installCmd struct {
 
 const claudeInstallBootstrap = `url="https://claude.ai/install.sh"; if command -v curl >/dev/null 2>&1; then curl -fsSL "$url" | bash; elif command -v wget >/dev/null 2>&1; then wget -qO- "$url" | bash; else echo "need curl or wget" >&2; exit 1; fi`
 const windowsGitBashInstallHelp = "Claude Code on Windows needs Git Bash. Install Git for Windows or set CLAUDE_CODE_GIT_BASH_PATH to your bash.exe and rerun the command."
+const managedClaudeProbeTimeout = 5 * time.Second
 
 const claudeInstallBootstrapWindows = `$installerUrl = 'https://claude.ai/install.ps1'
 $logPath = Join-Path ([IO.Path]::GetTempPath()) ('claude-installer-error-' + [DateTime]::UtcNow.ToString('yyyyMMddHHmmssfff') + '.log')
@@ -203,7 +205,7 @@ func ensureClaudeInstalled(ctx context.Context, claudePath string, out io.Writer
 	if err := exportCurrentProcessGitBashPath(findWindowsGitBashPath(os.Getenv)); err != nil {
 		return "", err
 	}
-	if path, ok := findManagedClaudePath(claudeInstallGOOS, "", os.Getenv); ok {
+	if path, ok := findUsableManagedClaudePath(ctx, out, claudeInstallGOOS, "", os.Getenv); ok {
 		return path, nil
 	}
 
@@ -217,7 +219,7 @@ func ensureClaudeInstalled(ctx context.Context, claudePath string, out io.Writer
 	}
 	err := runClaudeInstaller(ctx, installOut, installOpts)
 	if err == nil {
-		if path, ok := findManagedClaudePath(claudeInstallGOOS, installLog.String(), os.Getenv); ok {
+		if path, ok := findUsableManagedClaudePath(ctx, out, claudeInstallGOOS, installLog.String(), os.Getenv); ok {
 			return path, nil
 		}
 		if overrideBunKernelCheckEnabled(claudeInstallGOOS) {
@@ -606,6 +608,53 @@ func findManagedClaudePath(goos string, installOutput string, getenv func(string
 	}
 
 	return "", false
+}
+
+func findUsableManagedClaudePath(ctx context.Context, out io.Writer, goos string, installOutput string, getenv func(string) string) (string, bool) {
+	path, ok := findManagedClaudePath(goos, installOutput, getenv)
+	if !ok {
+		return "", false
+	}
+	if !shouldValidateManagedClaudePath(goos, path, getenv) {
+		return path, true
+	}
+	if err := probeManagedClaudeLauncher(ctx, path); err == nil {
+		return path, true
+	} else if out != nil {
+		_, _ = fmt.Fprintf(out, "Existing managed Claude launcher at %s is not usable on this old-kernel host; reinstalling. Probe error: %v\n", path, err)
+	}
+	return "", false
+}
+
+func shouldValidateManagedClaudePath(goos string, path string, getenv func(string) string) bool {
+	if !overrideBunKernelCheckEnabled(goos) {
+		return false
+	}
+	return !isManagedNPMClaudeLauncherPath(path, getenv)
+}
+
+func probeManagedClaudeLauncher(ctx context.Context, path string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	out, err := runClaudeProbeWithContext(ctx, path, "--version", managedClaudeProbeTimeout)
+	if version := extractVersion(out); version != "" && strings.ContainsAny(version, "0123456789") {
+		return nil
+	}
+	if kernelErr := bunLinuxKernelStartupError(out, err); kernelErr != nil {
+		return kernelErr
+	}
+	text := strings.TrimSpace(out)
+	if err != nil {
+		if text == "" {
+			return fmt.Errorf("probe managed Claude launcher: %w", err)
+		}
+		return fmt.Errorf("probe managed Claude launcher: %w (%s)", err, text)
+	}
+	if text == "" {
+		return fmt.Errorf("probe managed Claude launcher: empty version output")
+	}
+	return fmt.Errorf("probe managed Claude launcher: unexpected version output %q", text)
 }
 
 func findInstalledClaudePath(goos string, installOutput string, getenv func(string) string) (string, bool) {

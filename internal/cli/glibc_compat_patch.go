@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -47,6 +48,7 @@ var (
 	userHomeDirFn             = os.UserHomeDir
 	tempDirFn                 = os.TempDir
 	readLinuxOSReleaseFn      = func() ([]byte, error) { return os.ReadFile("/etc/os-release") }
+	glibcCompatReleaseURLFn   = glibcCompatReleaseURL
 	downloadURLRetryAttempts  = 3
 	downloadURLRetryDelay     = 2 * time.Second
 )
@@ -288,7 +290,7 @@ func resolveOrPrepareGlibcCompatLayout(opts exePatchOptions, log io.Writer) (gli
 	if root != "" {
 		return resolveGlibcCompatLayout(root)
 	}
-	autoRoot, err := ensureDefaultGlibcCompatRuntime(log)
+	autoRoot, err := ensureDefaultGlibcCompatRuntimeWithContext(opts.contextOrBackground(), log)
 	if err != nil {
 		return glibcCompatLayout{}, err
 	}
@@ -296,8 +298,15 @@ func resolveOrPrepareGlibcCompatLayout(opts exePatchOptions, log io.Writer) (gli
 }
 
 func ensureDefaultGlibcCompatRuntime(log io.Writer) (string, error) {
+	return ensureDefaultGlibcCompatRuntimeWithContext(context.Background(), log)
+}
+
+func ensureDefaultGlibcCompatRuntimeWithContext(ctx context.Context, log io.Writer) (string, error) {
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		return "", fmt.Errorf("automatic glibc compat download unsupported on %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	repo := resolveGlibcCompatRepo()
@@ -318,6 +327,9 @@ func ensureDefaultGlibcCompatRuntime(log io.Writer) (string, error) {
 	}
 	lockPath := filepath.Join(cacheRoot, ".runtime.lock")
 	if err := withFileLock(lockPath, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if _, err := resolveDefaultGlibcCompatRuntime(runtimeRoot); err == nil {
 			return nil
 		}
@@ -326,7 +338,7 @@ func ensureDefaultGlibcCompatRuntime(log io.Writer) (string, error) {
 		}
 		bundlePath := filepath.Join(cacheRoot, asset)
 		checksumPath := bundlePath + ".sha256"
-		if err := ensureGlibcCompatBundle(cacheRoot, repo, tag, asset, bundlePath, checksumPath); err != nil {
+		if err := ensureGlibcCompatBundleWithContext(ctx, cacheRoot, repo, tag, asset, bundlePath, checksumPath); err != nil {
 			return err
 		}
 		stageDir, err := os.MkdirTemp(cacheRoot, "runtime-staging-")
@@ -634,12 +646,19 @@ func resolveGlibcCompatWrapperPath(layout glibcCompatLayout) (string, error) {
 }
 
 func ensureGlibcCompatBundle(cacheRoot string, repo string, tag string, asset string, bundlePath string, checksumPath string) error {
-	assetURL := glibcCompatReleaseURL(repo, tag, asset)
-	checksumURL := glibcCompatReleaseURL(repo, tag, asset+".sha256")
-	if err := downloadIfMissing(assetURL, bundlePath, glibcCompatDownloadTimeout); err != nil {
+	return ensureGlibcCompatBundleWithContext(context.Background(), cacheRoot, repo, tag, asset, bundlePath, checksumPath)
+}
+
+func ensureGlibcCompatBundleWithContext(ctx context.Context, cacheRoot string, repo string, tag string, asset string, bundlePath string, checksumPath string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	assetURL := glibcCompatReleaseURLFn(repo, tag, asset)
+	checksumURL := glibcCompatReleaseURLFn(repo, tag, asset+".sha256")
+	if err := downloadURLToFileWithContextIfMissing(ctx, assetURL, bundlePath, glibcCompatDownloadTimeout); err != nil {
 		return err
 	}
-	if err := downloadIfMissing(checksumURL, checksumPath, glibcCompatDownloadTimeout); err != nil {
+	if err := downloadURLToFileWithContextIfMissing(ctx, checksumURL, checksumPath, glibcCompatDownloadTimeout); err != nil {
 		return err
 	}
 	if err := verifyBundleSHA256(bundlePath, checksumPath); err == nil {
@@ -648,10 +667,10 @@ func ensureGlibcCompatBundle(cacheRoot string, repo string, tag string, asset st
 
 	_ = os.Remove(bundlePath)
 	_ = os.Remove(checksumPath)
-	if err := downloadURLToFile(assetURL, bundlePath, glibcCompatDownloadTimeout); err != nil {
+	if err := downloadURLToFileWithContext(ctx, assetURL, bundlePath, glibcCompatDownloadTimeout); err != nil {
 		return err
 	}
-	if err := downloadURLToFile(checksumURL, checksumPath, glibcCompatDownloadTimeout); err != nil {
+	if err := downloadURLToFileWithContext(ctx, checksumURL, checksumPath, glibcCompatDownloadTimeout); err != nil {
 		return err
 	}
 	if err := verifyBundleSHA256(bundlePath, checksumPath); err != nil {
@@ -686,17 +705,32 @@ func glibcCompatReleaseURL(repo string, tag string, asset string) string {
 }
 
 func downloadIfMissing(url string, targetPath string, timeout time.Duration) error {
+	return downloadURLToFileWithContextIfMissing(context.Background(), url, targetPath, timeout)
+}
+
+func downloadURLToFileWithContextIfMissing(ctx context.Context, url string, targetPath string, timeout time.Duration) error {
 	if fileExists(targetPath) {
 		return nil
 	}
-	return downloadURLToFile(url, targetPath, timeout)
+	return downloadURLToFileWithContext(ctx, url, targetPath, timeout)
 }
 
 func downloadURLToFile(url string, targetPath string, timeout time.Duration) error {
-	return downloadURLToFileWithTransport(url, targetPath, timeout, nil)
+	return downloadURLToFileWithContext(context.Background(), url, targetPath, timeout)
+}
+
+func downloadURLToFileWithContext(ctx context.Context, url string, targetPath string, timeout time.Duration) error {
+	return downloadURLToFileWithTransportAndContext(ctx, url, targetPath, timeout, nil)
 }
 
 func downloadURLToFileWithTransport(url string, targetPath string, timeout time.Duration, transport *http.Transport) error {
+	return downloadURLToFileWithTransportAndContext(context.Background(), url, targetPath, timeout, transport)
+}
+
+func downloadURLToFileWithTransportAndContext(ctx context.Context, url string, targetPath string, timeout time.Duration, transport *http.Transport) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	attempts := downloadURLRetryAttempts
 	if attempts < 1 {
 		attempts = 1
@@ -704,7 +738,10 @@ func downloadURLToFileWithTransport(url string, targetPath string, timeout time.
 
 	var lastErr error
 	for attempt := 1; attempt <= attempts; attempt++ {
-		retriable, err := downloadURLToFileAttempt(url, targetPath, timeout, transport)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		retriable, err := downloadURLToFileAttempt(ctx, url, targetPath, timeout, transport)
 		if err == nil {
 			return nil
 		}
@@ -713,7 +750,15 @@ func downloadURLToFileWithTransport(url string, targetPath string, timeout time.
 			return err
 		}
 		if downloadURLRetryDelay > 0 {
-			time.Sleep(downloadURLRetryDelay)
+			timer := time.NewTimer(downloadURLRetryDelay)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return ctx.Err()
+			case <-timer.C:
+			}
 		}
 	}
 	if lastErr != nil {
@@ -722,14 +767,14 @@ func downloadURLToFileWithTransport(url string, targetPath string, timeout time.
 	return fmt.Errorf("download %s failed", url)
 }
 
-func downloadURLToFileAttempt(url string, targetPath string, timeout time.Duration, transport *http.Transport) (bool, error) {
+func downloadURLToFileAttempt(ctx context.Context, url string, targetPath string, timeout time.Duration, transport *http.Transport) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
 		return false, fmt.Errorf("create download dir: %w", err)
 	}
 	tmpPath := targetPath + ".tmp"
 	_ = os.Remove(tmpPath)
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return false, err
 	}
@@ -742,6 +787,9 @@ func downloadURLToFileAttempt(url string, targetPath string, timeout time.Durati
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, ctxErr
+		}
 		return true, err
 	}
 	defer resp.Body.Close()
@@ -756,6 +804,9 @@ func downloadURLToFileAttempt(url string, targetPath string, timeout time.Durati
 	if _, err := io.Copy(out, resp.Body); err != nil {
 		_ = out.Close()
 		_ = os.Remove(tmpPath)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, ctxErr
+		}
 		return true, err
 	}
 	if err := out.Close(); err != nil {
