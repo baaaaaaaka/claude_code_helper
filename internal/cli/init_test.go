@@ -15,7 +15,10 @@ import (
 
 func TestPromptDefault(t *testing.T) {
 	r := bufio.NewReader(strings.NewReader("\n"))
-	got := prompt(r, "Label", "default")
+	got, err := prompt(r, "Label", "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got != "default" {
 		t.Fatalf("expected default, got %q", got)
 	}
@@ -23,7 +26,10 @@ func TestPromptDefault(t *testing.T) {
 
 func TestPromptRequired(t *testing.T) {
 	r := bufio.NewReader(strings.NewReader("\nvalue\n"))
-	got := promptRequired(r, "Label")
+	got, err := promptRequired(r, "Label")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got != "value" {
 		t.Fatalf("expected value, got %q", got)
 	}
@@ -31,7 +37,10 @@ func TestPromptRequired(t *testing.T) {
 
 func TestPromptInt(t *testing.T) {
 	r := bufio.NewReader(strings.NewReader("abc\n0\n70000\n42\n"))
-	got := promptInt(r, "Port", 22)
+	got, err := promptInt(r, "Port", 22)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got != 42 {
 		t.Fatalf("expected 42, got %d", got)
 	}
@@ -39,9 +48,48 @@ func TestPromptInt(t *testing.T) {
 
 func TestPromptYesNoDefault(t *testing.T) {
 	r := bufio.NewReader(strings.NewReader("\n"))
-	got := promptYesNo(r, "Confirm", true)
+	got, err := promptYesNo(r, "Confirm", true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got != true {
 		t.Fatalf("expected true, got %v", got)
+	}
+}
+
+func TestPromptRequiredReturnsEOFOnEmptyStdin(t *testing.T) {
+	r := bufio.NewReader(strings.NewReader(""))
+	_, err := promptRequired(r, "x")
+	if err != io.EOF {
+		t.Fatalf("expected io.EOF, got %v", err)
+	}
+}
+
+func TestPromptYesNoReturnsEOFOnEmptyStdin(t *testing.T) {
+	r := bufio.NewReader(strings.NewReader(""))
+	_, err := promptYesNo(r, "x", false)
+	if err != io.EOF {
+		t.Fatalf("expected io.EOF, got %v", err)
+	}
+}
+
+func TestPromptIntReturnsEOFOnEmptyStdin(t *testing.T) {
+	r := bufio.NewReader(strings.NewReader(""))
+	_, err := promptInt(r, "x", 22)
+	if err != io.EOF {
+		t.Fatalf("expected io.EOF, got %v", err)
+	}
+}
+
+func TestPromptHonorsPartialLineBeforeEOF(t *testing.T) {
+	// A non-empty partial line with no trailing newline still counts as input.
+	r := bufio.NewReader(strings.NewReader("abc"))
+	got, err := prompt(r, "x", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "abc" {
+		t.Fatalf("expected abc, got %q", got)
 	}
 }
 

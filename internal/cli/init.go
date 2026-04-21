@@ -77,9 +77,18 @@ func initProfileInteractiveWithDeps(
 		_, _ = fmt.Fprintln(out, "Enter your SSH host, port, and username to establish that tunnel.")
 	}
 
-	host := promptRequired(reader, "SSH host (required)")
-	port := promptInt(reader, "SSH port", 22)
-	user := promptRequired(reader, "SSH user (required)")
+	host, err := promptRequired(reader, "SSH host (required)")
+	if err != nil {
+		return config.Profile{}, err
+	}
+	port, err := promptInt(reader, "SSH port", 22)
+	if err != nil {
+		return config.Profile{}, err
+	}
+	user, err := promptRequired(reader, "SSH user (required)")
+	if err != nil {
+		return config.Profile{}, err
+	}
 
 	id, err := ids.New()
 	if err != nil {
@@ -124,54 +133,73 @@ func initProfileInteractiveWithDeps(
 	return prof, nil
 }
 
-func prompt(r *bufio.Reader, label, def string) string {
-	for {
-		if def != "" {
-			_, _ = fmt.Fprintf(os.Stderr, "%s [%s]: ", label, def)
-		} else {
-			_, _ = fmt.Fprintf(os.Stderr, "%s: ", label)
-		}
-		s, _ := r.ReadString('\n')
-		s = strings.TrimSpace(s)
-		if s == "" {
-			return def
-		}
-		return s
+func prompt(r *bufio.Reader, label, def string) (string, error) {
+	if def != "" {
+		_, _ = fmt.Fprintf(os.Stderr, "%s [%s]: ", label, def)
+	} else {
+		_, _ = fmt.Fprintf(os.Stderr, "%s: ", label)
 	}
+	s, err := r.ReadString('\n')
+	trimmed := strings.TrimSpace(s)
+	if err != nil {
+		if err == io.EOF {
+			// If the user managed to type a non-empty partial line before
+			// EOF (no trailing newline), honor that input. Otherwise, surface
+			// EOF so callers can break out of retry loops.
+			if trimmed != "" {
+				return trimmed, nil
+			}
+			return "", io.EOF
+		}
+		return "", err
+	}
+	if trimmed == "" {
+		return def, nil
+	}
+	return trimmed, nil
 }
 
-func promptRequired(r *bufio.Reader, label string) string {
+func promptRequired(r *bufio.Reader, label string) (string, error) {
 	for {
-		v := prompt(r, label, "")
+		v, err := prompt(r, label, "")
+		if err != nil {
+			return "", err
+		}
 		if strings.TrimSpace(v) != "" {
-			return v
+			return v, nil
 		}
 	}
 }
 
-func promptInt(r *bufio.Reader, label string, def int) int {
+func promptInt(r *bufio.Reader, label string, def int) (int, error) {
 	for {
-		v := prompt(r, label, strconv.Itoa(def))
-		n, err := strconv.Atoi(strings.TrimSpace(v))
-		if err == nil && n > 0 && n <= 65535 {
-			return n
+		v, err := prompt(r, label, strconv.Itoa(def))
+		if err != nil {
+			return 0, err
+		}
+		n, convErr := strconv.Atoi(strings.TrimSpace(v))
+		if convErr == nil && n > 0 && n <= 65535 {
+			return n, nil
 		}
 	}
 }
 
-func promptYesNo(r *bufio.Reader, label string, def bool) bool {
+func promptYesNo(r *bufio.Reader, label string, def bool) (bool, error) {
 	defStr := "n"
 	if def {
 		defStr = "y"
 	}
 
 	for {
-		s := prompt(r, label+" (y/n)", defStr)
+		s, err := prompt(r, label+" (y/n)", defStr)
+		if err != nil {
+			return false, err
+		}
 		switch strings.ToLower(strings.TrimSpace(s)) {
 		case "y", "yes":
-			return true
+			return true, nil
 		case "n", "no":
-			return false
+			return false, nil
 		default:
 		}
 	}

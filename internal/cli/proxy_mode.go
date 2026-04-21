@@ -51,7 +51,10 @@ func ensureProxyPreferenceWithReader(
 		_, _ = fmt.Fprintln(out, "If you don't need a proxy, choose \"no\" to connect directly.")
 	}
 	defaultYes := profileRef != ""
-	enabled := promptYesNo(reader, "Use SSH proxy for Claude?", defaultYes)
+	enabled, err := promptYesNo(reader, "Use SSH proxy for Claude?", defaultYes)
+	if err != nil {
+		return proxyPreferenceResult{Cfg: cfg}, err
+	}
 	cfg.ProxyEnabled = &enabled
 	return proxyPreferenceResult{Enabled: enabled, Cfg: cfg, NeedsPersist: true}, nil
 }
