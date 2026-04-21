@@ -2,7 +2,9 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 
 	"github.com/spf13/cobra"
 )
@@ -20,10 +22,27 @@ type rootOptions struct {
 
 func Execute() int {
 	cmd := newRootCmd()
-	if err := cmd.Execute(); err != nil {
-		return 1
+	return mapExecuteError(cmd.Execute(), os.Stderr)
+}
+
+// mapExecuteError converts a cobra Execute() error into a process exit code.
+//
+// Unwrapped *exec.ExitError means the child process exited with a non-zero
+// code but clp itself didn't fail — pass the code through silently, don't
+// print our own error line. This uses a type assertion (not errors.As) on
+// purpose: clp's own failures that wrap an *exec.ExitError with %w must
+// still print an "Error: ..." line and exit 1.
+func mapExecuteError(err error, stderr io.Writer) int {
+	if err == nil {
+		return 0
 	}
-	return 0
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		if code := exitErr.ExitCode(); code >= 0 {
+			return code
+		}
+	}
+	fmt.Fprintln(stderr, "Error:", err.Error())
+	return 1
 }
 
 func newRootCmd() *cobra.Command {
@@ -32,7 +51,7 @@ func newRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "claude-proxy [profile]",
 		Short:         "Browse Claude Code history in a terminal UI",
-		SilenceErrors: false,
+		SilenceErrors: true,
 		SilenceUsage:  true,
 		Version:       buildVersion(),
 		RunE: func(cmd *cobra.Command, args []string) error {
