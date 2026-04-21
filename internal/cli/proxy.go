@@ -89,6 +89,9 @@ func newProxyStartCmd(root *rootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := stack.ValidateProfile(profile); err != nil {
+				return err
+			}
 
 			instanceID, err := newProxyInstanceID()
 			if err != nil {
@@ -380,16 +383,19 @@ func newProxyPruneCmd(root *rootOptions) *cobra.Command {
 			hc := manager.HealthClient{Timeout: 500 * time.Millisecond}
 			removed := 0
 
+			instancesDir := filepath.Join(filepath.Dir(store.Path()), "instances")
 			if err := store.Update(func(cfg *config.Config) error {
 				out := cfg.Instances[:0]
 				for _, inst := range cfg.Instances {
 					if inst.DaemonPID <= 0 || !proc.IsAlive(inst.DaemonPID) {
 						removed++
+						_ = os.Remove(filepath.Join(instancesDir, inst.ID+".log"))
 						continue
 					}
 					if inst.HTTPPort > 0 {
 						if err := hc.CheckHTTPProxy(inst.HTTPPort, inst.ID); err != nil {
 							removed++
+							_ = os.Remove(filepath.Join(instancesDir, inst.ID+".log"))
 							continue
 						}
 					}
