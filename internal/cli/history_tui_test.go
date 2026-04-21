@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -30,6 +31,10 @@ func TestRunHistoryTuiFailsWhenConfigDirReadOnly(t *testing.T) {
 	root := &rootOptions{configPath: filepath.Join(configDir, "config.json")}
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
+
+	prevRequireTTY := historyRequireTTYFn
+	historyRequireTTYFn = func() error { return nil }
+	t.Cleanup(func() { historyRequireTTYFn = prevRequireTTY })
 
 	if err := runHistoryTui(cmd, root, "", "", "", 0); err == nil {
 		t.Fatalf("expected error when config dir is read-only")
@@ -62,11 +67,14 @@ func TestRunHistoryTuiRunsNewSession(t *testing.T) {
 	prevSelect := selectSession
 	prevRunNew := runClaudeNewSessionFn
 	prevRun := runClaudeSessionFunc
+	prevRequireTTY := historyRequireTTYFn
 	t.Cleanup(func() {
 		selectSession = prevSelect
 		runClaudeNewSessionFn = prevRunNew
 		runClaudeSessionFunc = prevRun
+		historyRequireTTYFn = prevRequireTTY
 	})
+	historyRequireTTYFn = func() error { return nil }
 
 	calledNew := false
 	selectSession = func(ctx context.Context, opts tui.Options) (*tui.Selection, error) {
@@ -117,11 +125,14 @@ func TestRunHistoryTuiRunsSession(t *testing.T) {
 	prevSelect := selectSession
 	prevRunNew := runClaudeNewSessionFn
 	prevRun := runClaudeSessionFunc
+	prevRequireTTY := historyRequireTTYFn
 	t.Cleanup(func() {
 		selectSession = prevSelect
 		runClaudeNewSessionFn = prevRunNew
 		runClaudeSessionFunc = prevRun
+		historyRequireTTYFn = prevRequireTTY
 	})
+	historyRequireTTYFn = func() error { return nil }
 
 	called := false
 	selectSession = func(ctx context.Context, opts tui.Options) (*tui.Selection, error) {
@@ -166,10 +177,13 @@ func TestRunHistoryTuiHandlesUpdateRequest(t *testing.T) {
 
 	prevSelect := selectSession
 	prevUpdate := performUpdate
+	prevRequireTTY := historyRequireTTYFn
 	t.Cleanup(func() {
 		selectSession = prevSelect
 		performUpdate = prevUpdate
+		historyRequireTTYFn = prevRequireTTY
 	})
+	historyRequireTTYFn = func() error { return nil }
 
 	selectSession = func(ctx context.Context, opts tui.Options) (*tui.Selection, error) {
 		return nil, tui.UpdateRequested{}
@@ -198,7 +212,12 @@ func TestRunHistoryTuiHandlesProxyToggle(t *testing.T) {
 	}
 
 	prevSelect := selectSession
-	t.Cleanup(func() { selectSession = prevSelect })
+	prevRequireTTY := historyRequireTTYFn
+	t.Cleanup(func() {
+		selectSession = prevSelect
+		historyRequireTTYFn = prevRequireTTY
+	})
+	historyRequireTTYFn = func() error { return nil }
 
 	calls := 0
 	selectSession = func(ctx context.Context, opts tui.Options) (*tui.Selection, error) {
@@ -213,5 +232,31 @@ func TestRunHistoryTuiHandlesProxyToggle(t *testing.T) {
 	cmd.SetContext(context.Background())
 	if err := runHistoryTui(cmd, &rootOptions{configPath: store.Path()}, "", "", claudePath, 0); err != nil {
 		t.Fatalf("runHistoryTui error: %v", err)
+	}
+}
+
+func TestRunHistoryTuiRejectsNonTTY(t *testing.T) {
+	prevRequireTTY := historyRequireTTYFn
+	prevSelect := selectSession
+	t.Cleanup(func() {
+		historyRequireTTYFn = prevRequireTTY
+		selectSession = prevSelect
+	})
+
+	wantErr := errors.New("not a tty")
+	historyRequireTTYFn = func() error { return wantErr }
+	selectSession = func(ctx context.Context, opts tui.Options) (*tui.Selection, error) {
+		t.Fatalf("selectSession must not be called when TTY check fails")
+		return nil, nil
+	}
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	err := runHistoryTui(cmd, &rootOptions{}, "", "", "", 0)
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected %v, got %v", wantErr, err)
 	}
 }

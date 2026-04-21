@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/baaaaaaaka/claude_code_helper/internal/claudehistory"
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
@@ -22,7 +23,17 @@ var (
 	selectSession         = tui.SelectSession
 	runClaudeSessionFunc  = runClaudeSession
 	runClaudeNewSessionFn = runClaudeNewSession
+	historyRequireTTYFn   = defaultHistoryRequireTTY
 )
+
+func defaultHistoryRequireTTY() error {
+	stdin := int(os.Stdin.Fd())
+	stdout := int(os.Stdout.Fd())
+	if !term.IsTerminal(stdin) || !term.IsTerminal(stdout) {
+		return errors.New("clp tui requires an interactive terminal; use `clp history list` for non-interactive inspection")
+	}
+	return nil
+}
 
 const defaultRefreshInterval = 5 * time.Second
 
@@ -218,6 +229,9 @@ func newHistoryOpenCmd(root *rootOptions, claudeDir *string, claudePath *string,
 }
 
 func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, claudeDir string, claudePath string, refreshInterval time.Duration) error {
+	if err := historyRequireTTYFn(); err != nil {
+		return err
+	}
 	ctx := cmd.Context()
 	store, err := config.NewStore(root.configPath)
 	if err != nil {
