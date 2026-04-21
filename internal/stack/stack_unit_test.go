@@ -13,6 +13,27 @@ import (
 	"github.com/baaaaaaaka/claude_code_helper/internal/ssh"
 )
 
+func TestValidateProfile(t *testing.T) {
+	if err := ValidateProfile(config.Profile{Host: "h", Port: 22, User: "u"}); err != nil {
+		t.Fatalf("expected valid profile, got error: %v", err)
+	}
+	if err := ValidateProfile(config.Profile{Host: "", Port: 22, User: "u"}); err == nil {
+		t.Fatalf("expected missing host error")
+	} else if err.Error() != "profile host is required" {
+		t.Fatalf("unexpected missing host error: %v", err)
+	}
+	if err := ValidateProfile(config.Profile{Host: "h", Port: 0, User: "u"}); err == nil {
+		t.Fatalf("expected missing port error")
+	} else if err.Error() != "profile port is required" {
+		t.Fatalf("unexpected missing port error: %v", err)
+	}
+	if err := ValidateProfile(config.Profile{Host: "h", Port: 22, User: ""}); err == nil {
+		t.Fatalf("expected missing user error")
+	} else if err.Error() != "profile user is required" {
+		t.Fatalf("unexpected missing user error: %v", err)
+	}
+}
+
 func TestStartValidationErrors(t *testing.T) {
 	profile := config.Profile{Host: "", Port: 22, User: "u"}
 	if _, err := Start(profile, "id", Options{}); err == nil {

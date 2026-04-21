@@ -62,15 +62,24 @@ type Stack struct {
 	stopCh  chan struct{}
 }
 
+// ValidateProfile returns an error if the profile is missing required fields
+// for starting a proxy stack (host, port, user).
+func ValidateProfile(p config.Profile) error {
+	if p.Host == "" {
+		return errors.New("profile host is required")
+	}
+	if p.Port <= 0 {
+		return errors.New("profile port is required")
+	}
+	if p.User == "" {
+		return errors.New("profile user is required")
+	}
+	return nil
+}
+
 func Start(profile config.Profile, instanceID string, opts Options) (*Stack, error) {
-	if profile.Host == "" {
-		return nil, errors.New("profile host is required")
-	}
-	if profile.Port <= 0 {
-		return nil, errors.New("profile port is required")
-	}
-	if profile.User == "" {
-		return nil, errors.New("profile user is required")
+	if err := ValidateProfile(profile); err != nil {
+		return nil, err
 	}
 	if instanceID == "" {
 		return nil, errors.New("instance id is required")

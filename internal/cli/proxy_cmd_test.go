@@ -329,3 +329,92 @@ func TestProxyDaemonCmdRequiresInstanceID(t *testing.T) {
 		t.Fatalf("expected error for missing instance-id flag")
 	}
 }
+
+func TestProxyStartRejectsIncompleteProfile(t *testing.T) {
+	store := newTempStore(t)
+	cfg := config.Config{
+		Version: config.CurrentVersion,
+		Profiles: []config.Profile{{
+			ID:   "p1",
+			Name: "profile",
+			// Host intentionally empty.
+			Port: 22,
+			User: "user",
+		}},
+	}
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	cmd := newProxyStartCmd(&rootOptions{configPath: store.Path()})
+	cmd.SetArgs([]string{"p1"})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected error for incomplete profile")
+	}
+	if !strings.Contains(err.Error(), "host is required") {
+		t.Fatalf("expected host is required error, got: %v", err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if len(loaded.Instances) != 0 {
+		t.Fatalf("expected no instances to be recorded, got %#v", loaded.Instances)
+	}
+
+	instancesDir := filepath.Join(filepath.Dir(store.Path()), "instances")
+	if entries, err := os.ReadDir(instancesDir); err == nil && len(entries) > 0 {
+		t.Fatalf("expected no files in %s, got %d entries", instancesDir, len(entries))
+	}
+}
+
+func TestProxyPruneRemovesDeadLogs(t *testing.T) {
+	store := newTempStore(t)
+	cfg := config.Config{
+		Version: config.CurrentVersion,
+		Instances: []config.Instance{{
+			ID:        "inst-dead",
+			ProfileID: "p1",
+			DaemonPID: 0,
+		}},
+	}
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	instancesDir := filepath.Join(filepath.Dir(store.Path()), "instances")
+	if err := os.MkdirAll(instancesDir, 0o700); err != nil {
+		t.Fatalf("mkdir instances dir: %v", err)
+	}
+	logPath := filepath.Join(instancesDir, "inst-dead.log")
+	if err := os.WriteFile(logPath, []byte("failed to validate\n"), 0o600); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+
+	cmd := newProxyPruneCmd(&rootOptions{configPath: store.Path()})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if !strings.Contains(out.String(), "Pruned 1 instances") {
+		t.Fatalf("unexpected output: %s", out.String())
+	}
+
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("expected log %s removed, stat err: %v", logPath, err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if len(loaded.Instances) != 0 {
+		t.Fatalf("expected instances to be pruned, got %#v", loaded.Instances)
+	}
+}
