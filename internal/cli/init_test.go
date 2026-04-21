@@ -65,19 +65,51 @@ func TestPromptRequiredReturnsEOFOnEmptyStdin(t *testing.T) {
 	}
 }
 
-func TestPromptYesNoReturnsEOFOnEmptyStdin(t *testing.T) {
+// EOF on an empty stdin must NOT fail promptYesNo — prompts with a default
+// (here "n" or "y") should behave like the user accepted it. This keeps
+// non-interactive callers such as `printf ” | clp run ...` on the default
+// code path via ensureProxyPreference. Only prompts without a default
+// (promptRequired) should surface io.EOF to break their retry loop.
+func TestPromptYesNoAcceptsDefaultOnEOF(t *testing.T) {
 	r := bufio.NewReader(strings.NewReader(""))
-	_, err := promptYesNo(r, "x", false)
-	if err != io.EOF {
-		t.Fatalf("expected io.EOF, got %v", err)
+	got, err := promptYesNo(r, "x", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != false {
+		t.Fatalf("expected default false, got %v", got)
+	}
+
+	r = bufio.NewReader(strings.NewReader(""))
+	got, err = promptYesNo(r, "x", true)
+	if err != nil {
+		t.Fatalf("unexpected error for default=true: %v", err)
+	}
+	if got != true {
+		t.Fatalf("expected default true, got %v", got)
 	}
 }
 
-func TestPromptIntReturnsEOFOnEmptyStdin(t *testing.T) {
+func TestPromptIntAcceptsDefaultOnEOF(t *testing.T) {
 	r := bufio.NewReader(strings.NewReader(""))
-	_, err := promptInt(r, "x", 22)
-	if err != io.EOF {
-		t.Fatalf("expected io.EOF, got %v", err)
+	got, err := promptInt(r, "x", 22)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 22 {
+		t.Fatalf("expected default 22, got %d", got)
+	}
+}
+
+// prompt() with a non-empty default on EOF+empty returns the default.
+func TestPromptReturnsDefaultOnEOFWhenDefSet(t *testing.T) {
+	r := bufio.NewReader(strings.NewReader(""))
+	got, err := prompt(r, "x", "fallback")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "fallback" {
+		t.Fatalf("expected default fallback, got %q", got)
 	}
 }
 

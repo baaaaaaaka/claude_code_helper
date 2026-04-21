@@ -264,6 +264,25 @@ func TestProxyPreferenceProfilesExistDoesNotPersist(t *testing.T) {
 	}
 }
 
+// Regression: `printf ” | clp run ...` used to succeed by letting the
+// "Use SSH proxy?" prompt fall back to its default "no" answer. After the
+// EOF propagation fix, closed stdin should still reach the default instead
+// of surfacing io.EOF to the caller, or scripted non-interactive runs break.
+func TestEnsureProxyPreferenceFallsBackToDefaultOnEOF(t *testing.T) {
+	store := newTempStore(t)
+
+	pref, err := ensureProxyPreferenceWithReader(context.Background(), store, "", io.Discard, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatalf("expected EOF to accept default, got error: %v", err)
+	}
+	if pref.Enabled {
+		t.Fatalf("expected default (no proxy) on EOF, got enabled=true")
+	}
+	if !pref.NeedsPersist {
+		t.Fatalf("expected NeedsPersist=true for a fresh preference")
+	}
+}
+
 func newTempStore(t *testing.T) *config.Store {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.json")

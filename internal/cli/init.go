@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -142,12 +143,18 @@ func prompt(r *bufio.Reader, label, def string) (string, error) {
 	s, err := r.ReadString('\n')
 	trimmed := strings.TrimSpace(s)
 	if err != nil {
-		if err == io.EOF {
-			// If the user managed to type a non-empty partial line before
-			// EOF (no trailing newline), honor that input. Otherwise, surface
-			// EOF so callers can break out of retry loops.
+		if errors.Is(err, io.EOF) {
+			// Honor a non-empty partial line before EOF (no trailing newline).
 			if trimmed != "" {
 				return trimmed, nil
+			}
+			// EOF with empty buffer: if we have a default, treat it like the
+			// user pressed enter — this keeps non-interactive callers (e.g.
+			// `printf '' | clp run ...`) on the default path. Only surface
+			// io.EOF when no default is available, so required prompts break
+			// out of their retry loop instead of spinning forever.
+			if def != "" {
+				return def, nil
 			}
 			return "", io.EOF
 		}

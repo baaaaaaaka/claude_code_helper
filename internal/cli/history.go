@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 
 	"github.com/baaaaaaaka/claude_code_helper/internal/claudehistory"
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
@@ -26,15 +25,6 @@ var (
 	discoverHistoryFunc   = claudehistory.DiscoverProjectsContext
 	historyRequireTTYFn   = defaultHistoryRequireTTY
 )
-
-func defaultHistoryRequireTTY() error {
-	stdin := int(os.Stdin.Fd())
-	stdout := int(os.Stdout.Fd())
-	if !term.IsTerminal(stdin) || !term.IsTerminal(stdout) {
-		return errors.New("clp tui requires an interactive terminal; use `clp history list` for non-interactive inspection")
-	}
-	return nil
-}
 
 const defaultRefreshInterval = 5 * time.Second
 
