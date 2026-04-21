@@ -112,6 +112,21 @@ jobs:
         run: |
           go test -coverprofile=coverage.out ./...
 
+      - name: go test -race (Linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Race detection is focused on the packages that actually do
+          # concurrent work (run supervision, proxy stack, instance manager)
+          # plus the subprocess-fork tests in cmd/claude-proxy. Running it
+          # across the full matrix would double CI time without adding signal.
+          go test -race -count=1 \
+            ./cmd/claude-proxy/... \
+            ./internal/cli/... \
+            ./internal/stack/... \
+            ./internal/manager/...
+
       - name: Run-json/IO regression suite
         shell: bash
         run: |
@@ -148,6 +163,17 @@ jobs:
           go test ./internal/cli \
             -run '^(TestFindManagedClaudePath(FallsBackToUnixMigratedLocalInstall|FallsBackToUserHomeDirWhenHomeEnvMissing|IncludesRecoveredLauncher(|WithoutHomeEnv))|TestFindInstalledClaudePathPrefersLookPathWhenManagedLocationMissing|TestEnsureClaudeInstalled(IgnoresPathClaudeAndUsesManagedInstall|ReusesRecoveredLauncher|ExportsGitBashBeforeReturningManagedWindowsInstall|ReturnsExportGitBashError)|TestBuildClaudeResumeCommand(UsesManagedClaudeWhenUnset|UsesManagedClaudeViaUserHomeFallbackWhenEnvMissing|UsesRecoveredLauncherWhenHomeEnvMissing))$' \
             -count=1
+
+      - name: Windows cross-compile smoke (Linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Catches Windows-only source files (e.g. internal/cli/history_tty_windows.go,
+          # run_tty_capture_windows.go) breaking independently of the Windows
+          # runner. Cheap on Linux; the Windows matrix cell remains the
+          # authoritative test runner.
+          GOOS=windows GOARCH=amd64 go build ./...
 
       - name: Proc cross-platform compile smoke (Linux only)
         if: runner.os == 'Linux'
