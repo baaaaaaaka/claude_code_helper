@@ -12,7 +12,7 @@ This project is designed to ship as a **single binary** per OS/arch.
 
 ### 1) **Install**
 
-Linux / macOS:
+macOS / Linux amd64:
 
 ```bash
 sh -c 'url="https://raw.githubusercontent.com/baaaaaaaka/claude_code_helper/main/install.sh"; if command -v curl >/dev/null 2>&1; then curl -fsSL "$url" | sh; elif command -v wget >/dev/null 2>&1; then wget -qO- "$url" | sh; else echo "need curl or wget" >&2; exit 1; fi'
@@ -39,10 +39,12 @@ claude-proxy
 clp
 ```
 
-On first run you'll be asked whether to use the SSH proxy. Choose **no** for
-direct connections. Choose **yes** to enter SSH host/port/user and let the
-tool create a dedicated key if needed. You can toggle proxy mode later with
-`Ctrl+P` in the TUI.
+If no proxy preference has been saved yet and no SSH profiles exist, you'll be
+asked whether to use the SSH proxy. Choose **no** for direct connections.
+Choose **yes** to enter SSH host/port/user and let the tool create a dedicated
+key if needed. If profiles already exist but no preference has been saved yet,
+`claude-proxy` currently defaults to proxy mode. You can toggle proxy mode
+later with `Ctrl+P` in the TUI.
 
 ### 3) Next steps
 
@@ -82,8 +84,8 @@ bypass-permissions launch mode automatically when the spec does not already
 provide explicit Claude permission flags, and will fall back to normal mode
 without changing the saved YOLO setting. By default, only the stdio paths
 declared in the spec are redirected; omitted streams keep their normal stdio
-behavior. Set `"headless": true` to make omitted stdio streams use `/dev/null`
-instead and suppress helper status output from the terminal. Set
+behavior. Set `"headless": true` to make omitted stdio streams use the OS null
+device instead and suppress helper status output from the terminal. Set
 `"preserveRetryOutputs": true` to archive outputs from failed attempts before a
 retry as `*.attempt-N`, while leaving the final `stdoutPath` and `stderrPath`
 for the last attempt. If proxy preference has not been configured yet,
@@ -105,8 +107,9 @@ Config is stored under your OS user config directory (Linux typically
 - Direct mode does not require SSH.
 - SSH proxy mode requires `ssh` (OpenSSH client).
 - `ssh-keygen` is optional (only needed when proxy mode creates a dedicated key).
-- On Linux, `patchelf` is optional and only needed if Claude must be patched for
-  glibc compatibility.
+- On Linux, `patchelf` is optional. The glibc compat flow prefers a
+  `patchelf`-based mirror when available, and falls back to a wrapper launch
+  path when needed.
 - On Linux, if the glibc compat runtime must be auto-downloaded and extracted
   (`--exe-patch-glibc-root` unset and no cached runtime yet), `tar` is also
   required.
@@ -123,7 +126,7 @@ claude-proxy proxy doctor
 
 ## Install (no root)
 
-### Linux / macOS (one-liner, auto-detects curl/wget)
+### macOS / Linux amd64 (one-liner, auto-detects curl/wget)
 
 ```bash
 sh -c 'url="https://raw.githubusercontent.com/baaaaaaaka/claude_code_helper/main/install.sh"; if command -v curl >/dev/null 2>&1; then curl -fsSL "$url" | sh; elif command -v wget >/dev/null 2>&1; then wget -qO- "$url" | sh; else echo "need curl or wget" >&2; exit 1; fi'
@@ -190,13 +193,16 @@ patch test results (linux/mac/windows + linux distros).
   private Git for Windows runtime and retry automatically.
 - When launching `claude` with `--permission-mode bypassPermissions`,
   `claude-proxy` enables its built-in Claude Code byte patches by default.
-  Without that argument, those Claude-specific byte patches are disabled and
-  any previously-applied Claude patch is restored before launch.
-- Built-in Claude patches target `policySettings` and
-  `--permission-mode bypassPermissions` guards.
+- In TUI `YOLO rules` mode, `claude-proxy` can also keep those built-in Claude
+  patches active without passing `--permission-mode bypassPermissions`.
+- Outside those modes, Claude-specific byte patches are disabled and any
+  previously applied Claude patch is restored before launch.
+- Built-in Claude patches currently cover the `policySettings` getter,
+  bypass-permissions guards, the root bypass guard, and remote settings checks.
 - On Linux, if `claude` fails with missing GLIBC symbols,
-  `claude-proxy` can apply a `patchelf`-based glibc compatibility patch.
-  If `--exe-patch-glibc-root` is not set, the compat runtime is auto-downloaded
+  `claude-proxy` can prepare a glibc compatibility launch path, preferring a
+  `patchelf`-based mirror and falling back to a wrapper when needed. If
+  `--exe-patch-glibc-root` is not set, the compat runtime is auto-downloaded
   from GitHub release assets on supported linux/amd64 builds.
 - The npm fallback install is treated as a wrapper launch path rather than a
   native Claude binary, so built-in Claude byte patches stay disabled for that
@@ -226,14 +232,16 @@ claude-proxy history tui
 ```
 
 This opens the TUI. Press Enter to open the selected session in Claude Code
-using the current proxy mode (direct or SSH proxy). Toggle proxy mode with
-`Ctrl+P`; if proxy is enabled but not configured, you will be prompted to
-enter SSH host/port/user. If no history exists yet, Enter starts a new
-session in the current directory.
+using the current proxy mode (direct or SSH proxy). If a subagent row is
+selected, Enter resumes its parent session. Toggle proxy mode with `Ctrl+P`;
+if proxy is enabled but not configured, you will be prompted to enter SSH
+host/port/user. If no history exists yet, Enter starts a new session in the
+current directory.
 
-The Projects column always includes your current working directory and marks
-it as `[current]`. The Sessions column always includes a `(New Agent)` entry,
-and sessions with subagents can be expanded or collapsed with `Ctrl+O`.
+When the current working directory can be determined, the Projects column
+includes it and marks it as `[current]`. The Sessions column always includes a
+`(New Agent)` entry, and sessions with subagents can be expanded or collapsed
+with `Ctrl+O`.
 
 If you have multiple proxy profiles:
 
@@ -258,7 +266,7 @@ Controls:
 - Navigation: Up/Down, PageUp/PageDown (also `j`/`k`)
 - Switch pane: Tab / Left / Right (also `h`/`l`)
 - Search: `/` then type, Enter apply, Esc cancel (`n`/`N` next/prev in preview)
-- Open: Enter (opens in Claude Code and sets cwd)
+- Open: Enter (opens in Claude Code and sets cwd; subagent rows resume the parent session)
 - New session: `(New Agent)` entry or `Ctrl+N` (in selected project or current dir)
 - Subagents: `Ctrl+O` expand/collapse selected session
 - Proxy mode: `Ctrl+P` toggle (status shows `Proxy mode (Ctrl+P): on/off`)
@@ -269,7 +277,7 @@ Controls:
 
 If the update check fails, the status bar shows the error.
 
-List sessions as JSON:
+List discovered projects and sessions as JSON (`{"projects":[...]}`):
 
 ```bash
 claude-proxy history list --pretty
@@ -319,14 +327,17 @@ Upgrade or install Claude Code explicitly:
 
 ```bash
 claude-proxy upgrade-claude
-# or, if your saved config is using proxy mode
+# or choose a specific SSH profile when upgrade-claude is using proxy mode
 claude-proxy upgrade-claude --profile <profile>
 ```
 
 `upgrade-claude` expects `claude-proxy` to have already created its config
 file, for example via a first run of `claude-proxy` or `claude-proxy init`.
-If you previously chose direct mode, `--profile` is ignored until you
-re-enable proxy mode first (for example with `Ctrl+P` in the TUI).
+By default it follows the saved proxy preference. If no proxy preference has
+been saved yet but profiles already exist, it assumes proxy mode; when
+multiple profiles exist in that state, pass `--profile` to choose one. If you
+previously chose direct mode, `--profile` is ignored until you re-enable proxy
+mode first (for example with `Ctrl+P` in the TUI).
 
 ## Long-lived instances (optional)
 
