@@ -165,17 +165,26 @@ func TestClaudeInstallEL7RecoveryIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensureClaudeInstalled: %v\ninstaller output:\n%s", err, installLog.String())
 	}
-	if !strings.Contains(installLog.String(), "prepared a claude-proxy-managed launcher") {
-		t.Fatalf("expected EL7 recovery log, got:\n%s", installLog.String())
-	}
+	installOutput := installLog.String()
 
 	hostRoot, _, err := resolveClaudeProxyHostRoot()
 	if err != nil {
 		t.Fatalf("resolveClaudeProxyHostRoot: %v", err)
 	}
-	wantLauncher := filepath.Join(hostRoot, "install-recovery", "claude")
-	if samePath(path, wantLauncher) == false {
-		t.Fatalf("expected recovered launcher %q, got %q", wantLauncher, path)
+	wantRecoveryLauncher := filepath.Join(hostRoot, "install-recovery", "claude")
+	if loggedLocation := parseInstalledClaudeLocation(installOutput); loggedLocation != "" && !samePath(path, loggedLocation) {
+		t.Fatalf("expected installed launcher %q, got %q\ninstaller output:\n%s", loggedLocation, path, installOutput)
+	}
+	switch {
+	case strings.Contains(installOutput, "prepared a claude-proxy-managed launcher"):
+		if !samePath(path, wantRecoveryLauncher) {
+			t.Fatalf("expected recovered launcher %q, got %q\ninstaller output:\n%s", wantRecoveryLauncher, path, installOutput)
+		}
+	case strings.Contains(installOutput, "Claude Code successfully installed!"):
+		// Upstream latest can now install natively on CentOS 7. This smoke only requires
+		// a usable launcher that the later glibc-compat probe can exercise.
+	default:
+		t.Fatalf("expected native install success or EL7 recovery log, got:\n%s", installOutput)
 	}
 
 	sourcePath, err := filepath.EvalSymlinks(path)
