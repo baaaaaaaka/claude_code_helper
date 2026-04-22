@@ -172,8 +172,14 @@ func TestClaudeInstallEL7RecoveryIntegration(t *testing.T) {
 		t.Fatalf("resolveClaudeProxyHostRoot: %v", err)
 	}
 	wantRecoveryLauncher := filepath.Join(hostRoot, "install-recovery", "claude")
-	if loggedLocation := parseInstalledClaudeLocation(installOutput); loggedLocation != "" && !samePath(path, loggedLocation) {
-		t.Fatalf("expected installed launcher %q, got %q\ninstaller output:\n%s", loggedLocation, path, installOutput)
+	if parseInstalledClaudeLocation(installOutput) != "" {
+		wantManagedPath, ok := findManagedClaudePath("linux", installOutput, os.Getenv)
+		if !ok {
+			t.Fatalf("expected managed launcher candidate from installer output, got none\ninstaller output:\n%s", installOutput)
+		}
+		if !samePath(path, wantManagedPath) {
+			t.Fatalf("expected installed launcher %q, got %q\ninstaller output:\n%s", wantManagedPath, path, installOutput)
+		}
 	}
 	switch {
 	case strings.Contains(installOutput, "prepared a claude-proxy-managed launcher"):
