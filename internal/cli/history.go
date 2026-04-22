@@ -72,8 +72,6 @@ func newHistoryCmd(root *rootOptions) *cobra.Command {
 		Short: "Inspect Claude Code history",
 	}
 	cmd.PersistentFlags().StringVar(&claudeDir, "claude-dir", "", "Override Claude Code data dir (default: ~/.claude)")
-	cmd.PersistentFlags().StringVar(&claudePath, "claude-path", "", "Override Claude CLI path (default: use claude-proxy-managed Claude Code)")
-	cmd.PersistentFlags().StringVar(&profileRef, "profile", "", "Proxy profile id or name")
 
 	cmd.AddCommand(
 		newHistoryTuiCmd(root, &claudeDir, &claudePath, &profileRef),
@@ -94,6 +92,8 @@ func newHistoryTuiCmd(root *rootOptions, claudeDir *string, claudePath *string, 
 			return runHistoryTui(cmd, root, *profileRef, *claudeDir, *claudePath, refreshInterval)
 		},
 	}
+	cmd.Flags().StringVar(claudePath, "claude-path", "", explicitClaudePathFlagHelp)
+	cmd.Flags().StringVar(profileRef, "profile", "", "Proxy profile id or name")
 	cmd.Flags().DurationVar(&refreshInterval, "refresh-interval", defaultRefreshInterval, "Auto-refresh interval (0 to disable)")
 	return cmd
 }
@@ -229,6 +229,8 @@ func newHistoryOpenCmd(root *rootOptions, claudeDir *string, claudePath *string,
 			)
 		},
 	}
+	cmd.Flags().StringVar(claudePath, "claude-path", "", explicitClaudePathFlagHelp)
+	cmd.Flags().StringVar(profileRef, "profile", "", "Proxy profile id or name")
 	return cmd
 }
 

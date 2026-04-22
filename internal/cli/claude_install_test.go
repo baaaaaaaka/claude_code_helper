@@ -102,6 +102,25 @@ func TestResolveInstallerProxyRequiresProfile(t *testing.T) {
 	}
 }
 
+func TestEnsureClaudeInstalledWarnsWhenExplicitPathSkipsManagedRecovery(t *testing.T) {
+	claudePath := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claudePath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write explicit claude path: %v", err)
+	}
+
+	var out bytes.Buffer
+	got, err := ensureClaudeInstalled(context.Background(), claudePath, &out, installProxyOptions{})
+	if err != nil {
+		t.Fatalf("ensureClaudeInstalled error: %v", err)
+	}
+	if got != claudePath {
+		t.Fatalf("expected explicit path %q, got %q", claudePath, got)
+	}
+	if !strings.Contains(out.String(), "skipping claude-proxy-managed install/recovery") {
+		t.Fatalf("expected explicit-path compatibility warning, got:\n%s", out.String())
+	}
+}
+
 func TestRunClaudeInstallerUsesProxyEnv(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skip shell script test on windows")
@@ -669,6 +688,206 @@ func TestFindManagedClaudePathSkipsNPMWrapperWhenPinnedNodeTargetMissing(t *test
 	}
 }
 
+func TestFindUsableManagedClaudePathOldKernelMatrix(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("old-kernel launcher selection only applies on linux")
+	}
+	withClaudeInstallGOOS(t, "linux")
+
+	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
+	prevGlibcPatch := applyClaudeGlibcCompatPatchFn
+	t.Cleanup(func() {
+		readLinuxKernelReleaseFn = prevReadKernelReleaseFn
+		applyClaudeGlibcCompatPatchFn = prevGlibcPatch
+	})
+
+	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
+
+	tests := []struct {
+		name                 string
+		createLocation       bool
+		locationBroken       bool
+		createNative         bool
+		nativeBroken         bool
+		createRecovery       bool
+		recoveryBroken       bool
+		recoveryGlibcBroken  bool
+		createLegacyWrapper  bool
+		expectPathKind       string
+		expectCompatAttempts int
+		patchOpts            exePatchOptions
+	}{
+		{
+			name:                "usable location wins",
+			createLocation:      true,
+			createNative:        true,
+			createRecovery:      true,
+			createLegacyWrapper: true,
+			expectPathKind:      "location",
+			patchOpts:           defaultLauncherProbePatchOptions(),
+		},
+		{
+			name:                "broken location falls through to native",
+			createLocation:      true,
+			locationBroken:      true,
+			createNative:        true,
+			createRecovery:      true,
+			createLegacyWrapper: true,
+			expectPathKind:      "native",
+			patchOpts:           defaultLauncherProbePatchOptions(),
+		},
+		{
+			name:                 "broken native and recovery via glibc compat beats legacy",
+			createNative:         true,
+			nativeBroken:         true,
+			createRecovery:       true,
+			recoveryGlibcBroken:  true,
+			createLegacyWrapper:  true,
+			expectPathKind:       "recovery",
+			expectCompatAttempts: 1,
+			patchOpts:            defaultLauncherProbePatchOptions(),
+		},
+		{
+			name:                "broken native and broken recovery fall through to legacy",
+			createNative:        true,
+			nativeBroken:        true,
+			createRecovery:      true,
+			recoveryBroken:      true,
+			createLegacyWrapper: true,
+			expectPathKind:      "legacy",
+			patchOpts:           defaultLauncherProbePatchOptions(),
+		},
+		{
+			name:                "glibc compat disabled falls through to legacy",
+			createNative:        true,
+			nativeBroken:        true,
+			createRecovery:      true,
+			recoveryGlibcBroken: true,
+			createLegacyWrapper: true,
+			expectPathKind:      "legacy",
+			patchOpts: exePatchOptions{
+				enabledFlag:    true,
+				policySettings: true,
+				glibcCompat:    false,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			cacheRoot := filepath.Join(t.TempDir(), "cache")
+			hostID := "matrix-host"
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			t.Setenv("XDG_CACHE_HOME", cacheRoot)
+			t.Setenv(claudeProxyHostIDEnv, hostID)
+
+			locationPath := filepath.Join(home, "custom", "claude")
+			nativePath := filepath.Join(home, ".local", "bin", "claude")
+			recoveryPath := filepath.Join(cacheRoot, "claude-proxy", "hosts", hostID, "install-recovery", "claude")
+			compatPath := filepath.Join(t.TempDir(), "compat", "claude")
+
+			writeScript := func(path string, body string) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatalf("mkdir %s: %v", path, err)
+				}
+				if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+					t.Fatalf("write %s: %v", path, err)
+				}
+			}
+			versionScript := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'Claude Code 2.1.112'\n  exit 0\nfi\nexit 0\n"
+			brokenScript := "#!/bin/sh\necho 'broken launcher' >&2\nexit 1\n"
+			glibcScript := "#!/bin/sh\necho \"/lib64/libc.so.6: version \\`GLIBC_2.25' not found\" >&2\nexit 1\n"
+			if tt.createLocation {
+				if tt.locationBroken {
+					writeScript(locationPath, brokenScript)
+				} else {
+					writeScript(locationPath, versionScript)
+				}
+			}
+			if tt.createNative {
+				if tt.nativeBroken {
+					writeScript(nativePath, brokenScript)
+				} else {
+					writeScript(nativePath, versionScript)
+				}
+			}
+			if tt.createRecovery {
+				switch {
+				case tt.recoveryGlibcBroken:
+					writeScript(recoveryPath, glibcScript)
+				case tt.recoveryBroken:
+					writeScript(recoveryPath, brokenScript)
+				default:
+					writeScript(recoveryPath, versionScript)
+				}
+			}
+
+			layout, ok := defaultManagedNPMClaudeLayout("linux", os.Getenv)
+			if !ok {
+				t.Fatalf("expected managed npm layout")
+			}
+			if tt.createLegacyWrapper {
+				nodeTarget := filepath.Join(t.TempDir(), "node-bin", "node")
+				writeManagedNPMClaudeFixture(t, layout, nodeTarget)
+			}
+
+			compatCalls := 0
+			applyClaudeGlibcCompatPatchFn = func(path string, opts exePatchOptions, log io.Writer, dryRun bool, outcome *patchOutcome) (*patchOutcome, bool, error) {
+				compatCalls++
+				if !config.PathsEqual(path, recoveryPath) {
+					t.Fatalf("expected glibc compat probe for %q, got %q", recoveryPath, path)
+				}
+				if err := os.MkdirAll(filepath.Dir(compatPath), 0o755); err != nil {
+					t.Fatalf("mkdir compat dir: %v", err)
+				}
+				if err := os.WriteFile(compatPath, []byte(versionScript), 0o700); err != nil {
+					t.Fatalf("write compat launcher: %v", err)
+				}
+				return &patchOutcome{
+					SourcePath:       path,
+					TargetPath:       compatPath,
+					LaunchArgsPrefix: []string{compatPath},
+					IsClaude:         true,
+				}, true, nil
+			}
+
+			var out bytes.Buffer
+			got, ok := findUsableManagedClaudePath(context.Background(), &out, "linux", "Location: "+locationPath+"\n", os.Getenv, tt.patchOpts)
+			if !ok {
+				t.Fatalf("expected usable managed launcher, got none\nlog:\n%s", out.String())
+			}
+
+			switch tt.expectPathKind {
+			case "location":
+				if !config.PathsEqual(got, locationPath) {
+					t.Fatalf("expected location path %q, got %q", locationPath, got)
+				}
+			case "recovery":
+				if !config.PathsEqual(got, recoveryPath) {
+					t.Fatalf("expected recovery path %q, got %q", recoveryPath, got)
+				}
+			case "native":
+				if !config.PathsEqual(got, nativePath) {
+					t.Fatalf("expected native path %q, got %q", nativePath, got)
+				}
+			case "legacy":
+				if !config.PathsEqual(got, layout.WrapperPath) {
+					t.Fatalf("expected legacy wrapper %q, got %q", layout.WrapperPath, got)
+				}
+			default:
+				t.Fatalf("unexpected expected path kind %q", tt.expectPathKind)
+			}
+
+			if compatCalls != tt.expectCompatAttempts {
+				t.Fatalf("expected %d glibc compat attempts, got %d", tt.expectCompatAttempts, compatCalls)
+			}
+		})
+	}
+}
+
 func TestFindInstalledClaudePathPrefersLookPathWhenManagedLocationMissing(t *testing.T) {
 	prevLookPath := claudeInstallLookPathFn
 	t.Cleanup(func() { claudeInstallLookPathFn = prevLookPath })
@@ -899,6 +1118,149 @@ func TestEnsureClaudeInstalledReinstallsBrokenNativeClaudeOnUnsupportedKernelWhe
 	}
 	if !strings.Contains(out.String(), "Existing managed Claude launcher") {
 		t.Fatalf("expected unusable native launcher log, got:\n%s", out.String())
+	}
+}
+
+func TestEnsureClaudeInstalledReusesManagedNPMFallbackWhenBrokenNativeStillPresentOnUnsupportedKernel(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("kernel-gated npm fallback only applies on linux")
+	}
+
+	prevInstaller := runClaudeInstallerWithEnvFn
+	t.Cleanup(func() { runClaudeInstallerWithEnvFn = prevInstaller })
+	withClaudeInstallGOOS(t, "linux")
+
+	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
+	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
+	t.Cleanup(func() { readLinuxKernelReleaseFn = prevReadKernelReleaseFn })
+
+	home := t.TempDir()
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	hostID := "test-host"
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv(claudeProxyHostIDEnv, hostID)
+
+	nativeClaude := filepath.Join(home, ".local", "bin", "claude")
+	if err := os.MkdirAll(filepath.Dir(nativeClaude), 0o755); err != nil {
+		t.Fatalf("mkdir native claude dir: %v", err)
+	}
+	if err := os.WriteFile(nativeClaude, []byte("#!/bin/sh\necho 'broken installed claude' >&2\nexit 1\n"), 0o700); err != nil {
+		t.Fatalf("write native claude: %v", err)
+	}
+
+	layout, ok := defaultManagedNPMClaudeLayout("linux", os.Getenv)
+	if !ok {
+		t.Fatalf("expected managed npm layout")
+	}
+	nodeTarget := filepath.Join(t.TempDir(), "node-bin", "node")
+	writeManagedNPMClaudeFixture(t, layout, nodeTarget)
+
+	installCalls := 0
+	runClaudeInstallerWithEnvFn = func(ctx context.Context, out io.Writer, opts installProxyOptions, extraEnv []string) error {
+		installCalls++
+		return nil
+	}
+
+	var out bytes.Buffer
+	got, err := ensureClaudeInstalled(context.Background(), "", &out, installProxyOptions{})
+	if err != nil {
+		t.Fatalf("ensureClaudeInstalled error: %v", err)
+	}
+	if got != layout.WrapperPath {
+		t.Fatalf("expected managed npm wrapper %q, got %q", layout.WrapperPath, got)
+	}
+	if installCalls != 0 {
+		t.Fatalf("expected installer to stay unused when usable npm wrapper already exists, got %d calls", installCalls)
+	}
+	if !strings.Contains(out.String(), "trying the next managed launcher") {
+		t.Fatalf("expected old launcher skip log, got:\n%s", out.String())
+	}
+}
+
+func TestEnsureClaudeInstalledReusesRecoveredLauncherWithGlibcCompatAfterBrokenNativeOnUnsupportedKernel(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("kernel-gated compat probing only applies on linux")
+	}
+
+	prevInstaller := runClaudeInstallerWithEnvFn
+	prevGlibcPatch := applyClaudeGlibcCompatPatchFn
+	t.Cleanup(func() {
+		runClaudeInstallerWithEnvFn = prevInstaller
+		applyClaudeGlibcCompatPatchFn = prevGlibcPatch
+	})
+	withClaudeInstallGOOS(t, "linux")
+
+	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
+	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("3.10.0-1160.el7.x86_64"), nil }
+	t.Cleanup(func() { readLinuxKernelReleaseFn = prevReadKernelReleaseFn })
+
+	home := t.TempDir()
+	cacheRoot := filepath.Join(t.TempDir(), "cache")
+	hostID := "test-host"
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv(claudeProxyHostIDEnv, hostID)
+
+	nativeClaude := filepath.Join(home, ".local", "bin", "claude")
+	if err := os.MkdirAll(filepath.Dir(nativeClaude), 0o755); err != nil {
+		t.Fatalf("mkdir native claude dir: %v", err)
+	}
+	if err := os.WriteFile(nativeClaude, []byte("#!/bin/sh\necho 'broken installed claude' >&2\nexit 1\n"), 0o700); err != nil {
+		t.Fatalf("write native claude: %v", err)
+	}
+
+	launcherPath := filepath.Join(cacheRoot, "claude-proxy", "hosts", hostID, "install-recovery", "claude")
+	if err := os.MkdirAll(filepath.Dir(launcherPath), 0o755); err != nil {
+		t.Fatalf("mkdir recovery launcher dir: %v", err)
+	}
+	if err := os.WriteFile(launcherPath, []byte("#!/bin/sh\necho \"/lib64/libc.so.6: version \\`GLIBC_2.25' not found\" >&2\nexit 1\n"), 0o700); err != nil {
+		t.Fatalf("write recovery launcher: %v", err)
+	}
+
+	compatPath := filepath.Join(t.TempDir(), "compat", "claude")
+	if err := os.MkdirAll(filepath.Dir(compatPath), 0o755); err != nil {
+		t.Fatalf("mkdir compat dir: %v", err)
+	}
+	if err := os.WriteFile(compatPath, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'Claude Code 2.1.112'\n  exit 0\nfi\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write compat launcher: %v", err)
+	}
+
+	compatCalls := 0
+	applyClaudeGlibcCompatPatchFn = func(path string, opts exePatchOptions, log io.Writer, dryRun bool, outcome *patchOutcome) (*patchOutcome, bool, error) {
+		compatCalls++
+		if !config.PathsEqual(path, launcherPath) {
+			t.Fatalf("expected compat probe for %q, got %q", launcherPath, path)
+		}
+		return &patchOutcome{
+			SourcePath:       path,
+			TargetPath:       compatPath,
+			LaunchArgsPrefix: []string{compatPath},
+			IsClaude:         true,
+		}, true, nil
+	}
+
+	installCalls := 0
+	runClaudeInstallerWithEnvFn = func(ctx context.Context, out io.Writer, opts installProxyOptions, extraEnv []string) error {
+		installCalls++
+		return nil
+	}
+
+	var out bytes.Buffer
+	got, err := ensureClaudeInstalled(context.Background(), "", &out, installProxyOptions{})
+	if err != nil {
+		t.Fatalf("ensureClaudeInstalled error: %v", err)
+	}
+	if got != launcherPath {
+		t.Fatalf("expected recovered launcher %q, got %q", launcherPath, got)
+	}
+	if compatCalls != 1 {
+		t.Fatalf("expected one glibc compat probe, got %d", compatCalls)
+	}
+	if installCalls != 0 {
+		t.Fatalf("expected installer to stay unused when recovered launcher can be reused, got %d calls", installCalls)
 	}
 }
 

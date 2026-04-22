@@ -105,7 +105,7 @@ func newRunJSONCmd(root *rootOptions) *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&claudeDir, "claude-dir", "", "Override Claude Code data dir (default: ~/.claude)")
-	cmd.Flags().StringVar(&claudePath, "claude-path", "", "Override Claude CLI path (default: use claude-proxy-managed Claude Code)")
+	cmd.Flags().StringVar(&claudePath, "claude-path", "", explicitClaudePathFlagHelp)
 	cmd.Flags().StringVar(&profileRef, "profile", "", "Proxy profile id or name")
 	return cmd
 }
@@ -316,9 +316,10 @@ func runClaudeJSONSpec(
 	}
 
 	claudePathResolved, err := ensureClaudeInstalled(ctx, claudePath, launcherLog, installProxyOptions{
-		UseProxy:  useProxy,
-		Profile:   profile,
-		Instances: instances,
+		UseProxy:           useProxy,
+		Profile:            profile,
+		Instances:          instances,
+		LauncherProbePatch: &root.exePatch,
 	})
 	if err != nil {
 		return err

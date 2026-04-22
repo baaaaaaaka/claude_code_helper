@@ -82,8 +82,8 @@ func TestClaudeInstallForcedOldKernelNativeIntegration(t *testing.T) {
 	}
 
 	path, installLog := installNativeClaudeWithForcedOldKernel(t)
-	if strings.Contains(strings.ToLower(installLog), "installing the npm distribution") {
-		t.Fatalf("expected forced old-kernel native integration not to fall back to npm, got:\n%s", installLog)
+	if strings.Contains(strings.ToLower(installLog), "legacy compatibility launcher") {
+		t.Fatalf("expected forced old-kernel native integration not to switch to the legacy compatibility launcher, got:\n%s", installLog)
 	}
 	if isManagedNPMClaudeLauncherPath(path, os.Getenv) {
 		t.Fatalf("expected native Claude launcher on forced old-kernel path, got managed npm wrapper %q", path)
@@ -97,8 +97,8 @@ func TestClaudeInstallForcedOldKernelNativeENOSYSIntegration(t *testing.T) {
 	}
 
 	path, installLog := installNativeClaudeWithForcedOldKernel(t)
-	if strings.Contains(strings.ToLower(installLog), "installing the npm distribution") {
-		t.Fatalf("expected forced old-kernel native integration not to fall back to npm, got:\n%s", installLog)
+	if strings.Contains(strings.ToLower(installLog), "legacy compatibility launcher") {
+		t.Fatalf("expected forced old-kernel native integration not to switch to the legacy compatibility launcher, got:\n%s", installLog)
 	}
 	if isManagedNPMClaudeLauncherPath(path, os.Getenv) {
 		t.Fatalf("expected native Claude launcher on forced old-kernel path, got managed npm wrapper %q", path)
@@ -243,6 +243,138 @@ func TestClaudeInstallNPMFallbackNodeWithoutNPMIntegration(t *testing.T) {
 	runClaudeInstallNPMFallbackIntegration(t, false)
 }
 
+func TestClaudeInstallReusesLegacyCompatibilityLauncherAfterBrokenNativeIntegration(t *testing.T) {
+	requireClaudeInstallIntegration(t, "CLAUDE_INSTALL_TEST_REUSE_LEGACY_LAUNCHER")
+	if runtime.GOOS != "linux" {
+		t.Skip("legacy launcher reuse integration only applies on linux")
+	}
+
+	homeDir := resolveClaudeInstallTestHome(t)
+	localBinDir, _ := configureClaudeInstallTestEnv(t, homeDir)
+	if err := os.MkdirAll(localBinDir, 0o755); err != nil {
+		t.Fatalf("mkdir local bin: %v", err)
+	}
+	applyInstallProxyEnv(t)
+	cacheRoot := filepath.Join(homeDir, ".cache")
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	hostID := strings.TrimSpace(os.Getenv("CLAUDE_INSTALL_TEST_HOST_ID"))
+	if hostID == "" {
+		hostID = "reuse-legacy-launcher-test"
+	}
+	t.Setenv("CLAUDE_PROXY_HOST_ID", hostID)
+	t.Setenv(overrideBunKernelCheckEnv, "")
+
+	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
+	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
+	t.Cleanup(func() { readLinuxKernelReleaseFn = prevReadKernelReleaseFn })
+
+	brokenNative := filepath.Join(localBinDir, "claude")
+	if err := os.WriteFile(brokenNative, []byte("#!/bin/sh\necho 'broken native claude' >&2\nexit 1\n"), 0o700); err != nil {
+		t.Fatalf("write broken native claude: %v", err)
+	}
+
+	layout, ok := defaultManagedNPMClaudeLayout("linux", os.Getenv)
+	if !ok {
+		t.Fatalf("expected managed npm layout")
+	}
+	writeManagedLegacyClaudeLauncherIntegrationFixture(t, layout, "2.1.112")
+
+	ctx, cancel := context.WithTimeout(context.Background(), claudeInstallIntegrationTimeout)
+	defer cancel()
+
+	var installLog bytes.Buffer
+	path, err := ensureClaudeInstalled(ctx, "", &installLog, installProxyOptions{})
+	if err != nil {
+		t.Fatalf("ensureClaudeInstalled: %v\ninstaller output:\n%s", err, installLog.String())
+	}
+	if !samePath(path, layout.WrapperPath) {
+		t.Fatalf("expected managed legacy launcher %q, got %q", layout.WrapperPath, path)
+	}
+	if strings.Contains(strings.ToLower(installLog.String()), "claude not found; installing") {
+		t.Fatalf("expected existing launcher reuse without installer, got:\n%s", installLog.String())
+	}
+	if !strings.Contains(installLog.String(), "trying the next managed launcher") {
+		t.Fatalf("expected broken native skip log, got:\n%s", installLog.String())
+	}
+
+	out, err := runClaudeProbe(path, "--version")
+	if err != nil {
+		t.Fatalf("claude --version via reused legacy launcher: %v\noutput: %s\ninstaller output:\n%s", err, out, installLog.String())
+	}
+	if got := extractVersion(out); got == "" {
+		t.Fatalf("failed to parse claude version from reused legacy launcher output %q", strings.TrimSpace(out))
+	}
+}
+
+func TestClaudeInstallReusesRecoveredLauncherAfterBrokenNativeIntegration(t *testing.T) {
+	requireClaudeInstallIntegration(t, "CLAUDE_INSTALL_TEST_REUSE_RECOVERY_LAUNCHER")
+	if runtime.GOOS != "linux" {
+		t.Skip("recovered launcher reuse integration only applies on linux")
+	}
+
+	homeDir := resolveClaudeInstallTestHome(t)
+	localBinDir, _ := configureClaudeInstallTestEnv(t, homeDir)
+	if err := os.MkdirAll(localBinDir, 0o755); err != nil {
+		t.Fatalf("mkdir local bin: %v", err)
+	}
+	applyInstallProxyEnv(t)
+	cacheRoot := filepath.Join(homeDir, ".cache")
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	hostID := strings.TrimSpace(os.Getenv("CLAUDE_INSTALL_TEST_HOST_ID"))
+	if hostID == "" {
+		hostID = "reuse-recovery-launcher-test"
+	}
+	t.Setenv("CLAUDE_PROXY_HOST_ID", hostID)
+	t.Setenv(overrideBunKernelCheckEnv, "")
+
+	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
+	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
+	t.Cleanup(func() { readLinuxKernelReleaseFn = prevReadKernelReleaseFn })
+
+	brokenNative := filepath.Join(localBinDir, "claude")
+	if err := os.WriteFile(brokenNative, []byte("#!/bin/sh\necho 'broken native claude' >&2\nexit 1\n"), 0o700); err != nil {
+		t.Fatalf("write broken native claude: %v", err)
+	}
+
+	recoveryLauncher := defaultRecoveredClaudeLauncherCandidate("linux", os.Getenv)
+	if strings.TrimSpace(recoveryLauncher) == "" {
+		t.Fatalf("expected recovered launcher candidate")
+	}
+	if err := os.MkdirAll(filepath.Dir(recoveryLauncher), 0o755); err != nil {
+		t.Fatalf("mkdir recovery launcher dir: %v", err)
+	}
+	recoveryScript := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'Claude Code 2.1.112'\n  exit 0\nfi\nexit 0\n"
+	if err := os.WriteFile(recoveryLauncher, []byte(recoveryScript), 0o700); err != nil {
+		t.Fatalf("write recovery launcher: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), claudeInstallIntegrationTimeout)
+	defer cancel()
+
+	var installLog bytes.Buffer
+	path, err := ensureClaudeInstalled(ctx, "", &installLog, installProxyOptions{})
+	if err != nil {
+		t.Fatalf("ensureClaudeInstalled: %v\ninstaller output:\n%s", err, installLog.String())
+	}
+	if !samePath(path, recoveryLauncher) {
+		t.Fatalf("expected recovered launcher %q, got %q", recoveryLauncher, path)
+	}
+	if strings.Contains(strings.ToLower(installLog.String()), "claude not found; installing") {
+		t.Fatalf("expected existing launcher reuse without installer, got:\n%s", installLog.String())
+	}
+	if !strings.Contains(installLog.String(), "trying the next managed launcher") {
+		t.Fatalf("expected broken native skip log, got:\n%s", installLog.String())
+	}
+
+	out, err := runClaudeProbe(path, "--version")
+	if err != nil {
+		t.Fatalf("claude --version via reused recovery launcher: %v\noutput: %s\ninstaller output:\n%s", err, out, installLog.String())
+	}
+	if got := extractVersion(out); got == "" {
+		t.Fatalf("failed to parse claude version from reused recovery launcher output %q", strings.TrimSpace(out))
+	}
+}
+
 func runClaudeInstallNPMFallbackIntegration(t *testing.T, requireSystemNode bool) {
 	if runtime.GOOS != "linux" {
 		t.Skip("npm fallback integration only applies on linux")
@@ -365,8 +497,8 @@ func runClaudeInstallNPMFallbackIntegration(t *testing.T, requireSystemNode bool
 			t.Fatalf("expected missing npm log in node-without-npm integration output, got:\n%s", installLog.String())
 		}
 	}
-	if !strings.Contains(installLog.String(), "installing the npm distribution") {
-		t.Fatalf("expected npm fallback log, got:\n%s", installLog.String())
+	if !strings.Contains(installLog.String(), "legacy compatibility launcher") {
+		t.Fatalf("expected legacy compatibility launcher log, got:\n%s", installLog.String())
 	}
 }
 
@@ -655,6 +787,34 @@ func applyInstallProxyEnv(t *testing.T) {
 	)
 	t.Setenv("NO_PROXY", mergedNoProxy)
 	t.Setenv("no_proxy", mergedNoProxy)
+}
+
+func writeManagedLegacyClaudeLauncherIntegrationFixture(t *testing.T, layout managedNPMClaudeLayout, version string) {
+	t.Helper()
+
+	nodeTarget := filepath.Join(layout.RootDir, "integration-node", "node")
+	if err := os.MkdirAll(filepath.Dir(nodeTarget), 0o755); err != nil {
+		t.Fatalf("mkdir node target dir: %v", err)
+	}
+	nodeScript := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'v18.20.8'\n  exit 0\nfi\nif [ \"$2\" = \"--version\" ]; then\n  echo 'Claude Code " + version + "'\n  exit 0\nfi\nexit 0\n"
+	if err := os.WriteFile(nodeTarget, []byte(nodeScript), 0o700); err != nil {
+		t.Fatalf("write node target: %v", err)
+	}
+	if err := os.MkdirAll(layout.LauncherDir, 0o755); err != nil {
+		t.Fatalf("mkdir launcher dir: %v", err)
+	}
+	if err := writeManagedNPMExecWrapper(layout.NodePath, []string{nodeTarget}); err != nil {
+		t.Fatalf("write managed npm node launcher: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.CLIPath), 0o755); err != nil {
+		t.Fatalf("mkdir CLI dir: %v", err)
+	}
+	if err := os.WriteFile(layout.CLIPath, []byte("#!/usr/bin/env node\n"), 0o755); err != nil {
+		t.Fatalf("write CLI path: %v", err)
+	}
+	if err := writeManagedNPMExecWrapper(layout.WrapperPath, []string{layout.NodePath, layout.CLIPath}); err != nil {
+		t.Fatalf("write managed npm Claude wrapper: %v", err)
+	}
 }
 
 func firstNonEmptyNonBlank(a string, b string) string {

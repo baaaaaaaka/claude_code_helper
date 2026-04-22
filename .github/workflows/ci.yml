@@ -430,6 +430,33 @@ jobs:
               "$img" bash /ci/container_claude_install_launch_smoke.sh
           done
 
+      - name: Smoke test in containers (reuse existing legacy launcher after broken native on forced old kernel)
+        shell: bash
+        run: |
+          set -euo pipefail
+          for img in rockylinux:8 ubuntu:20.04; do
+            echo "==> $img"
+            docker run --rm \
+              -v "$PWD/dist:/dist:ro" \
+              -v "$PWD/scripts/ci:/ci:ro" \
+              -e CLAUDE_INSTALL_TEST_REUSE_LEGACY_LAUNCHER=1 \
+              -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallReusesLegacyCompatibilityLauncherAfterBrokenNativeIntegration \
+              -e CI=true \
+              "$img" bash /ci/container_claude_install_launch_smoke.sh
+          done
+
+      - name: Smoke test in CentOS7 (reuse existing recovered launcher after broken native on forced old kernel)
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/dist:/dist:ro" \
+            -v "$PWD/scripts/ci:/ci:ro" \
+            -e CLAUDE_INSTALL_TEST_REUSE_RECOVERY_LAUNCHER=1 \
+            -e CLAUDE_INSTALL_TEST_NAME=TestClaudeInstallReusesRecoveredLauncherAfterBrokenNativeIntegration \
+            -e CI=true \
+            centos:7 bash /ci/container_claude_install_launch_smoke.sh
+
       - name: Install strace for native Claude ENOSYS smoke
         shell: bash
         run: |

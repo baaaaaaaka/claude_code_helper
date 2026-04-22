@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -154,5 +155,25 @@ func TestHistoryShowCmdCancellationIsFatal(t *testing.T) {
 	err := cmd.Execute()
 	if err != context.DeadlineExceeded {
 		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
+	}
+}
+
+func TestHistoryListHelpOmitsLaunchOnlyFlags(t *testing.T) {
+	root := newRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"history", "list", "--help"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	help := out.String()
+	if strings.Contains(help, "--claude-path") {
+		t.Fatalf("expected history list help to omit --claude-path, got:\n%s", help)
+	}
+	if strings.Contains(help, "--profile") {
+		t.Fatalf("expected history list help to omit --profile, got:\n%s", help)
 	}
 }

@@ -186,14 +186,36 @@ try {
 }`
 
 type installProxyOptions struct {
-	UseProxy  bool
-	Profile   *config.Profile
-	Instances []config.Instance
+	UseProxy           bool
+	Profile            *config.Profile
+	Instances          []config.Instance
+	LauncherProbePatch *exePatchOptions
+}
+
+const explicitClaudePathFlagHelp = "Override Claude CLI path (skips claude-proxy-managed install/recovery; exe patching may still apply at launch)"
+
+func defaultLauncherProbePatchOptions() exePatchOptions {
+	return exePatchOptions{
+		enabledFlag:     exePatchEnabledDefault(),
+		glibcCompat:     exePatchGlibcCompatDefault(),
+		glibcCompatRoot: exePatchGlibcCompatRootDefault(),
+	}
+}
+
+func (o installProxyOptions) launcherProbePatchOptions() exePatchOptions {
+	if o.LauncherProbePatch != nil {
+		return *o.LauncherProbePatch
+	}
+	return defaultLauncherProbePatchOptions()
 }
 
 func ensureClaudeInstalled(ctx context.Context, claudePath string, out io.Writer, installOpts installProxyOptions) (string, error) {
+	probePatchOpts := installOpts.launcherProbePatchOptions()
 	if strings.TrimSpace(claudePath) != "" {
 		if executableExists(claudePath) {
+			if out != nil {
+				_, _ = fmt.Fprintf(out, "Using explicit Claude path %s; skipping claude-proxy-managed install/recovery.\n", claudePath)
+			}
 			if err := exportCurrentProcessGitBashPath(findWindowsGitBashPath(os.Getenv)); err != nil {
 				return "", err
 			}
@@ -205,7 +227,7 @@ func ensureClaudeInstalled(ctx context.Context, claudePath string, out io.Writer
 	if err := exportCurrentProcessGitBashPath(findWindowsGitBashPath(os.Getenv)); err != nil {
 		return "", err
 	}
-	if path, ok := findUsableManagedClaudePath(ctx, out, claudeInstallGOOS, "", os.Getenv); ok {
+	if path, ok := findUsableManagedClaudePath(ctx, out, claudeInstallGOOS, "", os.Getenv, probePatchOpts); ok {
 		return path, nil
 	}
 
@@ -219,12 +241,12 @@ func ensureClaudeInstalled(ctx context.Context, claudePath string, out io.Writer
 	}
 	err := runClaudeInstaller(ctx, installOut, installOpts)
 	if err == nil {
-		if path, ok := findUsableManagedClaudePath(ctx, out, claudeInstallGOOS, installLog.String(), os.Getenv); ok {
+		if path, ok := findUsableManagedClaudePath(ctx, out, claudeInstallGOOS, installLog.String(), os.Getenv, probePatchOpts); ok {
 			return path, nil
 		}
 		if overrideBunKernelCheckEnabled(claudeInstallGOOS) {
 			if out != nil {
-				_, _ = fmt.Fprintln(out, "Claude's official installer did not leave behind a detectable managed launcher on this old-kernel host; falling back to the npm distribution.")
+				_, _ = fmt.Fprintln(out, "Claude's official installer did not leave behind a detectable managed launcher on this old-kernel host; falling back to the claude-proxy-managed legacy compatibility launcher.")
 			}
 			return ensureManagedNPMClaudeInstalledFn(ctx, installOut, installOpts, nil)
 		}
@@ -294,10 +316,10 @@ func runClaudeInstallerWithEnv(ctx context.Context, out io.Writer, installOpts i
 		return err
 	} else {
 		if out != nil {
-			_, _ = fmt.Fprintf(out, "Claude's official installer failed on this old-kernel Linux host; falling back to the npm distribution. Error: %v\n", err)
+			_, _ = fmt.Fprintf(out, "Claude's official installer failed on this old-kernel Linux host; falling back to the claude-proxy-managed legacy compatibility launcher. Error: %v\n", err)
 		}
 		if npmErr := runNPMClaudeInstallerWithEnv(ctx, out, proxyURL, extraEnv); npmErr != nil {
-			return fmt.Errorf("official Claude installer failed: %v; npm fallback failed: %w", err, npmErr)
+			return fmt.Errorf("official Claude installer failed: %v; legacy compatibility launcher failed: %w", err, npmErr)
 		}
 		return nil
 	}
@@ -597,11 +619,7 @@ func installerAttemptLabel(cmd installCmd) string {
 }
 
 func findManagedClaudePath(goos string, installOutput string, getenv func(string) string) (string, bool) {
-	if path := resolveInstalledClaudeLocation(goos, parseInstalledClaudeLocation(installOutput)); path != "" {
-		return path, true
-	}
-
-	for _, candidate := range defaultClaudeInstallCandidates(goos, getenv) {
+	for _, candidate := range managedClaudeCandidatePaths(goos, installOutput, getenv) {
 		if executableExists(candidate) {
 			return candidate, true
 		}
@@ -610,18 +628,30 @@ func findManagedClaudePath(goos string, installOutput string, getenv func(string
 	return "", false
 }
 
-func findUsableManagedClaudePath(ctx context.Context, out io.Writer, goos string, installOutput string, getenv func(string) string) (string, bool) {
-	path, ok := findManagedClaudePath(goos, installOutput, getenv)
-	if !ok {
-		return "", false
+func managedClaudeCandidatePaths(goos string, installOutput string, getenv func(string) string) []string {
+	candidates := []string{}
+	if path := resolveInstalledClaudeLocation(goos, parseInstalledClaudeLocation(installOutput)); path != "" {
+		candidates = appendInstallCandidate(candidates, goos, path)
 	}
-	if !shouldValidateManagedClaudePath(goos, path, getenv) {
-		return path, true
+	for _, candidate := range defaultClaudeInstallCandidates(goos, getenv) {
+		candidates = appendInstallCandidate(candidates, goos, candidate)
 	}
-	if err := probeManagedClaudeLauncher(ctx, path); err == nil {
-		return path, true
-	} else if out != nil {
-		_, _ = fmt.Fprintf(out, "Existing managed Claude launcher at %s is not usable on this old-kernel host; reinstalling. Probe error: %v\n", path, err)
+	return candidates
+}
+
+func findUsableManagedClaudePath(ctx context.Context, out io.Writer, goos string, installOutput string, getenv func(string) string, patchOpts exePatchOptions) (string, bool) {
+	for _, path := range managedClaudeCandidatePaths(goos, installOutput, getenv) {
+		if !executableExists(path) {
+			continue
+		}
+		if !shouldValidateManagedClaudePath(goos, path, getenv) {
+			return path, true
+		}
+		if err := probeManagedClaudeLauncher(ctx, path, patchOpts); err == nil {
+			return path, true
+		} else if out != nil {
+			_, _ = fmt.Fprintf(out, "Existing managed Claude launcher at %s is not usable on this old-kernel host; trying the next managed launcher. Probe error: %v\n", path, err)
+		}
 	}
 	return "", false
 }
@@ -633,16 +663,19 @@ func shouldValidateManagedClaudePath(goos string, path string, getenv func(strin
 	return !isManagedNPMClaudeLauncherPath(path, getenv)
 }
 
-func probeManagedClaudeLauncher(ctx context.Context, path string) error {
+func probeManagedClaudeLauncher(ctx context.Context, path string, patchOpts exePatchOptions) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	out, err := runClaudeProbeWithContext(ctx, path, "--version", managedClaudeProbeTimeout)
-	if version := extractVersion(out); version != "" && strings.ContainsAny(version, "0123456789") {
+	if version := extractVersion(out); version != "" && strings.ContainsAny(version, "0123456789") && err == nil {
 		return nil
 	}
 	if kernelErr := bunLinuxKernelStartupError(out, err); kernelErr != nil {
 		return kernelErr
+	}
+	if compatErr, attempted := probeManagedClaudeLauncherWithGlibcCompat(ctx, path, out, err, patchOpts); attempted {
+		return compatErr
 	}
 	text := strings.TrimSpace(out)
 	if err != nil {
@@ -655,6 +688,56 @@ func probeManagedClaudeLauncher(ctx context.Context, path string) error {
 		return fmt.Errorf("probe managed Claude launcher: empty version output")
 	}
 	return fmt.Errorf("probe managed Claude launcher: unexpected version output %q", text)
+}
+
+func probeManagedClaudeLauncherWithGlibcCompat(ctx context.Context, path string, output string, err error, patchOpts exePatchOptions) (error, bool) {
+	if err == nil || !shouldProbeManagedClaudeLauncherWithGlibcCompat(path, output, patchOpts) {
+		return nil, false
+	}
+
+	outcome, _, compatErr := applyClaudeGlibcCompatPatchFn(path, patchOpts, io.Discard, false, &patchOutcome{
+		SourcePath:       path,
+		TargetPath:       path,
+		LaunchArgsPrefix: []string{path},
+		IsClaude:         true,
+	})
+	if compatErr != nil {
+		return fmt.Errorf("probe managed Claude launcher with glibc compat: %w", compatErr), true
+	}
+
+	compatOut, compatProbeErr := runClaudeProbeOutcome(outcome, path, "--version")
+	if version := extractVersion(compatOut); version != "" && strings.ContainsAny(version, "0123456789") && compatProbeErr == nil {
+		return nil, true
+	}
+	if kernelErr := bunLinuxKernelStartupError(compatOut, compatProbeErr); kernelErr != nil {
+		return kernelErr, true
+	}
+
+	text := strings.TrimSpace(compatOut)
+	if compatProbeErr != nil {
+		if text == "" {
+			return fmt.Errorf("probe managed Claude launcher with glibc compat: %w", compatProbeErr), true
+		}
+		return fmt.Errorf("probe managed Claude launcher with glibc compat: %w (%s)", compatProbeErr, text), true
+	}
+	if text == "" {
+		return fmt.Errorf("probe managed Claude launcher with glibc compat: empty version output"), true
+	}
+	return fmt.Errorf("probe managed Claude launcher with glibc compat: unexpected version output %q", text), true
+}
+
+func shouldProbeManagedClaudeLauncherWithGlibcCompat(path string, output string, patchOpts exePatchOptions) bool {
+	if !strings.EqualFold(claudeInstallGOOS, "linux") || !patchOpts.enabled() || !patchOpts.glibcCompatConfigured() {
+		return false
+	}
+	if isManagedNPMClaudeLauncherPath(path, os.Getenv) {
+		return false
+	}
+	return isMissingGlibcCompatDependencyError(output)
+}
+
+func isMissingGlibcCompatDependencyError(text string) bool {
+	return isMissingGlibcSymbolError(text) || isMissingManagedNPMCPPCompatError(text)
 }
 
 func findInstalledClaudePath(goos string, installOutput string, getenv func(string) string) (string, bool) {

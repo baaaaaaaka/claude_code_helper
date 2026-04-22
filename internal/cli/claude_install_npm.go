@@ -26,7 +26,7 @@ const (
 	claudeNPMInstallDirName    = "npm-install"
 	claudeNPMInstallPackageEnv = "CLAUDE_PROXY_NPM_INSTALL_PACKAGE"
 	// 2.1.112 is the last Claude Code npm release that still ships the
-	// Node-based cli.js entrypoint required by the managed npm fallback.
+	// Node-based cli.js entrypoint required by the managed legacy compatibility launcher.
 	claudeNPMInstallPackage = "@anthropic-ai/claude-code@2.1.112"
 	claudeNPMMinimumNode    = 18
 	claudeNPMBootstrapNode  = "v18.20.8"
@@ -356,7 +356,7 @@ func runNPMClaudeInstallerWithEnv(ctx context.Context, out io.Writer, proxyURL s
 		if reason, unsupported := bunLinuxKernelCompatibilityProblem(); unsupported {
 			_, _ = fmt.Fprintln(out, reason)
 		}
-		_, _ = fmt.Fprintf(out, "Linux kernel is too old for Claude Code's bundled Bun runtime; installing the npm distribution under %s.\n", layout.RootDir)
+		_, _ = fmt.Fprintf(out, "Linux kernel is too old for Claude Code's bundled Bun runtime; installing the claude-proxy-managed legacy compatibility launcher under %s.\n", layout.RootDir)
 	}
 
 	installErr := installManagedNPMClaudeWithRuntime(ctx, out, layout, nodeRuntime, proxyURL, extraEnv)
@@ -369,11 +369,11 @@ func runNPMClaudeInstallerWithEnv(ctx context.Context, out io.Writer, proxyURL s
 
 	if !nodeRuntime.Bootstrapped {
 		if out != nil {
-			_, _ = fmt.Fprintf(out, "The detected npm toolchain could not install a working Claude Code CLI; retrying with a claude-proxy-managed Node.js runtime under %s.\n", layout.RootDir)
+			_, _ = fmt.Fprintf(out, "The detected npm toolchain could not install a working legacy Claude Code launcher; retrying with a claude-proxy-managed Node.js runtime under %s.\n", layout.RootDir)
 		}
 		bootstrapRuntime, bootstrapErr := ensureManagedNPMBootstrapRuntimeFn(ctx, layout, proxyURL, out)
 		if bootstrapErr != nil {
-			return claudeNPMFallbackError(fmt.Errorf("%w; automatic private Node.js bootstrap failed after system npm fallback error: %w", installErr, bootstrapErr))
+			return claudeNPMFallbackError(fmt.Errorf("%w; automatic private Node.js bootstrap failed after the system legacy compatibility install error: %w", installErr, bootstrapErr))
 		}
 		if retryErr := installManagedNPMClaudeWithRuntime(ctx, out, layout, bootstrapRuntime, proxyURL, extraEnv); retryErr == nil {
 			if out != nil {
@@ -397,7 +397,7 @@ func claudeNPMFallbackError(err error) error {
 		return err
 	}
 	return fmt.Errorf(
-		"%s; npm fallback requires a usable Node.js >= %d runtime with npm: %w",
+		"%s; the legacy compatibility launcher requires a usable Node.js >= %d runtime with npm: %w",
 		reason,
 		claudeNPMMinimumNode,
 		err,
@@ -438,7 +438,7 @@ func resolveManagedNPMNodeRuntime(ctx context.Context, layout managedNPMClaudeLa
 			}
 		} else if err != nil {
 			if log != nil {
-				_, _ = fmt.Fprintf(log, "System Node.js runtime at %s is unsuitable for npm fallback (%v); installing a claude-proxy-managed Node.js runtime under %s.\n", nodePath, err, layout.RootDir)
+				_, _ = fmt.Fprintf(log, "System Node.js runtime at %s is unsuitable for the legacy compatibility launcher (%v); installing a claude-proxy-managed Node.js runtime under %s.\n", nodePath, err, layout.RootDir)
 			}
 		}
 		bootstrapRuntime, bootstrapErr := ensureManagedNPMBootstrapRuntimeFn(ctx, layout, proxyURL, log)

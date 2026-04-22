@@ -114,8 +114,8 @@ func TestRunClaudeInstallerPrefersOfficialInstallerOnUnsupportedKernelWhenOverri
 	if _, err := os.Stat(npmMarker); !os.IsNotExist(err) {
 		t.Fatalf("expected npm fallback to stay unused, marker err=%v", err)
 	}
-	if strings.Contains(out.String(), "falling back to the npm distribution") {
-		t.Fatalf("unexpected npm fallback log, got:\n%s", out.String())
+	if strings.Contains(out.String(), "legacy compatibility launcher") {
+		t.Fatalf("unexpected legacy compatibility launcher log, got:\n%s", out.String())
 	}
 }
 
@@ -158,8 +158,8 @@ func TestRunClaudeInstallerFallsBackToNPMOnUnsupportedKernelWhenOfficialInstalle
 	if !strings.Contains(versionOut, "Claude Code 2.1.112") {
 		t.Fatalf("unexpected npm wrapper output: %q", versionOut)
 	}
-	if !strings.Contains(out.String(), "falling back to the npm distribution") {
-		t.Fatalf("expected npm fallback log, got:\n%s", out.String())
+	if !strings.Contains(out.String(), "legacy compatibility launcher") {
+		t.Fatalf("expected legacy compatibility launcher log, got:\n%s", out.String())
 	}
 }
 

@@ -215,9 +215,10 @@ func runClaudeSession(
 	log io.Writer,
 ) error {
 	claudePathResolved, err := ensureClaudeInstalled(ctx, claudePath, log, installProxyOptions{
-		UseProxy:  useProxy,
-		Profile:   profile,
-		Instances: instances,
+		UseProxy:           useProxy,
+		Profile:            profile,
+		Instances:          instances,
+		LauncherProbePatch: &root.exePatch,
 	})
 	if err != nil {
 		return err
@@ -314,9 +315,10 @@ func runClaudeNewSession(
 	}
 
 	claudePathResolved, err := ensureClaudeInstalled(ctx, claudePath, log, installProxyOptions{
-		UseProxy:  useProxy,
-		Profile:   profile,
-		Instances: instances,
+		UseProxy:           useProxy,
+		Profile:            profile,
+		Instances:          instances,
+		LauncherProbePatch: &root.exePatch,
 	})
 	if err != nil {
 		return err
