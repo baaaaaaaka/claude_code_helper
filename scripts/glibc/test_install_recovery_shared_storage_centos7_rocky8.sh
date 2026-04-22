@@ -59,7 +59,7 @@ run_centos7_install_recovery() {
 
 run_rocky8_shared_launcher() {
   local shared_dir="$1"
-  local launcher_path="/shared/home/.cache/claude-proxy/hosts/centos7-host/install-recovery/claude"
+  local launcher_path="$2"
 
   echo "==> rockylinux:8 (direct launch via shared CentOS7 recovery launcher)"
   docker run --rm \
@@ -78,23 +78,43 @@ run_rocky8_shared_launcher() {
     rockylinux:8 bash /scripts/shared_storage_host_smoke.sh
 }
 
+find_shared_launcher() {
+  local shared_dir="$1"
+  local candidate=""
+  local -a candidates=(
+    "${shared_dir}/home/.cache/claude-proxy/hosts/centos7-host/install-recovery/claude"
+    "${shared_dir}/home/.local/bin/claude"
+    "${shared_dir}/home/.claude/local/claude"
+  )
+
+  for candidate in "${candidates[@]}"; do
+    if [[ -e "$candidate" || -L "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 shared_dir="$(mktemp -d "${TMPDIR:-/tmp}/claude-install-recovery-shared-storage.XXXXXX")"
 tmp_dirs+=("$shared_dir")
 mkdir -p "${shared_dir}/home"
 
 run_centos7_install_recovery "$shared_dir"
 
-launcher_host_path="${shared_dir}/home/.cache/claude-proxy/hosts/centos7-host/install-recovery/claude"
-if [[ ! -e "$launcher_host_path" && ! -L "$launcher_host_path" ]]; then
-  echo "expected shared recovery launcher at ${launcher_host_path}" >&2
+launcher_host_path="$(find_shared_launcher "$shared_dir" || true)"
+if [[ -z "$launcher_host_path" ]]; then
+  echo "expected a shared launcher under ${shared_dir}/home after CentOS7 install" >&2
   exit 1
 fi
 if [[ -d "$launcher_host_path" ]]; then
-  echo "recovery launcher path is a directory: ${launcher_host_path}" >&2
+  echo "shared launcher path is a directory: ${launcher_host_path}" >&2
   exit 1
 fi
-echo "[shared recovery launcher] ${launcher_host_path}"
+launcher_container_path="/shared${launcher_host_path#"${shared_dir}"}"
+echo "[shared launcher] ${launcher_host_path}"
 
-run_rocky8_shared_launcher "$shared_dir"
+run_rocky8_shared_launcher "$shared_dir" "$launcher_container_path"
 
 echo "PASS: shared-storage install recovery smoke completed."
