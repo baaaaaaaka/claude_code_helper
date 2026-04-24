@@ -60,6 +60,19 @@ func EnsureAvailable(path string, requiredBytes uint64) error {
 	return nil
 }
 
+func EnsureAvailableForWrite(path string, writeBytes uint64) error {
+	requiredBytes := writeBytes
+	if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() && info.Size() >= 0 {
+		existingBytes := uint64(info.Size())
+		if existingBytes >= writeBytes {
+			requiredBytes = 0
+		} else {
+			requiredBytes = writeBytes - existingBytes
+		}
+	}
+	return EnsureAvailable(path, requiredBytes)
+}
+
 func AnnotateWriteError(path string, err error) error {
 	if err == nil {
 		return nil

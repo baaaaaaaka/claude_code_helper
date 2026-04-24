@@ -173,6 +173,17 @@ jobs:
             -run '^(TestRunClaudeInstallerPrefersOfficialInstallerOnUnsupportedKernelWhenOverrideEnabled|TestMaybePatchExecutableReturnsKernelCompatibilityErrorOnBunCrash|TestEnsureClaudeInstalled(PrefersNativeClaudeOnUnsupportedKernelWhenOverrideEnabled|ReinstallsBrokenNativeClaudeOnUnsupportedKernelWhenOverrideEnabled|ReturnsPostInstallProbeErrorOnUnsupportedKernel|ReturnsKernelProbeErrorWhenInstallLeavesCrashingLauncher|ReusesRecoveredLauncherWithGlibcCompatAfterBrokenNativeOnUnsupportedKernel))$' \
             -count=1
 
+      - name: Bun compat and disk-space regression suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./internal/diskspace \
+            -run '^(TestEnsureAvailable(ReportsInsufficientSpace|IgnoresUnavailableProbe|ForWriteOnlyRequiresAdditionalBytes)|TestAnnotateWriteErrorReportsNoSpaceText)$' \
+            -count=1
+          go test ./internal/cli \
+            -run '^(TestFindUsableManagedClaudePathUsesBunCompatEnv|TestCachedBunCompatLaunchEnvInvalidatesOnSHAChange|TestMaybePatchExecutable(AppliesCachedBunCompatLaunchEnv|UsesMemoryBunCompatEnvWhenDiskCacheWriteFails)|TestRunTargetWithFallbackUsesPatchOutcomeLaunchEnv)$' \
+            -count=1
+
       - name: Windows cross-compile smoke (Linux only)
         if: runner.os == 'Linux'
         shell: bash
@@ -204,6 +215,19 @@ jobs:
           GOOS=netbsd GOARCH=amd64 go test -c -o "$tmp_dir/claudehistory-netbsd.test" ./internal/claudehistory
           GOOS=openbsd GOARCH=amd64 go test -c -o "$tmp_dir/claudehistory-openbsd.test" ./internal/claudehistory
           GOOS=dragonfly GOARCH=amd64 go test -c -o "$tmp_dir/claudehistory-dragonfly.test" ./internal/claudehistory
+
+      - name: Diskspace cross-platform compile smoke (Linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp_dir="${RUNNER_TEMP:-/tmp}"
+          GOOS=windows GOARCH=amd64 go test -c -o "$tmp_dir/diskspace-windows.test.exe" ./internal/diskspace
+          GOOS=darwin GOARCH=amd64 go test -c -o "$tmp_dir/diskspace-darwin.test" ./internal/diskspace
+          GOOS=freebsd GOARCH=amd64 go test -c -o "$tmp_dir/diskspace-freebsd.test" ./internal/diskspace
+          GOOS=netbsd GOARCH=amd64 go test -c -o "$tmp_dir/diskspace-netbsd.test" ./internal/diskspace
+          GOOS=openbsd GOARCH=amd64 go test -c -o "$tmp_dir/diskspace-openbsd.test" ./internal/diskspace
+          GOOS=dragonfly GOARCH=amd64 go test -c -o "$tmp_dir/diskspace-dragonfly.test" ./internal/diskspace
 
       - name: Installer script matrix smoke (Unix)
         if: runner.os != 'Windows'

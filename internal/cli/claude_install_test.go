@@ -1331,6 +1331,70 @@ func TestMaybePatchExecutableAppliesCachedBunCompatLaunchEnv(t *testing.T) {
 	}
 }
 
+func TestMaybePatchExecutableUsesMemoryBunCompatEnvWhenDiskCacheWriteFails(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Bun compat cache only applies on linux")
+	}
+	withClaudeInstallGOOS(t, "linux")
+	resetBunCompatLaunchEnvMemoryCacheForTest(t)
+
+	home := t.TempDir()
+	cacheBase := filepath.Join(t.TempDir(), "cache-file")
+	if err := os.WriteFile(cacheBase, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write cache file: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CACHE_HOME", cacheBase)
+	t.Setenv(claudeProxyHostIDEnv, "bun-compat-memory-host")
+
+	claudePath := filepath.Join(home, ".local", "bin", "claude")
+	if err := os.MkdirAll(filepath.Dir(claudePath), 0o755); err != nil {
+		t.Fatalf("mkdir claude dir: %v", err)
+	}
+	script := "#!/bin/sh\n" +
+		"if [ \"$BUN_FEATURE_FLAG_DISABLE_MEMFD\" = \"1\" ]; then\n" +
+		"  echo 'Claude Code 2.1.119'\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"echo 'Bun has crashed' >&2\n" +
+		"exit 1\n"
+	if err := os.WriteFile(claudePath, []byte(script), 0o700); err != nil {
+		t.Fatalf("write claude fixture: %v", err)
+	}
+
+	result := findUsableManagedClaudePathDetailed(context.Background(), io.Discard, "linux", "", os.Getenv, exePatchOptions{})
+	if !result.Found {
+		t.Fatalf("expected launcher to be usable with memory-cached Bun compat env, err=%v", result.ProbeErr)
+	}
+	if !result.Plan.UsedBunCompat {
+		t.Fatalf("expected Bun compat probe plan, got %#v", result.Plan)
+	}
+	outcome, err := maybePatchExecutableWithContext(context.Background(), []string{claudePath}, exePatchOptions{}, filepath.Join(t.TempDir(), "config.json"), io.Discard)
+	if err != nil {
+		t.Fatalf("maybePatchExecutableWithContext error: %v", err)
+	}
+	if outcome == nil {
+		t.Fatalf("expected patch outcome carrying memory-cached Bun compat env")
+	}
+	if !sameStringSet(outcome.LaunchEnv, bunCompatLaunchEnv()) {
+		t.Fatalf("expected memory-cached Bun compat env, got %v", outcome.LaunchEnv)
+	}
+}
+
+func resetBunCompatLaunchEnvMemoryCacheForTest(t *testing.T) {
+	t.Helper()
+	bunCompatLaunchEnvMemoryCache.Lock()
+	previous := bunCompatLaunchEnvMemoryCache.entries
+	bunCompatLaunchEnvMemoryCache.entries = map[string][]string{}
+	bunCompatLaunchEnvMemoryCache.Unlock()
+	t.Cleanup(func() {
+		bunCompatLaunchEnvMemoryCache.Lock()
+		bunCompatLaunchEnvMemoryCache.entries = previous
+		bunCompatLaunchEnvMemoryCache.Unlock()
+	})
+}
+
 func TestEnsureClaudeInstalledReusesRecoveredLauncherWithGlibcCompatAfterBrokenNativeOnUnsupportedKernel(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("kernel-gated compat probing only applies on linux")

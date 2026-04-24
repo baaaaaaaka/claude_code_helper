@@ -811,7 +811,7 @@ func patchExecutable(path string, specs []exePatchSpec, log io.Writer, preview b
 		}
 		outcome.Applied = true
 
-		if err := diskspace.EnsureAvailable(path, uint64(len(patched))); err != nil {
+		if err := diskspace.EnsureAvailableForWrite(path, uint64(len(patched))); err != nil {
 			return nil, err
 		}
 		if err := os.WriteFile(path, patched, info.Mode().Perm()); err != nil {
@@ -973,7 +973,7 @@ func restoreExecutableFile(srcPath string, dstPath string, perm os.FileMode) err
 	defer src.Close()
 
 	if info, err := src.Stat(); err == nil {
-		if err := diskspace.EnsureAvailable(dstPath, uint64(info.Size())); err != nil {
+		if err := diskspace.EnsureAvailableForWrite(dstPath, uint64(info.Size())); err != nil {
 			return err
 		}
 	}

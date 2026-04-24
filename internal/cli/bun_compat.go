@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
@@ -17,6 +18,11 @@ const (
 	bunCompatLaunchEnvCacheVersion = 1
 	bunCompatLaunchEnvSetVersion   = 1
 )
+
+var bunCompatLaunchEnvMemoryCache = struct {
+	sync.Mutex
+	entries map[string][]string
+}{entries: map[string][]string{}}
 
 type bunCompatLaunchEnvCache struct {
 	Version int                            `json:"version"`
@@ -47,6 +53,9 @@ func lookupCachedBunCompatLaunchEnv(path string) ([]string, bool) {
 	if !ok {
 		return nil, false
 	}
+	if env, ok := lookupMemoryCachedBunCompatLaunchEnv(identity); ok {
+		return env, true
+	}
 	cachePath, ok := bunCompatLaunchEnvCachePath()
 	if !ok {
 		return nil, false
@@ -66,6 +75,7 @@ func lookupCachedBunCompatLaunchEnv(path string) ([]string, bool) {
 				continue
 			}
 			env = append([]string{}, entry.LaunchEnv...)
+			saveMemoryCachedBunCompatLaunchEnv(identity, env)
 			return nil
 		}
 		return nil
@@ -84,6 +94,7 @@ func saveCachedBunCompatLaunchEnv(path string, launchEnv []string) error {
 	if !ok {
 		return nil
 	}
+	saveMemoryCachedBunCompatLaunchEnv(identity, launchEnv)
 	cachePath, ok := bunCompatLaunchEnvCachePath()
 	if !ok {
 		return nil
@@ -118,6 +129,41 @@ func saveCachedBunCompatLaunchEnv(path string, launchEnv []string) error {
 		}
 		return writeBunCompatLaunchEnvCache(cachePath, cache)
 	})
+}
+
+func lookupMemoryCachedBunCompatLaunchEnv(identity bunCompatLaunchEnvCacheIdentity) ([]string, bool) {
+	key := bunCompatLaunchEnvMemoryCacheKey(identity)
+	bunCompatLaunchEnvMemoryCache.Lock()
+	defer bunCompatLaunchEnvMemoryCache.Unlock()
+	env := bunCompatLaunchEnvMemoryCache.entries[key]
+	if len(env) == 0 {
+		return nil, false
+	}
+	if !sameStringSet(env, bunCompatLaunchEnv()) {
+		delete(bunCompatLaunchEnvMemoryCache.entries, key)
+		return nil, false
+	}
+	return append([]string{}, env...), true
+}
+
+func saveMemoryCachedBunCompatLaunchEnv(identity bunCompatLaunchEnvCacheIdentity, launchEnv []string) {
+	if !sameStringSet(launchEnv, bunCompatLaunchEnv()) {
+		return
+	}
+	key := bunCompatLaunchEnvMemoryCacheKey(identity)
+	bunCompatLaunchEnvMemoryCache.Lock()
+	defer bunCompatLaunchEnvMemoryCache.Unlock()
+	bunCompatLaunchEnvMemoryCache.entries[key] = append([]string{}, launchEnv...)
+}
+
+func bunCompatLaunchEnvMemoryCacheKey(identity bunCompatLaunchEnvCacheIdentity) string {
+	return strings.Join([]string{
+		identity.ResolvedPath,
+		strings.TrimSpace(identity.SHA256),
+		runtime.GOOS,
+		runtime.GOARCH,
+		fmt.Sprintf("%d", bunCompatLaunchEnvSetVersion),
+	}, "\x00")
 }
 
 func bunCompatLaunchEnvCachePath() (string, bool) {
@@ -187,7 +233,7 @@ func writeBunCompatLaunchEnvCache(path string, cache bunCompatLaunchEnvCache) er
 		return fmt.Errorf("create Bun compat launch env cache dir: %w", err)
 	}
 	data = append(data, '\n')
-	if err := diskspace.EnsureAvailable(path, uint64(len(data))); err != nil {
+	if err := diskspace.EnsureAvailableForWrite(path, uint64(len(data))); err != nil {
 		return err
 	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
