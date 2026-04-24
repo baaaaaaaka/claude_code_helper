@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
+	"github.com/baaaaaaaka/claude_code_helper/internal/diskspace"
 	"github.com/baaaaaaaka/claude_code_helper/internal/ids"
 	"github.com/baaaaaaaka/claude_code_helper/internal/manager"
 	"github.com/baaaaaaaka/claude_code_helper/internal/proc"
@@ -261,7 +262,7 @@ func launchProxyDaemonProcess(exe string, args []string, logPath string) (int, e
 	}
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
-		return 0, err
+		return 0, diskspace.AnnotateWriteError(logPath, err)
 	}
 	defer logFile.Close()
 	c.Stdout = logFile

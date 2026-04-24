@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/baaaaaaaka/claude_code_helper/internal/diskspace"
 )
 
 type fileRunTargetIOOptions struct {
@@ -145,7 +147,7 @@ func newFileRunTargetIOWithOptions(
 			file, err := os.OpenFile(stdoutPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 			if err != nil {
 				_ = files.Close()
-				return nil, err
+				return nil, diskspace.AnnotateWriteError(stdoutPath, err)
 			}
 			files.Stdout = file
 			addCloser(file)
@@ -167,7 +169,7 @@ func newFileRunTargetIOWithOptions(
 			file, err := os.OpenFile(stderrPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 			if err != nil {
 				_ = files.Close()
-				return nil, err
+				return nil, diskspace.AnnotateWriteError(stderrPath, err)
 			}
 			files.Stderr = file
 			addCloser(file)
@@ -200,7 +202,10 @@ func archiveRunTargetOutput(path string, attempt int) error {
 	if err != nil {
 		return err
 	}
-	return os.Rename(path, archivePath)
+	if err := os.Rename(path, archivePath); err != nil {
+		return diskspace.AnnotateWriteError(archivePath, err)
+	}
+	return nil
 }
 
 func reserveRunTargetArchivePath(path string, attempt int) (string, error) {
@@ -237,8 +242,15 @@ func (w *appendFileWriter) Write(p []byte) (int, error) {
 	}
 	file, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		return 0, err
+		return 0, diskspace.AnnotateWriteError(w.path, err)
 	}
 	defer func() { _ = file.Close() }()
-	return file.Write(p)
+	if err := diskspace.EnsureAvailable(w.path, uint64(len(p))); err != nil {
+		return 0, err
+	}
+	n, err := file.Write(p)
+	if err != nil {
+		return n, diskspace.AnnotateWriteError(w.path, err)
+	}
+	return n, nil
 }

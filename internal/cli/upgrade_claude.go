@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
+	"github.com/baaaaaaaka/claude_code_helper/internal/diskspace"
 )
 
 var (
@@ -455,7 +456,7 @@ func stashInstalledClaudeVersionFile(path string) (string, error) {
 	base := filepath.Base(path)
 	f, err := os.CreateTemp(dir, base+".claude-proxy-reinstall-*")
 	if err != nil {
-		return "", err
+		return "", diskspace.AnnotateWriteError(dir, err)
 	}
 	stashedPath := f.Name()
 	if closeErr := f.Close(); closeErr != nil {
@@ -466,7 +467,7 @@ func stashInstalledClaudeVersionFile(path string) (string, error) {
 		return "", err
 	}
 	if err := os.Rename(path, stashedPath); err != nil {
-		return "", err
+		return "", diskspace.AnnotateWriteError(stashedPath, err)
 	}
 	return stashedPath, nil
 }
@@ -478,7 +479,10 @@ func restoreStashedClaudeVersionFile(path string, stashedPath string) error {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	return os.Rename(stashedPath, path)
+	if err := os.Rename(stashedPath, path); err != nil {
+		return diskspace.AnnotateWriteError(path, err)
+	}
+	return nil
 }
 
 func restoreStashedClaudeInstall(previous installedClaudeBinaryState, stashedPath string) error {
@@ -507,7 +511,10 @@ func restoreInstalledClaudeLauncher(previous installedClaudeBinaryState) error {
 	if err := os.Remove(previous.Path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	return os.Symlink(target, previous.Path)
+	if err := os.Symlink(target, previous.Path); err != nil {
+		return diskspace.AnnotateWriteError(previous.Path, err)
+	}
+	return nil
 }
 
 func removeStashedClaudeVersionFile(stashedPath string) {

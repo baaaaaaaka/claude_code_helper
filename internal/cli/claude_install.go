@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
+	"github.com/baaaaaaaka/claude_code_helper/internal/diskspace"
 	"github.com/baaaaaaaka/claude_code_helper/internal/env"
 	"github.com/baaaaaaaka/claude_code_helper/internal/ids"
 	"github.com/baaaaaaaka/claude_code_helper/internal/manager"
@@ -441,10 +442,21 @@ func runOfficialClaudeInstallerWithEnv(ctx context.Context, out io.Writer, proxy
 		}
 		attemptErrors = append(attemptErrors, fmt.Sprintf("el7 glibc fallback: %v", recoverErr))
 	}
+	installFailureText := combinedOutput.String() + "\n" + strings.Join(attemptErrors, "; ")
+	if diskspace.IsNoSpace(errors.New(installFailureText)) {
+		return fmt.Errorf("failed to run Claude installer for %s: %w", runtime.GOOS, diskspace.AnnotateWriteError(installerDiskSpacePath(), errors.New("no space left on device")))
+	}
 	if len(attemptErrors) == 0 {
 		return fmt.Errorf("no supported installer available for %s", runtime.GOOS)
 	}
 	return fmt.Errorf("failed to run Claude installer for %s (%s)", runtime.GOOS, strings.Join(attemptErrors, "; "))
+}
+
+func installerDiskSpacePath() string {
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		return home
+	}
+	return "."
 }
 
 func appendInstallOutput(dst *bytes.Buffer, text string) {
@@ -534,7 +546,7 @@ func installRecoveredClaudeLauncher(binaryPath string) (string, error) {
 	}
 
 	if err := os.Symlink(binaryPath, launcherPath); err != nil {
-		return "", fmt.Errorf("create Claude launcher symlink %s -> %s: %w", launcherPath, binaryPath, err)
+		return "", fmt.Errorf("create Claude launcher symlink %s -> %s: %w", launcherPath, binaryPath, diskspace.AnnotateWriteError(launcherPath, err))
 	}
 	return launcherPath, nil
 }
@@ -887,15 +899,7 @@ func runManagedClaudeProbeAttempt(ctx context.Context, plan managedClaudeLaunchP
 		RunErr:           err,
 		Err:              probeErr,
 		BunRecoverable:   isBunCompatRecoverableProbeFailure(out, err),
-		GlibcRecoverable: shouldProbeManagedClaudeLauncherWithGlibcCompat(plan.Path, out, patchOptsForGlibcProbe(plan)),
-	}
-}
-
-func patchOptsForGlibcProbe(plan managedClaudeLaunchPlan) exePatchOptions {
-	return exePatchOptions{
-		enabledFlag:    true,
-		policySettings: true,
-		glibcCompat:    true,
+		GlibcRecoverable: strings.EqualFold(claudeInstallGOOS, "linux") && isMissingGlibcCompatDependencyError(out),
 	}
 }
 

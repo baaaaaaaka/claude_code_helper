@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
+	"github.com/baaaaaaaka/claude_code_helper/internal/diskspace"
 )
 
 const (
@@ -185,7 +186,14 @@ func writeBunCompatLaunchEnvCache(path string, cache bunCompatLaunchEnvCache) er
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create Bun compat launch env cache dir: %w", err)
 	}
-	return os.WriteFile(path, append(data, '\n'), 0o600)
+	data = append(data, '\n')
+	if err := diskspace.EnsureAvailable(path, uint64(len(data))); err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return diskspace.AnnotateWriteError(path, err)
+	}
+	return nil
 }
 
 func sameStringSet(a []string, b []string) bool {

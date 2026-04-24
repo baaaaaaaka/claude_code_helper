@@ -8,11 +8,15 @@ import (
 	"os/exec"
 	"strings"
 	"syscall"
+
+	"github.com/baaaaaaaka/claude_code_helper/internal/diskspace"
 )
 
 func replaceBinary(tmpPath, destPath string) (replaceResult, error) {
 	if err := os.Rename(tmpPath, destPath); err == nil {
 		return replaceResult{restartRequired: false}, nil
+	} else if diskspace.IsNoSpace(err) {
+		return replaceResult{}, fmt.Errorf("replace binary: %w", diskspace.AnnotateWriteError(destPath, err))
 	}
 	if err := scheduleWindowsMove(tmpPath, destPath); err != nil {
 		return replaceResult{}, err

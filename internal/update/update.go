@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/baaaaaaaka/claude_code_helper/internal/diskspace"
 )
 
 const (
@@ -378,12 +380,12 @@ func downloadReleaseAsset(ctx context.Context, repo, tag, asset, installPath str
 
 	tmpFile, err := os.CreateTemp(destDir, "."+filepath.Base(asset)+".*")
 	if err != nil {
-		return "", fmt.Errorf("create temp file: %w", err)
+		return "", fmt.Errorf("create temp file: %w", diskspace.AnnotateWriteError(destDir, err))
 	}
 	tmpPath := tmpFile.Name()
 	defer tmpFile.Close()
 
-	if err := fetchToWriter(ctx, buildReleaseURL(repo, tag, asset), tmpFile, timeout); err != nil {
+	if err := fetchToFile(ctx, buildReleaseURL(repo, tag, asset), tmpPath, tmpFile, timeout); err != nil {
 		_ = os.Remove(tmpPath)
 		return "", err
 	}
@@ -400,7 +402,15 @@ func downloadReleaseAsset(ctx context.Context, repo, tag, asset, installPath str
 	return tmpPath, nil
 }
 
+func fetchToFile(ctx context.Context, url string, path string, file *os.File, timeout time.Duration) error {
+	return fetchToWriterWithPath(ctx, url, path, file, timeout)
+}
+
 func fetchToWriter(ctx context.Context, url string, w io.Writer, timeout time.Duration) error {
+	return fetchToWriterWithPath(ctx, url, "", w, timeout)
+}
+
+func fetchToWriterWithPath(ctx context.Context, url string, path string, w io.Writer, timeout time.Duration) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -417,8 +427,16 @@ func fetchToWriter(ctx context.Context, url string, w io.Writer, timeout time.Du
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("download failed: %s", resp.Status)
 	}
+	if path != "" && resp.ContentLength > 0 {
+		if err := diskspace.EnsureAvailable(path, uint64(resp.ContentLength)); err != nil {
+			return err
+		}
+	}
 
 	_, err = io.Copy(w, resp.Body)
+	if path != "" {
+		return diskspace.AnnotateWriteError(path, err)
+	}
 	return err
 }
 

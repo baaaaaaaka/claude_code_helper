@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/baaaaaaaka/claude_code_helper/internal/diskspace"
 	"github.com/baaaaaaaka/claude_code_helper/internal/update"
 	"github.com/gofrs/flock"
 )
@@ -160,7 +162,7 @@ func prepareGlibcCompatLaunchMirror(path string, layout glibcCompatLayout, log i
 			}
 		}
 		if err := os.Rename(stagePath, mirrorPath); err != nil {
-			return fmt.Errorf("install glibc compat mirror: %w", err)
+			return fmt.Errorf("install glibc compat mirror: %w", diskspace.AnnotateWriteError(mirrorPath, err))
 		}
 		created = true
 		return pruneGlibcCompatMirrors(claudeRoot, mirrorKey)
@@ -387,7 +389,7 @@ func installPreparedGlibcCompatRuntime(stageDir string, runtimeRoot string) erro
 		if _, statErr := resolveDefaultGlibcCompatRuntime(runtimeRoot); statErr == nil {
 			return nil
 		}
-		return fmt.Errorf("install glibc compat runtime: %w", err)
+		return fmt.Errorf("install glibc compat runtime: %w", diskspace.AnnotateWriteError(runtimeRoot, err))
 	}
 	return nil
 }
@@ -489,9 +491,14 @@ func copyToTempFile(sourcePath string, dir string, prefix string, perm os.FileMo
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("create glibc compat mirror dir: %w", err)
 	}
+	if info, err := os.Stat(sourcePath); err == nil {
+		if err := diskspace.EnsureAvailable(filepath.Join(dir, prefix+".tmp"), uint64(info.Size())); err != nil {
+			return "", err
+		}
+	}
 	f, err := os.CreateTemp(dir, prefix+".tmp-*")
 	if err != nil {
-		return "", fmt.Errorf("create temp mirror: %w", err)
+		return "", fmt.Errorf("create temp mirror: %w", diskspace.AnnotateWriteError(dir, err))
 	}
 	tmpPath := f.Name()
 	src, err := os.Open(sourcePath)
@@ -504,12 +511,12 @@ func copyToTempFile(sourcePath string, dir string, prefix string, perm os.FileMo
 		_ = src.Close()
 		_ = f.Close()
 		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("copy executable for glibc mirror: %w", err)
+		return "", fmt.Errorf("copy executable for glibc mirror: %w", diskspace.AnnotateWriteError(tmpPath, err))
 	}
 	_ = src.Close()
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("close temp mirror: %w", err)
+		return "", fmt.Errorf("close temp mirror: %w", diskspace.AnnotateWriteError(tmpPath, err))
 	}
 	if err := os.Chmod(tmpPath, perm); err != nil {
 		_ = os.Remove(tmpPath)
@@ -606,8 +613,11 @@ exec -a "$1" %q --library-path %q "$@"
 			return "", fmt.Errorf("close glibc compat wrapper temp file: %w", closeErr)
 		}
 		defer func() { _ = os.Remove(stagePath) }()
+		if writeErr := diskspace.EnsureAvailable(stagePath, uint64(len(script))); writeErr != nil {
+			return "", writeErr
+		}
 		if writeErr := os.WriteFile(stagePath, []byte(script), 0o755); writeErr != nil {
-			return "", fmt.Errorf("write glibc compat wrapper: %w", writeErr)
+			return "", fmt.Errorf("write glibc compat wrapper: %w", diskspace.AnnotateWriteError(stagePath, writeErr))
 		}
 		if chmodErr := os.Chmod(stagePath, 0o755); chmodErr != nil {
 			return "", fmt.Errorf("chmod glibc compat wrapper: %w", chmodErr)
@@ -616,7 +626,7 @@ exec -a "$1" %q --library-path %q "$@"
 			if info, statErr := os.Stat(wrapperPath); statErr == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
 				return wrapperPath, nil
 			}
-			return "", fmt.Errorf("install glibc compat wrapper: %w", renameErr)
+			return "", fmt.Errorf("install glibc compat wrapper: %w", diskspace.AnnotateWriteError(wrapperPath, renameErr))
 		}
 		return wrapperPath, nil
 	}
@@ -796,10 +806,15 @@ func downloadURLToFileAttempt(ctx context.Context, url string, targetPath string
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return retryableDownloadStatus(resp.StatusCode), fmt.Errorf("download %s failed: %s", url, resp.Status)
 	}
+	if resp.ContentLength > 0 {
+		if err := diskspace.EnsureAvailable(tmpPath, uint64(resp.ContentLength)); err != nil {
+			return false, err
+		}
+	}
 
 	out, err := os.Create(tmpPath)
 	if err != nil {
-		return false, err
+		return false, diskspace.AnnotateWriteError(tmpPath, err)
 	}
 	if _, err := io.Copy(out, resp.Body); err != nil {
 		_ = out.Close()
@@ -807,15 +822,16 @@ func downloadURLToFileAttempt(ctx context.Context, url string, targetPath string
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return false, ctxErr
 		}
-		return true, err
+		err = diskspace.AnnotateWriteError(tmpPath, err)
+		return !errors.Is(err, diskspace.ErrInsufficient), err
 	}
 	if err := out.Close(); err != nil {
 		_ = os.Remove(tmpPath)
-		return false, err
+		return false, diskspace.AnnotateWriteError(tmpPath, err)
 	}
 	if err := os.Rename(tmpPath, targetPath); err != nil {
 		_ = os.Remove(tmpPath)
-		return false, err
+		return false, diskspace.AnnotateWriteError(targetPath, err)
 	}
 	return false, nil
 }

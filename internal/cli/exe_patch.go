@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
+	"github.com/baaaaaaaka/claude_code_helper/internal/diskspace"
 )
 
 var (
@@ -810,8 +811,11 @@ func patchExecutable(path string, specs []exePatchSpec, log io.Writer, preview b
 		}
 		outcome.Applied = true
 
+		if err := diskspace.EnsureAvailable(path, uint64(len(patched))); err != nil {
+			return nil, err
+		}
 		if err := os.WriteFile(path, patched, info.Mode().Perm()); err != nil {
-			return nil, fmt.Errorf("write patched executable %q: %w", path, err)
+			return nil, fmt.Errorf("write patched executable %q: %w", path, diskspace.AnnotateWriteError(path, err))
 		}
 	}
 	if touched && !changed {
@@ -901,20 +905,25 @@ func backupExecutable(path string, perm os.FileMode) (string, error) {
 	}
 	defer src.Close()
 
+	if info, err := src.Stat(); err == nil {
+		if err := diskspace.EnsureAvailable(backupPath, uint64(info.Size())); err != nil {
+			return "", err
+		}
+	}
 	dst, err := os.OpenFile(backupPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
 	if err != nil {
-		return "", fmt.Errorf("create backup file: %w", err)
+		return "", fmt.Errorf("create backup file: %w", diskspace.AnnotateWriteError(backupPath, err))
 	}
 	if _, err := io.Copy(dst, src); err != nil {
 		_ = dst.Close()
-		return "", fmt.Errorf("write backup file: %w", err)
+		return "", fmt.Errorf("write backup file: %w", diskspace.AnnotateWriteError(backupPath, err))
 	}
 	if err := dst.Sync(); err != nil {
 		_ = dst.Close()
-		return "", fmt.Errorf("sync backup file: %w", err)
+		return "", fmt.Errorf("sync backup file: %w", diskspace.AnnotateWriteError(backupPath, err))
 	}
 	if err := dst.Close(); err != nil {
-		return "", fmt.Errorf("close backup file: %w", err)
+		return "", fmt.Errorf("close backup file: %w", diskspace.AnnotateWriteError(backupPath, err))
 	}
 	return backupPath, nil
 }
@@ -963,20 +972,25 @@ func restoreExecutableFile(srcPath string, dstPath string, perm os.FileMode) err
 	}
 	defer src.Close()
 
+	if info, err := src.Stat(); err == nil {
+		if err := diskspace.EnsureAvailable(dstPath, uint64(info.Size())); err != nil {
+			return err
+		}
+	}
 	dst, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
 	if err != nil {
-		return fmt.Errorf("restore executable from backup: %w", err)
+		return fmt.Errorf("restore executable from backup: %w", diskspace.AnnotateWriteError(dstPath, err))
 	}
 	if _, err := io.Copy(dst, src); err != nil {
 		_ = dst.Close()
-		return fmt.Errorf("restore executable from backup: %w", err)
+		return fmt.Errorf("restore executable from backup: %w", diskspace.AnnotateWriteError(dstPath, err))
 	}
 	if err := dst.Sync(); err != nil {
 		_ = dst.Close()
-		return fmt.Errorf("restore executable from backup: %w", err)
+		return fmt.Errorf("restore executable from backup: %w", diskspace.AnnotateWriteError(dstPath, err))
 	}
 	if err := dst.Close(); err != nil {
-		return fmt.Errorf("restore executable from backup: %w", err)
+		return fmt.Errorf("restore executable from backup: %w", diskspace.AnnotateWriteError(dstPath, err))
 	}
 	return nil
 }
