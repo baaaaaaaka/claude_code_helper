@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/baaaaaaaka/claude_code_helper/internal/diskspace"
 )
 
 func writeGlibcCompatRuntimeFixture(t *testing.T, root string, loaderData string, libcData string) glibcCompatLayout {
@@ -476,6 +478,22 @@ func TestReadPatchelfValueAndPatchElfInterpreterAndRPath(t *testing.T) {
 	}
 }
 
+func TestPatchElfInterpreterAndRPathReportsNoSpace(t *testing.T) {
+	dir := t.TempDir()
+	unix := "#!/bin/sh\necho 'patchelf: no space left on device' >&2\nexit 1\n"
+	win := "@echo off\r\necho patchelf: no space left on device 1>&2\r\nexit /b 1\r\n"
+	writeStub(t, dir, patchelfBinaryName, unix, win)
+	setStubPath(t, dir)
+
+	err := patchElfInterpreterAndRPath(filepath.Join(dir, "claude"), "/opt/glibc/lib/ld-linux-x86-64.so.2", "/opt/glibc/lib:/usr/lib64")
+	if !errors.Is(err, diskspace.ErrInsufficient) {
+		t.Fatalf("expected insufficient disk space error, got %v", err)
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "insufficient disk space") {
+		t.Fatalf("expected clear disk space error, got %q", err.Error())
+	}
+}
+
 func TestExtractGlibcCompatBundleUsesTarCommand(t *testing.T) {
 	dir := t.TempDir()
 	recordPath := filepath.Join(dir, "tar.args")
@@ -502,6 +520,27 @@ func TestExtractGlibcCompatBundleUsesTarCommand(t *testing.T) {
 	text := string(got)
 	if !strings.Contains(text, "-xJf") || !strings.Contains(text, bundlePath) || !strings.Contains(text, runtimeRoot) {
 		t.Fatalf("unexpected tar args: %s", text)
+	}
+}
+
+func TestExtractGlibcCompatBundleReportsNoSpace(t *testing.T) {
+	dir := t.TempDir()
+	bundlePath := filepath.Join(dir, "bundle.tar.xz")
+	if err := os.WriteFile(bundlePath, []byte("bundle"), 0o644); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	runtimeRoot := filepath.Join(dir, "runtime")
+	unix := "#!/bin/sh\necho 'tar: no space left on device' >&2\nexit 1\n"
+	win := "@echo off\r\necho tar: no space left on device 1>&2\r\nexit /b 1\r\n"
+	writeStub(t, dir, "tar", unix, win)
+	setStubPath(t, dir)
+
+	err := extractGlibcCompatBundle(bundlePath, runtimeRoot)
+	if !errors.Is(err, diskspace.ErrInsufficient) {
+		t.Fatalf("expected insufficient disk space error, got %v", err)
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "insufficient disk space") {
+		t.Fatalf("expected clear disk space error, got %q", err.Error())
 	}
 }
 

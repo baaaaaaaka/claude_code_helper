@@ -156,8 +156,8 @@ func prepareGlibcCompatLaunchMirror(path string, layout glibcCompatLayout, log i
 				return fmt.Errorf("read interpreter: %w", err)
 			}
 			if !sameFilePath(currentInterpreter, layout.LoaderPath) {
-				if _, err := runPatchelf("--set-interpreter", layout.LoaderPath, stagePath); err != nil {
-					return fmt.Errorf("set interpreter: %w", err)
+				if out, err := runPatchelf("--set-interpreter", layout.LoaderPath, stagePath); err != nil {
+					return fmt.Errorf("set interpreter: %w", patchelfWriteError(stagePath, out, err))
 				}
 			}
 		}
@@ -906,6 +906,9 @@ func extractGlibcCompatBundle(bundlePath string, runtimeRoot string) error {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
+		if diskspace.IsNoSpace(errors.New(err.Error() + "\n" + msg)) {
+			return fmt.Errorf("extract glibc bundle: %w", diskspace.AnnotateWriteError(runtimeRoot, errors.New("no space left on device")))
+		}
 		if msg == "" {
 			return err
 		}
@@ -999,11 +1002,7 @@ func readPatchelfValue(path string, flag string) (string, error) {
 func patchElfInterpreterAndRPath(path string, loaderPath string, rpath string) error {
 	out, err := runPatchelf("--set-interpreter", loaderPath, "--set-rpath", rpath, path)
 	if err != nil {
-		msg := strings.TrimSpace(string(out))
-		if msg == "" {
-			return err
-		}
-		return fmt.Errorf("%w: %s", err, msg)
+		return patchelfWriteError(path, out, err)
 	}
 	return nil
 }
@@ -1011,6 +1010,20 @@ func patchElfInterpreterAndRPath(path string, loaderPath string, rpath string) e
 func runPatchelf(args ...string) ([]byte, error) {
 	cmd := exec.Command(patchelfBinaryName, args...)
 	return cmd.CombinedOutput()
+}
+
+func patchelfWriteError(path string, out []byte, err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := strings.TrimSpace(string(out))
+	if diskspace.IsNoSpace(errors.New(err.Error() + "\n" + msg)) {
+		return diskspace.AnnotateWriteError(path, errors.New("no space left on device"))
+	}
+	if msg == "" {
+		return err
+	}
+	return fmt.Errorf("%w: %s", err, msg)
 }
 
 func mergeRPath(preferred string, existing string) string {
