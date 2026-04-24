@@ -1336,59 +1336,6 @@ func TestRunClaudeNewSessionRejectsRulesModeForNonClaudePath(t *testing.T) {
 	}
 }
 
-func TestRunClaudeNewSessionRejectsRulesModeForManagedNPMClaudeWrapper(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("skip shell script execution on windows")
-	}
-	withExePatchTestHooks(t)
-
-	prevGOOS := claudeInstallGOOS
-	t.Cleanup(func() { claudeInstallGOOS = prevGOOS })
-	claudeInstallGOOS = "linux"
-
-	cacheRoot := filepath.Join(t.TempDir(), "cache")
-	t.Setenv("XDG_CACHE_HOME", cacheRoot)
-	t.Setenv(claudeProxyHostIDEnv, "rules-managed-npm-host")
-
-	layout, ok := defaultManagedNPMClaudeLayout("linux", os.Getenv)
-	if !ok {
-		t.Fatalf("expected managed npm Claude layout")
-	}
-	if err := os.MkdirAll(filepath.Dir(layout.WrapperPath), 0o755); err != nil {
-		t.Fatalf("mkdir managed npm wrapper dir: %v", err)
-	}
-	if err := os.WriteFile(layout.WrapperPath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatalf("write managed npm wrapper: %v", err)
-	}
-
-	store := newTempStore(t)
-	root := &rootOptions{
-		configPath: store.Path(),
-		exePatch: exePatchOptions{
-			enabledFlag:    true,
-			policySettings: true,
-		},
-	}
-	projectDir := t.TempDir()
-
-	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
-		t.Fatalf("unexpected patch attempt for managed npm rules mode")
-		return nil, nil
-	}
-	runTargetWithFallbackWithOptionsFn = func(ctx context.Context, cmdArgs []string, proxyURL string, healthCheck func() error, patchOutcome *patchOutcome, fatalCh <-chan error, opts runTargetOptions) error {
-		t.Fatalf("unexpected launch attempt for managed npm rules mode")
-		return nil
-	}
-
-	err := runClaudeNewSession(context.Background(), root, store, nil, nil, projectDir, layout.WrapperPath, "", false, config.YoloModeRules, io.Discard)
-	if err == nil {
-		t.Fatalf("expected rules mode validation error")
-	}
-	if !strings.Contains(err.Error(), "native Claude executable; npm or wrapper installs are unsupported") {
-		t.Fatalf("expected managed npm wrapper rules mode error, got %v", err)
-	}
-}
-
 func TestRunClaudeNewSessionRejectsRulesModeWithoutActiveBuiltInPatch(t *testing.T) {
 	withExePatchTestHooks(t)
 

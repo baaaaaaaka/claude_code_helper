@@ -67,6 +67,10 @@ func bunLinuxKernelStartupError(output string, err error) error {
 	return fmt.Errorf("%s", reason)
 }
 
+func isBunStartupCrashFailure(output string, err error) bool {
+	return err != nil && looksLikeBunCrashOutput(output)
+}
+
 func looksLikeBunCrashOutput(output string) bool {
 	lower := strings.ToLower(output)
 	if !strings.Contains(lower, "bun") {

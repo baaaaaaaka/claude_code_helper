@@ -299,6 +299,35 @@ func (opts runTargetOptions) statusWriter() io.Writer {
 	return os.Stderr
 }
 
+func appendEnvOverrides(envVars []string, overrides []string) []string {
+	out := append([]string{}, envVars...)
+	for _, kv := range overrides {
+		key, _, ok := strings.Cut(kv, "=")
+		if !ok || strings.TrimSpace(key) == "" {
+			continue
+		}
+		replaced := false
+		for i, existing := range out {
+			existingKey, _, existingOK := strings.Cut(existing, "=")
+			if existingOK && sameRuntimeEnvKey(existingKey, key) {
+				out[i] = kv
+				replaced = true
+			}
+		}
+		if !replaced {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+func sameRuntimeEnvKey(a string, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
 func runTargetSupervised(
 	ctx context.Context,
 	cmdArgs []string,
@@ -435,6 +464,9 @@ func runTargetWithFallbackWithOptions(
 		stderrBuf := &synchronizedLimitedBuffer{max: maxOutputCaptureBytes}
 		launchArgs := commandArgsForOutcome(patchOutcome, cmdArgs)
 		attemptOpts := opts
+		if patchOutcome != nil && len(patchOutcome.LaunchEnv) > 0 {
+			attemptOpts.ExtraEnv = append(append([]string{}, attemptOpts.ExtraEnv...), patchOutcome.LaunchEnv...)
+		}
 		if attemptOpts.PreserveTTY && (attemptOpts.YoloEnabled || (patchOutcome != nil && patchOutcome.RollbackOnStartupFailure)) {
 			attemptOpts.CaptureTTYOutput = true
 		}
@@ -517,7 +549,7 @@ func runTargetOnceWithOptions(
 		envVars = env.WithProxy(envVars, proxyURL)
 	}
 	if len(opts.ExtraEnv) > 0 {
-		envVars = append(envVars, opts.ExtraEnv...)
+		envVars = appendEnvOverrides(envVars, opts.ExtraEnv)
 	}
 
 	hasCustomIO := opts.PrepareIO != nil

@@ -762,231 +762,6 @@ func TestRunUpgradeClaudeDoesNotRetryWhenGlibcCompatCanHandleProbe(t *testing.T)
 	}
 }
 
-func TestRunUpgradeClaudeFallsBackToManagedNPMWhenInstalledClaudeStillBrokenOnUnsupportedKernel(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("old-kernel Claude fallback only applies on linux")
-	}
-
-	requireExePatchEnabled(t)
-	withExePatchTestHooks(t)
-	withClaudeInstallGOOS(t, "linux")
-
-	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
-	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
-	t.Cleanup(func() { readLinuxKernelReleaseFn = prevReadKernelReleaseFn })
-
-	prevInstaller := runClaudeInstallerFn
-	prevEnsureManagedNPM := ensureManagedNPMClaudeInstalledFn
-	prevPatch := maybePatchExecutableCtxFn
-	prevWait := waitPatchedExecutableReadyFn
-	t.Cleanup(func() {
-		runClaudeInstallerFn = prevInstaller
-		ensureManagedNPMClaudeInstalledFn = prevEnsureManagedNPM
-		maybePatchExecutableCtxFn = prevPatch
-		waitPatchedExecutableReadyFn = prevWait
-	})
-
-	store := newTempStore(t)
-	disabled := false
-	if err := store.Save(config.Config{
-		Version:      config.CurrentVersion,
-		ProxyEnabled: &disabled,
-	}); err != nil {
-		t.Fatalf("save config: %v", err)
-	}
-
-	homeDir := filepath.Join(t.TempDir(), "home")
-	cacheRoot := filepath.Join(t.TempDir(), "cache")
-	t.Setenv("HOME", homeDir)
-	t.Setenv("USERPROFILE", homeDir)
-	t.Setenv("XDG_CACHE_HOME", cacheRoot)
-	t.Setenv(claudeProxyHostIDEnv, "upgrade-old-kernel-host")
-
-	launcherPath := filepath.Join(homeDir, ".local", "bin", testClaudeLauncherName(claudeInstallGOOS))
-	versionPath := filepath.Join(homeDir, ".local", "share", "claude", "versions", "2.1.114")
-	installerCalls := 0
-	runClaudeInstallerFn = func(ctx context.Context, out io.Writer, opts installProxyOptions) error {
-		installerCalls++
-		if err := os.MkdirAll(filepath.Dir(versionPath), 0o755); err != nil {
-			t.Fatalf("mkdir version dir: %v", err)
-		}
-		if err := os.WriteFile(versionPath, testNativeExecutableStubBytesWithMarker(claudeInstallGOOS, "bun-broken"), 0o700); err != nil {
-			t.Fatalf("write version file: %v", err)
-		}
-		if err := os.MkdirAll(filepath.Dir(launcherPath), 0o755); err != nil {
-			t.Fatalf("mkdir launcher dir: %v", err)
-		}
-		if err := os.Remove(launcherPath); err != nil && !os.IsNotExist(err) {
-			t.Fatalf("remove launcher before symlink: %v", err)
-		}
-		if err := os.Symlink(versionPath, launcherPath); err != nil {
-			t.Fatalf("symlink launcher: %v", err)
-		}
-		_, _ = fmt.Fprintf(out, "Version: 2.1.114\nLocation: %s\n", launcherPath)
-		return nil
-	}
-
-	layout, ok := defaultManagedNPMClaudeLayout("linux", os.Getenv)
-	if !ok {
-		t.Fatalf("expected managed npm layout")
-	}
-	npmFallbackCalls := 0
-	ensureManagedNPMClaudeInstalledFn = func(ctx context.Context, out io.Writer, opts installProxyOptions, extraEnv []string) (string, error) {
-		npmFallbackCalls++
-		nodeTarget := filepath.Join(t.TempDir(), "node-bin", "node")
-		writeManagedNPMClaudeFixture(t, layout, nodeTarget)
-		return layout.WrapperPath, nil
-	}
-
-	patchedPath := ""
-	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
-		if len(cmdArgs) != 1 {
-			t.Fatalf("unexpected patch args: %v", cmdArgs)
-		}
-		patchedPath = cmdArgs[0]
-		return &patchOutcome{}, nil
-	}
-	waitPatchedExecutableReadyFn = func(ctx context.Context, outcome *patchOutcome) error { return nil }
-
-	root := &rootOptions{
-		configPath: store.Path(),
-		exePatch: exePatchOptions{
-			enabledFlag:    true,
-			policySettings: true,
-		},
-	}
-	cmd := newUpgradeClaudeCmd(root)
-	cmd.SetOut(io.Discard)
-	cmd.SetErr(io.Discard)
-	cmd.SetContext(context.Background())
-
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("upgrade-claude error: %v", err)
-	}
-	if installerCalls != 1 {
-		t.Fatalf("expected one installer call, got %d", installerCalls)
-	}
-	if npmFallbackCalls != 1 {
-		t.Fatalf("expected one npm fallback call, got %d", npmFallbackCalls)
-	}
-	if !config.PathsEqual(patchedPath, layout.WrapperPath) {
-		t.Fatalf("expected patched path %q, got %q", layout.WrapperPath, patchedPath)
-	}
-}
-
-func TestRunUpgradeClaudeReusesManagedLegacyLauncherWhenInstalledClaudeStillBrokenOnUnsupportedKernel(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("old-kernel Claude fallback only applies on linux")
-	}
-
-	requireExePatchEnabled(t)
-	withExePatchTestHooks(t)
-	withClaudeInstallGOOS(t, "linux")
-
-	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
-	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
-	prevInstaller := runClaudeInstallerFn
-	prevEnsureManagedNPM := ensureManagedNPMClaudeInstalledFn
-	prevPatch := maybePatchExecutableCtxFn
-	prevWait := waitPatchedExecutableReadyFn
-	t.Cleanup(func() {
-		readLinuxKernelReleaseFn = prevReadKernelReleaseFn
-		runClaudeInstallerFn = prevInstaller
-		ensureManagedNPMClaudeInstalledFn = prevEnsureManagedNPM
-		maybePatchExecutableCtxFn = prevPatch
-		waitPatchedExecutableReadyFn = prevWait
-	})
-
-	store := newTempStore(t)
-	disabled := false
-	if err := store.Save(config.Config{
-		Version:      config.CurrentVersion,
-		ProxyEnabled: &disabled,
-	}); err != nil {
-		t.Fatalf("save config: %v", err)
-	}
-
-	homeDir := filepath.Join(t.TempDir(), "home")
-	cacheRoot := filepath.Join(t.TempDir(), "cache")
-	t.Setenv("HOME", homeDir)
-	t.Setenv("USERPROFILE", homeDir)
-	t.Setenv("XDG_CACHE_HOME", cacheRoot)
-	t.Setenv(claudeProxyHostIDEnv, "upgrade-old-kernel-reuse-legacy-host")
-
-	launcherPath := filepath.Join(homeDir, ".local", "bin", testClaudeLauncherName(claudeInstallGOOS))
-	versionPath := filepath.Join(homeDir, ".local", "share", "claude", "versions", "2.1.114")
-	installerCalls := 0
-	runClaudeInstallerFn = func(ctx context.Context, out io.Writer, opts installProxyOptions) error {
-		installerCalls++
-		if err := os.MkdirAll(filepath.Dir(versionPath), 0o755); err != nil {
-			t.Fatalf("mkdir version dir: %v", err)
-		}
-		script := "#!/bin/sh\necho 'broken installed claude' >&2\nexit 1\n"
-		if err := os.WriteFile(versionPath, []byte(script), 0o700); err != nil {
-			t.Fatalf("write version file: %v", err)
-		}
-		if err := os.MkdirAll(filepath.Dir(launcherPath), 0o755); err != nil {
-			t.Fatalf("mkdir launcher dir: %v", err)
-		}
-		if err := os.Remove(launcherPath); err != nil && !os.IsNotExist(err) {
-			t.Fatalf("remove launcher before symlink: %v", err)
-		}
-		if err := os.Symlink(versionPath, launcherPath); err != nil {
-			t.Fatalf("symlink launcher: %v", err)
-		}
-		_, _ = fmt.Fprintf(out, "Version: 2.1.114\nLocation: %s\n", launcherPath)
-		return nil
-	}
-
-	layout, ok := defaultManagedNPMClaudeLayout("linux", os.Getenv)
-	if !ok {
-		t.Fatalf("expected managed npm layout")
-	}
-	nodeTarget := filepath.Join(t.TempDir(), "node-bin", "node")
-	writeManagedNPMClaudeFixture(t, layout, nodeTarget)
-
-	npmFallbackCalls := 0
-	ensureManagedNPMClaudeInstalledFn = func(ctx context.Context, out io.Writer, opts installProxyOptions, extraEnv []string) (string, error) {
-		npmFallbackCalls++
-		return "", fmt.Errorf("unexpected legacy compatibility reinstall")
-	}
-
-	patchedPath := ""
-	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
-		if len(cmdArgs) != 1 {
-			t.Fatalf("unexpected patch args: %v", cmdArgs)
-		}
-		patchedPath = cmdArgs[0]
-		return &patchOutcome{}, nil
-	}
-	waitPatchedExecutableReadyFn = func(ctx context.Context, outcome *patchOutcome) error { return nil }
-
-	root := &rootOptions{
-		configPath: store.Path(),
-		exePatch: exePatchOptions{
-			enabledFlag:    true,
-			policySettings: true,
-		},
-	}
-	cmd := newUpgradeClaudeCmd(root)
-	cmd.SetOut(io.Discard)
-	cmd.SetErr(io.Discard)
-	cmd.SetContext(context.Background())
-
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("upgrade-claude error: %v", err)
-	}
-	if installerCalls != 1 {
-		t.Fatalf("expected one installer call, got %d", installerCalls)
-	}
-	if npmFallbackCalls != 0 {
-		t.Fatalf("expected no legacy compatibility reinstall, got %d calls", npmFallbackCalls)
-	}
-	if !config.PathsEqual(patchedPath, layout.WrapperPath) {
-		t.Fatalf("expected patched path %q, got %q", layout.WrapperPath, patchedPath)
-	}
-}
-
 func TestRunUpgradeClaudeReusesRecoveredLauncherWhenInstalledClaudeStillBrokenOnUnsupportedKernel(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("old-kernel Claude fallback only applies on linux")
@@ -999,14 +774,12 @@ func TestRunUpgradeClaudeReusesRecoveredLauncherWhenInstalledClaudeStillBrokenOn
 	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
 	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("3.10.0-1160.el7.x86_64"), nil }
 	prevInstaller := runClaudeInstallerFn
-	prevEnsureManagedNPM := ensureManagedNPMClaudeInstalledFn
 	prevPatch := maybePatchExecutableCtxFn
 	prevWait := waitPatchedExecutableReadyFn
 	prevGlibcPatch := applyClaudeGlibcCompatPatchFn
 	t.Cleanup(func() {
 		readLinuxKernelReleaseFn = prevReadKernelReleaseFn
 		runClaudeInstallerFn = prevInstaller
-		ensureManagedNPMClaudeInstalledFn = prevEnsureManagedNPM
 		maybePatchExecutableCtxFn = prevPatch
 		waitPatchedExecutableReadyFn = prevWait
 		applyClaudeGlibcCompatPatchFn = prevGlibcPatch
@@ -1086,12 +859,6 @@ func TestRunUpgradeClaudeReusesRecoveredLauncherWhenInstalledClaudeStillBrokenOn
 		}, true, nil
 	}
 
-	npmFallbackCalls := 0
-	ensureManagedNPMClaudeInstalledFn = func(ctx context.Context, out io.Writer, opts installProxyOptions, extraEnv []string) (string, error) {
-		npmFallbackCalls++
-		return "", fmt.Errorf("unexpected legacy compatibility reinstall")
-	}
-
 	patchedPath := ""
 	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
 		if len(cmdArgs) != 1 {
@@ -1122,270 +889,8 @@ func TestRunUpgradeClaudeReusesRecoveredLauncherWhenInstalledClaudeStillBrokenOn
 	if installerCalls != 1 {
 		t.Fatalf("expected one installer call, got %d", installerCalls)
 	}
-	if npmFallbackCalls != 0 {
-		t.Fatalf("expected no legacy compatibility reinstall, got %d calls", npmFallbackCalls)
-	}
 	if !config.PathsEqual(patchedPath, recoveryLauncher) {
 		t.Fatalf("expected patched path %q, got %q", recoveryLauncher, patchedPath)
-	}
-}
-
-func TestRunUpgradeClaudeFallsBackToManagedNPMWhenRetryStillBrokenOnUnsupportedKernel(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("old-kernel Claude fallback only applies on linux")
-	}
-
-	requireExePatchEnabled(t)
-	withExePatchTestHooks(t)
-	withClaudeInstallGOOS(t, "linux")
-
-	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
-	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
-	prevProbe := probeInstalledClaudeVersionFn
-	prevInstaller := runClaudeInstallerFn
-	prevEnsureManagedNPM := ensureManagedNPMClaudeInstalledFn
-	prevPatch := maybePatchExecutableCtxFn
-	prevWait := waitPatchedExecutableReadyFn
-	t.Cleanup(func() {
-		readLinuxKernelReleaseFn = prevReadKernelReleaseFn
-		probeInstalledClaudeVersionFn = prevProbe
-		runClaudeInstallerFn = prevInstaller
-		ensureManagedNPMClaudeInstalledFn = prevEnsureManagedNPM
-		maybePatchExecutableCtxFn = prevPatch
-		waitPatchedExecutableReadyFn = prevWait
-	})
-
-	probeInstalledClaudeVersionFn = func(ctx context.Context, path string) (bool, error) {
-		return false, nil
-	}
-
-	store := newTempStore(t)
-	disabled := false
-	if err := store.Save(config.Config{
-		Version:      config.CurrentVersion,
-		ProxyEnabled: &disabled,
-	}); err != nil {
-		t.Fatalf("save config: %v", err)
-	}
-
-	dir := t.TempDir()
-	homeDir := filepath.Join(dir, "home")
-	cacheRoot := filepath.Join(dir, "cache")
-	t.Setenv("HOME", homeDir)
-	t.Setenv("USERPROFILE", homeDir)
-	t.Setenv("XDG_CACHE_HOME", cacheRoot)
-	t.Setenv(claudeProxyHostIDEnv, "upgrade-old-kernel-retry-host")
-
-	versionsDir := filepath.Join(homeDir, ".local", "share", "claude", "versions")
-	versionPath := filepath.Join(versionsDir, "2.1.114")
-	if err := os.MkdirAll(versionsDir, 0o755); err != nil {
-		t.Fatalf("mkdir version dir: %v", err)
-	}
-	if err := os.WriteFile(versionPath, testNativeExecutableStubBytesWithMarker(claudeInstallGOOS, "original"), 0o700); err != nil {
-		t.Fatalf("write original version file: %v", err)
-	}
-	launcherPath := filepath.Join(homeDir, ".local", "bin", testClaudeLauncherName(claudeInstallGOOS))
-	if err := os.MkdirAll(filepath.Dir(launcherPath), 0o755); err != nil {
-		t.Fatalf("mkdir launcher dir: %v", err)
-	}
-	if err := os.Symlink(versionPath, launcherPath); err != nil {
-		t.Fatalf("symlink launcher: %v", err)
-	}
-
-	installerCalls := 0
-	runClaudeInstallerFn = func(ctx context.Context, out io.Writer, opts installProxyOptions) error {
-		installerCalls++
-		if installerCalls == 2 {
-			retryVersionPath := filepath.Join(versionsDir, "2.1.115")
-			if err := os.WriteFile(retryVersionPath, testNativeExecutableStubBytesWithMarker(claudeInstallGOOS, "still-bad"), 0o700); err != nil {
-				t.Fatalf("write retry version file: %v", err)
-			}
-			if err := os.Remove(launcherPath); err != nil {
-				t.Fatalf("remove launcher before retry symlink: %v", err)
-			}
-			if err := os.Symlink(retryVersionPath, launcherPath); err != nil {
-				t.Fatalf("symlink retry launcher: %v", err)
-			}
-		}
-		_, _ = fmt.Fprintf(out, "Version: 2.1.114\nLocation: %s\n", launcherPath)
-		return nil
-	}
-
-	layout, ok := defaultManagedNPMClaudeLayout("linux", os.Getenv)
-	if !ok {
-		t.Fatalf("expected managed npm layout")
-	}
-	npmFallbackCalls := 0
-	ensureManagedNPMClaudeInstalledFn = func(ctx context.Context, out io.Writer, opts installProxyOptions, extraEnv []string) (string, error) {
-		npmFallbackCalls++
-		nodeTarget := filepath.Join(t.TempDir(), "node-bin", "node")
-		writeManagedNPMClaudeFixture(t, layout, nodeTarget)
-		return layout.WrapperPath, nil
-	}
-
-	patchedPath := ""
-	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
-		if len(cmdArgs) != 1 {
-			t.Fatalf("unexpected patch args: %v", cmdArgs)
-		}
-		patchedPath = cmdArgs[0]
-		return &patchOutcome{}, nil
-	}
-	waitPatchedExecutableReadyFn = func(ctx context.Context, outcome *patchOutcome) error { return nil }
-
-	root := &rootOptions{
-		configPath: store.Path(),
-		exePatch: exePatchOptions{
-			enabledFlag:    true,
-			policySettings: true,
-		},
-	}
-	cmd := newUpgradeClaudeCmd(root)
-	cmd.SetOut(io.Discard)
-	cmd.SetErr(io.Discard)
-	cmd.SetContext(context.Background())
-
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("upgrade-claude error: %v", err)
-	}
-	if installerCalls != 2 {
-		t.Fatalf("expected installer retry before npm fallback, got %d calls", installerCalls)
-	}
-	if npmFallbackCalls != 1 {
-		t.Fatalf("expected one npm fallback call, got %d", npmFallbackCalls)
-	}
-	if !config.PathsEqual(patchedPath, layout.WrapperPath) {
-		t.Fatalf("expected patched path %q, got %q", layout.WrapperPath, patchedPath)
-	}
-}
-
-func TestRunUpgradeClaudeReusesManagedLegacyLauncherWhenRetryStillBrokenOnUnsupportedKernel(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("old-kernel Claude fallback only applies on linux")
-	}
-
-	requireExePatchEnabled(t)
-	withExePatchTestHooks(t)
-	withClaudeInstallGOOS(t, "linux")
-
-	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
-	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
-	prevProbeInstalled := probeInstalledClaudeVersionFn
-	prevInstaller := runClaudeInstallerFn
-	prevEnsureManagedNPM := ensureManagedNPMClaudeInstalledFn
-	prevPatch := maybePatchExecutableCtxFn
-	prevWait := waitPatchedExecutableReadyFn
-	t.Cleanup(func() {
-		readLinuxKernelReleaseFn = prevReadKernelReleaseFn
-		probeInstalledClaudeVersionFn = prevProbeInstalled
-		runClaudeInstallerFn = prevInstaller
-		ensureManagedNPMClaudeInstalledFn = prevEnsureManagedNPM
-		maybePatchExecutableCtxFn = prevPatch
-		waitPatchedExecutableReadyFn = prevWait
-	})
-
-	probeInstalledClaudeVersionFn = func(ctx context.Context, path string) (bool, error) {
-		return false, nil
-	}
-
-	store := newTempStore(t)
-	disabled := false
-	if err := store.Save(config.Config{
-		Version:      config.CurrentVersion,
-		ProxyEnabled: &disabled,
-	}); err != nil {
-		t.Fatalf("save config: %v", err)
-	}
-
-	dir := t.TempDir()
-	homeDir := filepath.Join(dir, "home")
-	cacheRoot := filepath.Join(dir, "cache")
-	t.Setenv("HOME", homeDir)
-	t.Setenv("USERPROFILE", homeDir)
-	t.Setenv("XDG_CACHE_HOME", cacheRoot)
-	t.Setenv(claudeProxyHostIDEnv, "upgrade-old-kernel-retry-reuse-legacy-host")
-
-	versionsDir := filepath.Join(homeDir, ".local", "share", "claude", "versions")
-	versionPath := filepath.Join(versionsDir, "2.1.114")
-	if err := os.MkdirAll(versionsDir, 0o755); err != nil {
-		t.Fatalf("mkdir version dir: %v", err)
-	}
-	if err := os.WriteFile(versionPath, testNativeExecutableStubBytesWithMarker(claudeInstallGOOS, "original"), 0o700); err != nil {
-		t.Fatalf("write original version file: %v", err)
-	}
-	launcherPath := filepath.Join(homeDir, ".local", "bin", testClaudeLauncherName(claudeInstallGOOS))
-	if err := os.MkdirAll(filepath.Dir(launcherPath), 0o755); err != nil {
-		t.Fatalf("mkdir launcher dir: %v", err)
-	}
-	if err := os.Symlink(versionPath, launcherPath); err != nil {
-		t.Fatalf("symlink launcher: %v", err)
-	}
-
-	layout, ok := defaultManagedNPMClaudeLayout("linux", os.Getenv)
-	if !ok {
-		t.Fatalf("expected managed npm layout")
-	}
-	installerCalls := 0
-	runClaudeInstallerFn = func(ctx context.Context, out io.Writer, opts installProxyOptions) error {
-		installerCalls++
-		if installerCalls == 2 {
-			retryVersionPath := filepath.Join(versionsDir, "2.1.115")
-			retryScript := "#!/bin/sh\necho 'broken installed claude' >&2\nexit 1\n"
-			if err := os.WriteFile(retryVersionPath, []byte(retryScript), 0o700); err != nil {
-				t.Fatalf("write retry version file: %v", err)
-			}
-			if err := os.Remove(launcherPath); err != nil {
-				t.Fatalf("remove launcher before retry symlink: %v", err)
-			}
-			if err := os.Symlink(retryVersionPath, launcherPath); err != nil {
-				t.Fatalf("symlink retry launcher: %v", err)
-			}
-			nodeTarget := filepath.Join(t.TempDir(), "node-bin", "node")
-			writeManagedNPMClaudeFixture(t, layout, nodeTarget)
-		}
-		_, _ = fmt.Fprintf(out, "Version: 2.1.114\nLocation: %s\n", launcherPath)
-		return nil
-	}
-
-	npmFallbackCalls := 0
-	ensureManagedNPMClaudeInstalledFn = func(ctx context.Context, out io.Writer, opts installProxyOptions, extraEnv []string) (string, error) {
-		npmFallbackCalls++
-		return "", fmt.Errorf("unexpected legacy compatibility reinstall")
-	}
-
-	patchedPath := ""
-	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
-		if len(cmdArgs) != 1 {
-			t.Fatalf("unexpected patch args: %v", cmdArgs)
-		}
-		patchedPath = cmdArgs[0]
-		return &patchOutcome{}, nil
-	}
-	waitPatchedExecutableReadyFn = func(ctx context.Context, outcome *patchOutcome) error { return nil }
-
-	root := &rootOptions{
-		configPath: store.Path(),
-		exePatch: exePatchOptions{
-			enabledFlag:    true,
-			policySettings: true,
-		},
-	}
-	cmd := newUpgradeClaudeCmd(root)
-	cmd.SetOut(io.Discard)
-	cmd.SetErr(io.Discard)
-	cmd.SetContext(context.Background())
-
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("upgrade-claude error: %v", err)
-	}
-	if installerCalls != 2 {
-		t.Fatalf("expected installer retry before reusing the existing managed launcher, got %d calls", installerCalls)
-	}
-	if npmFallbackCalls != 0 {
-		t.Fatalf("expected no legacy compatibility reinstall, got %d calls", npmFallbackCalls)
-	}
-	if !config.PathsEqual(patchedPath, layout.WrapperPath) {
-		t.Fatalf("expected patched path %q, got %q", layout.WrapperPath, patchedPath)
 	}
 }
 
@@ -1401,14 +906,12 @@ func TestRunUpgradeClaudeSkipsRecoveryReuseWhenGlibcCompatDisabled(t *testing.T)
 	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
 	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("3.10.0-1160.el7.x86_64"), nil }
 	prevInstaller := runClaudeInstallerFn
-	prevEnsureManagedNPM := ensureManagedNPMClaudeInstalledFn
 	prevPatch := maybePatchExecutableCtxFn
 	prevWait := waitPatchedExecutableReadyFn
 	prevGlibcPatch := applyClaudeGlibcCompatPatchFn
 	t.Cleanup(func() {
 		readLinuxKernelReleaseFn = prevReadKernelReleaseFn
 		runClaudeInstallerFn = prevInstaller
-		ensureManagedNPMClaudeInstalledFn = prevEnsureManagedNPM
 		maybePatchExecutableCtxFn = prevPatch
 		waitPatchedExecutableReadyFn = prevWait
 		applyClaudeGlibcCompatPatchFn = prevGlibcPatch
@@ -1447,21 +950,11 @@ func TestRunUpgradeClaudeSkipsRecoveryReuseWhenGlibcCompatDisabled(t *testing.T)
 		t.Fatalf("write recovery launcher: %v", err)
 	}
 
-	layout, ok := defaultManagedNPMClaudeLayout("linux", os.Getenv)
-	if !ok {
-		t.Fatalf("expected managed npm layout")
-	}
-	nodeTarget := filepath.Join(t.TempDir(), "node-bin", "node")
-	writeManagedNPMClaudeFixture(t, layout, nodeTarget)
-
 	installerCalls := 0
 	runClaudeInstallerFn = func(ctx context.Context, out io.Writer, opts installProxyOptions) error {
 		installerCalls++
 		_, _ = fmt.Fprintf(out, "Version: 2.1.114\nLocation: %s\n", launcherPath)
 		return nil
-	}
-	ensureManagedNPMClaudeInstalledFn = func(ctx context.Context, out io.Writer, opts installProxyOptions, extraEnv []string) (string, error) {
-		return "", fmt.Errorf("unexpected legacy compatibility reinstall")
 	}
 	applyClaudeGlibcCompatPatchFn = func(path string, opts exePatchOptions, log io.Writer, dryRun bool, outcome *patchOutcome) (*patchOutcome, bool, error) {
 		t.Fatalf("did not expect glibc compat probe when the flag is disabled")
@@ -1491,14 +984,18 @@ func TestRunUpgradeClaudeSkipsRecoveryReuseWhenGlibcCompatDisabled(t *testing.T)
 	cmd.SetErr(io.Discard)
 	cmd.SetContext(context.Background())
 
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("upgrade-claude error: %v", err)
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected upgrade-claude to fail without glibc compat or a usable recovered launcher")
+	}
+	if !strings.Contains(err.Error(), "still unusable") {
+		t.Fatalf("expected unusable launcher error, got %v", err)
 	}
 	if installerCalls != 1 {
 		t.Fatalf("expected one installer call, got %d", installerCalls)
 	}
-	if !config.PathsEqual(patchedPath, layout.WrapperPath) {
-		t.Fatalf("expected patched path %q, got %q", layout.WrapperPath, patchedPath)
+	if patchedPath != "" {
+		t.Fatalf("expected no patch prewarm after failed refresh, got %q", patchedPath)
 	}
 }
 
@@ -1514,13 +1011,11 @@ func TestRunUpgradeClaudeKeepsUsableNativeClaudeOnUnsupportedKernel(t *testing.T
 	prevReadKernelReleaseFn := readLinuxKernelReleaseFn
 	readLinuxKernelReleaseFn = func() ([]byte, error) { return []byte("4.18.0-553.el8.x86_64"), nil }
 	prevInstaller := runClaudeInstallerFn
-	prevEnsureManagedNPM := ensureManagedNPMClaudeInstalledFn
 	prevPatch := maybePatchExecutableCtxFn
 	prevWait := waitPatchedExecutableReadyFn
 	t.Cleanup(func() {
 		readLinuxKernelReleaseFn = prevReadKernelReleaseFn
 		runClaudeInstallerFn = prevInstaller
-		ensureManagedNPMClaudeInstalledFn = prevEnsureManagedNPM
 		maybePatchExecutableCtxFn = prevPatch
 		waitPatchedExecutableReadyFn = prevWait
 	})
@@ -1556,12 +1051,6 @@ func TestRunUpgradeClaudeKeepsUsableNativeClaudeOnUnsupportedKernel(t *testing.T
 		return nil
 	}
 
-	npmFallbackCalls := 0
-	ensureManagedNPMClaudeInstalledFn = func(ctx context.Context, out io.Writer, opts installProxyOptions, extraEnv []string) (string, error) {
-		npmFallbackCalls++
-		return "", fmt.Errorf("unexpected npm fallback")
-	}
-
 	patchedPath := ""
 	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
 		if len(cmdArgs) != 1 {
@@ -1589,9 +1078,6 @@ func TestRunUpgradeClaudeKeepsUsableNativeClaudeOnUnsupportedKernel(t *testing.T
 	}
 	if installerCalls != 1 {
 		t.Fatalf("expected one installer call, got %d", installerCalls)
-	}
-	if npmFallbackCalls != 0 {
-		t.Fatalf("expected no npm fallback call, got %d", npmFallbackCalls)
 	}
 	if !config.PathsEqual(patchedPath, launcherPath) {
 		t.Fatalf("expected patched path %q, got %q", launcherPath, patchedPath)

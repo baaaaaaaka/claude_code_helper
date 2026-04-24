@@ -97,7 +97,7 @@ func runUpgradeClaude(cmd *cobra.Command, root *rootOptions, profileRef string) 
 	if err != nil {
 		return err
 	}
-	claudePath, err = ensureInstalledClaudeUsableAfterUpgrade(ctx, installOut, opts, root.exePatch, claudePath)
+	claudePath, err = ensureInstalledClaudeUsableAfterUpgrade(ctx, installOut, root.exePatch, claudePath)
 	if err != nil {
 		return err
 	}
@@ -268,12 +268,6 @@ func maybeRepairInstalledClaude(ctx context.Context, installOut io.Writer, insta
 			removeStashedClaudeVersionFile(stashedPath)
 			return reusablePath, nil
 		}
-		if fallbackPath, fallbackErr := maybeInstallManagedNPMClaudeForOldKernel(ctx, installOut, installOpts, retriedClaudePath, fmt.Sprintf("Claude installer retry still produced an unusable version file (%s)", problem)); fallbackErr == nil {
-			removeStashedClaudeVersionFile(stashedPath)
-			return fallbackPath, nil
-		} else if shouldValidateManagedClaudePath(claudeInstallGOOS, retriedClaudePath, os.Getenv) {
-			return "", restoreOriginal(fmt.Errorf("Claude installer retry still produced an unusable version file (%s); legacy compatibility launcher failed: %w", problem, fallbackErr))
-		}
 		return "", restoreOriginal(fmt.Errorf("Claude installer retry still produced an unusable version file (%s)", problem))
 	}
 	removeStashedClaudeVersionFile(stashedPath)
@@ -281,11 +275,11 @@ func maybeRepairInstalledClaude(ctx context.Context, installOut io.Writer, insta
 	return retriedClaudePath, nil
 }
 
-func ensureInstalledClaudeUsableAfterUpgrade(ctx context.Context, installOut io.Writer, installOpts installProxyOptions, patchOpts exePatchOptions, claudePath string) (string, error) {
-	if !shouldValidateManagedClaudePath(claudeInstallGOOS, claudePath, os.Getenv) {
+func ensureInstalledClaudeUsableAfterUpgrade(ctx context.Context, installOut io.Writer, patchOpts exePatchOptions, claudePath string) (string, error) {
+	if !shouldValidateManagedClaudePath(claudeInstallGOOS) {
 		return claudePath, nil
 	}
-	if err := probeManagedClaudeLauncher(ctx, claudePath, patchOpts); err == nil {
+	if _, err := probeManagedClaudeLauncher(ctx, claudePath, patchOpts); err == nil {
 		return claudePath, nil
 	} else {
 		if reusablePath, reusable := findUsableManagedClaudePath(ctx, installOut, claudeInstallGOOS, "", os.Getenv, patchOpts); reusable && !config.PathsEqual(reusablePath, claudePath) {
@@ -294,18 +288,8 @@ func ensureInstalledClaudeUsableAfterUpgrade(ctx context.Context, installOut io.
 			}
 			return reusablePath, nil
 		}
-		return maybeInstallManagedNPMClaudeForOldKernel(ctx, installOut, installOpts, claudePath, fmt.Sprintf("Claude installer finished but the installed launcher at %s is still unusable on this old-kernel host (probe error: %v)", claudePath, err))
+		return "", fmt.Errorf("Claude installer finished but the installed launcher at %s is still unusable on this old-kernel host: %w", claudePath, err)
 	}
-}
-
-func maybeInstallManagedNPMClaudeForOldKernel(ctx context.Context, installOut io.Writer, installOpts installProxyOptions, claudePath string, reason string) (string, error) {
-	if !shouldValidateManagedClaudePath(claudeInstallGOOS, claudePath, os.Getenv) {
-		return "", fmt.Errorf("legacy compatibility launcher is not required for %s", claudePath)
-	}
-	if installOut != nil {
-		_, _ = fmt.Fprintf(installOut, "%s; installing the claude-proxy-managed legacy compatibility launcher instead.\n", reason)
-	}
-	return ensureManagedNPMClaudeInstalledFn(ctx, installOut, installOpts, nil)
 }
 
 func shouldRepairInstalledClaude(ctx context.Context, before installedClaudeBinaryState, after installedClaudeBinaryState, patchOpts exePatchOptions) (bool, string, error) {

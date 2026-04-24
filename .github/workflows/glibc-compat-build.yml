@@ -95,14 +95,6 @@ jobs:
           check_max_glibc "$lib_dir/libstdc++.so.6" "GLIBC_2.31"
           check_max_glibc "$lib_dir/libgcc_s.so.1" "GLIBC_2.31"
 
-      - name: Smoke test Node.js on CentOS7 with compat bundle
-        shell: bash
-        timeout-minutes: 10
-        run: |
-          set -euo pipefail
-          BUNDLE="$PWD/dist/glibc-compat/$GLIBC_COMPAT_BUNDLE" \
-            bash scripts/glibc/test_centos7_node_with_glibc_compat.sh
-
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:

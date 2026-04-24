@@ -4,8 +4,8 @@ set -euo pipefail
 # Build glibc 2.31 in a CentOS 7 container without replacing system glibc.
 # The result is an isolated runtime bundle that can be used as a compat layer.
 # After the CentOS 7 build completes, augment the bundle with Rocky Linux 8
-# libstdc++/libgcc runtime libraries so Node/npm can also run on EL7 through
-# the same launcher.
+# libstdc++/libgcc runtime libraries so newer native launchers can run on EL7
+# through the same compat path.
 #
 # Example:
 #   bash scripts/glibc/build_glibc_231_centos7.sh

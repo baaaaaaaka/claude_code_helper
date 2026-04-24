@@ -266,6 +266,22 @@ func TestRunTargetWithFallbackUsesLaunchArgsPrefix(t *testing.T) {
 	}
 }
 
+func TestRunTargetWithFallbackUsesPatchOutcomeLaunchEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script test on windows")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "check-env.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nif [ \"$BUN_FEATURE_FLAG_DISABLE_MEMFD\" = \"1\" ]; then exit 0; fi\nexit 23\n"), 0o700); err != nil {
+		t.Fatalf("write env script: %v", err)
+	}
+
+	outcome := &patchOutcome{LaunchEnv: []string{"BUN_FEATURE_FLAG_DISABLE_MEMFD=1"}}
+	if err := runTargetWithFallbackWithOptions(context.Background(), []string{script}, "", nil, outcome, nil, runTargetOptions{UseProxy: false}); err != nil {
+		t.Fatalf("runTargetWithFallbackWithOptions error: %v", err)
+	}
+}
+
 func TestLimitedBufferWrite(t *testing.T) {
 	buf := &limitedBuffer{max: 5}
 	if _, err := buf.Write([]byte("abc")); err != nil {

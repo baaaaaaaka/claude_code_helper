@@ -5,9 +5,6 @@ test_bin="${TEST_BIN_PATH:-/dist/claude_cli_test}"
 test_name="${CLAUDE_INSTALL_TEST_NAME:-TestClaudeInstallLaunchIntegration}"
 needs_patchelf="${CLAUDE_INSTALL_NEEDS_PATCHELF:-0}"
 needs_tar="${CLAUDE_INSTALL_NEEDS_TAR:-0}"
-needs_node="${CLAUDE_INSTALL_NEEDS_NODE:-0}"
-drop_npm="${CLAUDE_INSTALL_DROP_NPM:-0}"
-node_version="${CLAUDE_INSTALL_NODE_VERSION:-v18.20.8}"
 glibc_compat_bundle="${CLAUDE_INSTALL_GLIBC_COMPAT_BUNDLE:-}"
 
 retry_cmd() {
@@ -39,9 +36,6 @@ install_deps() {
     if [[ "$needs_tar" == "1" ]]; then
       pkgs+=(tar)
     fi
-    if [[ "$needs_node" == "1" ]]; then
-      pkgs+=(xz-utils)
-    fi
     retry_cmd apt-get \
       -o Acquire::Retries=3 \
       -o Acquire::http::Timeout=30 \
@@ -63,9 +57,6 @@ install_deps() {
     if [[ "$needs_tar" == "1" ]]; then
       pkgs+=(tar)
     fi
-    if [[ "$needs_node" == "1" ]]; then
-      pkgs+=(xz)
-    fi
     retry_cmd dnf -y --setopt=retries=3 install "${pkgs[@]}"
     return
   fi
@@ -80,9 +71,6 @@ install_deps() {
     if [[ "$needs_tar" == "1" ]]; then
       pkgs+=(tar)
     fi
-    if [[ "$needs_node" == "1" ]]; then
-      pkgs+=(xz)
-    fi
     retry_cmd yum -y --setopt=retries=3 install "${pkgs[@]}"
     if [[ "$needs_patchelf" == "1" ]]; then
       retry_cmd yum -y --setopt=retries=3 install epel-release
@@ -95,48 +83,6 @@ install_deps() {
   exit 1
 }
 
-install_node_runtime() {
-  if [[ "$needs_node" != "1" ]]; then
-    return
-  fi
-
-  local arch
-  case "$(uname -m)" in
-    x86_64|amd64)
-      arch="x64"
-      ;;
-    aarch64|arm64)
-      arch="arm64"
-      ;;
-    *)
-      echo "Unsupported architecture for Node runtime bootstrap: $(uname -m)" >&2
-      exit 1
-      ;;
-  esac
-
-  local url="https://nodejs.org/dist/${node_version}/node-${node_version}-linux-${arch}.tar.xz"
-  local archive="/tmp/node-${node_version}-linux-${arch}.tar.xz"
-  rm -rf /opt/node
-  mkdir -p /opt/node
-  if command -v curl >/dev/null 2>&1; then
-    retry_cmd curl -fsSL "$url" -o "$archive"
-  elif command -v wget >/dev/null 2>&1; then
-    retry_cmd wget -qO "$archive" "$url"
-  else
-    echo "Neither curl nor wget is available for Node runtime bootstrap" >&2
-    exit 1
-  fi
-  tar -xJf "$archive" -C /opt/node --strip-components=1
-  export PATH="/opt/node/bin:$PATH"
-  if [[ "$drop_npm" == "1" ]]; then
-    rm -f /opt/node/bin/npm /opt/node/bin/npx
-    echo "Removed npm from the installed system Node runtime under /opt/node/bin to exercise the node-without-npm fallback path."
-  fi
-  if node --version && npm --version; then
-    return
-  fi
-  echo "Installed Node runtime under /opt/node/bin, but raw node/npm are not runnable on this userland; continuing so claude-proxy can exercise its glibc compat path." >&2
-}
 
 prepare_glibc_compat_runtime() {
   if [[ -z "$glibc_compat_bundle" ]]; then
@@ -191,7 +137,6 @@ fi
 echo "Running Claude install+launch smoke in container"
 
 install_deps
-install_node_runtime
 prepare_glibc_compat_runtime
 apply_proxy_env
 

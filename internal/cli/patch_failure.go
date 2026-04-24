@@ -202,14 +202,25 @@ func runClaudeProbeArgs(args []string, arg string) (string, error) {
 }
 
 func runClaudeProbeWithContext(parent context.Context, path string, arg string, timeout time.Duration) (string, error) {
+	return runClaudeProbeWithContextEnv(parent, path, arg, timeout, nil)
+}
+
+func runClaudeProbeWithContextEnv(parent context.Context, path string, arg string, timeout time.Duration, extraEnv []string) (string, error) {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, arg)
+	if len(extraEnv) > 0 {
+		cmd.Env = appendEnvOverrides(os.Environ(), extraEnv)
+	}
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
 
 func runClaudeProbeArgsWithContext(parent context.Context, args []string, arg string, timeout time.Duration) (string, error) {
+	return runClaudeProbeArgsWithContextEnv(parent, args, arg, timeout, nil)
+}
+
+func runClaudeProbeArgsWithContextEnv(parent context.Context, args []string, arg string, timeout time.Duration, extraEnv []string) (string, error) {
 	if len(args) == 0 {
 		return "", errors.New("missing probe command")
 	}
@@ -217,16 +228,25 @@ func runClaudeProbeArgsWithContext(parent context.Context, args []string, arg st
 	defer cancel()
 	cmdArgs := append(append([]string{}, args...), arg)
 	cmd := exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)
+	if len(extraEnv) > 0 {
+		cmd.Env = appendEnvOverrides(os.Environ(), extraEnv)
+	}
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
 
 func runClaudeProbeOutcome(outcome *patchOutcome, fallbackPath string, arg string) (string, error) {
 	if probeArgs := probeArgsForOutcome(outcome, arg); len(probeArgs) > 0 {
+		if outcome != nil && len(outcome.LaunchEnv) > 0 {
+			return runClaudeProbeArgsWithContextEnv(context.Background(), probeArgs[:len(probeArgs)-1], probeArgs[len(probeArgs)-1], 15*time.Second, outcome.LaunchEnv)
+		}
 		if len(probeArgs) == 2 {
 			return runClaudeProbeFn(probeArgs[0], probeArgs[1])
 		}
 		return runClaudeProbeArgs(probeArgs[:len(probeArgs)-1], probeArgs[len(probeArgs)-1])
+	}
+	if outcome != nil && len(outcome.LaunchEnv) > 0 {
+		return runClaudeProbeWithContextEnv(context.Background(), fallbackPath, arg, 15*time.Second, outcome.LaunchEnv)
 	}
 	return runClaudeProbeFn(fallbackPath, arg)
 }

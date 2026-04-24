@@ -174,13 +174,9 @@ patch test results (linux/mac/windows + linux distros).
   uses its managed Claude Code install by default. If that launcher is missing,
   it will automatically prepare a usable Claude launcher for this host.
 - On Linux hosts whose kernel is too old for Claude Code's bundled Bun
-  runtime, `claude-proxy` treats success as "a usable launcher exists on this
-  host", not "the latest official native launcher won". It keeps the first
-  launcher it can verify on that host, including a working native launcher, an
-  EL7 recovery launcher, or the claude-proxy-managed legacy compatibility
-  launcher. Set `CLAUDE_PROXY_OVERRIDE_BUN_KERNEL_CHECK=false` to skip native
-  installer attempts and force the legacy compatibility launcher on `< 5.1`
-  kernels.
+  runtime, `claude-proxy` verifies managed launchers before reusing them and
+  reports the kernel compatibility problem if no native or recovered launcher
+  can run on that host.
 - On EL7/CentOS 7 hosts, if the official installer fails because the downloaded
   Claude binary needs a newer glibc, `claude-proxy` can reuse that downloaded
   binary through a private launcher and then continue with its glibc compat
@@ -205,20 +201,6 @@ patch test results (linux/mac/windows + linux distros).
   `patchelf`-based mirror and falling back to a wrapper when needed. If
   `--exe-patch-glibc-root` is not set, the compat runtime is auto-downloaded
   from GitHub release assets on supported linux/amd64 builds.
-- The legacy compatibility launcher is treated as a wrapper launch path rather
-  than a native Claude binary, so built-in Claude byte patches stay disabled
-  for that route. When `claude-proxy` does need that launcher on Linux, it
-  will first probe a usable `node`/`npm` toolchain from PATH, keep the install
-  isolated under its own npm prefix, and automatically retry with a private
-  Node.js runtime if the local npm toolchain cannot install a working legacy
-  Claude Code launcher. When needed, it bootstraps that private runtime under
-  `~/.cache/claude-proxy/hosts/<host-id>/npm-install/runtime/...`. On
-  EL7/CentOS 7 hosts, if that Node.js runtime itself needs a newer glibc,
-  `claude-proxy` can prepare a host-local glibc compat launch path for `node`
-  and reuse that both for `npm install` and the final legacy compatibility
-  launcher. The auto-downloaded compat bundle now also carries Rocky Linux 8
-  `libstdc++.so.6` and `libgcc_s.so.1`, so official Node.js 18+ binaries can
-  run on CentOS 7 through the same compat runtime.
 - Use `claude-proxy --help` to see the available `--exe-patch-*` flags if you
   want to tune or disable this behavior.
 
@@ -343,9 +325,9 @@ By default it follows the saved proxy preference. If no proxy preference has
 been saved yet but profiles already exist, it assumes proxy mode; when
 multiple profiles exist in that state, pass `--profile` to choose one. If you
 previously chose direct mode, `--profile` is ignored until you re-enable proxy
-mode first (for example with `Ctrl+P` in the TUI). On old-kernel Linux hosts,
-the usable launcher it leaves behind may be the host-local legacy
-compatibility launcher instead of the newest official native install.
+mode first (for example with `Ctrl+P` in the TUI). On EL7-style hosts,
+the usable launcher it leaves behind may be the host-local recovered launcher
+instead of the newest official native install.
 
 ## Long-lived instances (optional)
 

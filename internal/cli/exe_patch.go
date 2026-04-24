@@ -63,6 +63,7 @@ type patchOutcome struct {
 	TargetSHA256             string
 	TargetVersion            string
 	LaunchArgsPrefix         []string
+	LaunchEnv                []string
 	IsClaude                 bool
 	AlreadyPatched           bool
 	Verified                 bool
@@ -324,16 +325,19 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 	}
 
 	isClaude := isClaudeExecutable(cmdArgs[0], resolvedPath)
-	managedNPMClaude := isClaude && isManagedNPMClaudeLauncherPath(resolvedPath, os.Getenv)
-	glibcCompat := opts.glibcCompatConfigured() && !managedNPMClaude
+	glibcCompat := opts.glibcCompatConfigured()
+	cachedBunLaunchEnv := []string(nil)
+	if isClaude {
+		if env, ok := lookupCachedBunCompatLaunchEnv(resolvedPath); ok {
+			cachedBunLaunchEnv = env
+		}
+	}
 	if !isClaude {
-		builtinSpecs = nil
-	} else if managedNPMClaude {
 		builtinSpecs = nil
 	}
 	yoloRequested := hasYoloBypassPermissionsArg(cmdArgs)
 	builtinPatchAllowed := (yoloRequested || opts.allowBuiltInWithoutBypass) && len(builtinSpecs) > 0
-	glibcCompatHost := isClaude && !managedNPMClaude && glibcCompat && glibcCompatHostEligibleFn()
+	glibcCompatHost := isClaude && glibcCompat && glibcCompatHostEligibleFn()
 	patchTargetPath := resolvedPath
 	var compatOutcome *patchOutcome
 	// Claude's built-in byte patches are only allowed when a launch both
@@ -343,7 +347,7 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 	// is enabled for this launch. When built-in patching is not available, any
 	// previously-applied Claude byte patch must be restored before launch, but
 	// Linux glibc-compat rescue remains available below.
-	if isClaude && !managedNPMClaude && !builtinPatchAllowed {
+	if isClaude && !builtinPatchAllowed {
 		if err := disableClaudeBytePatch(resolvedPath, configPath, log, opts.dryRun); err != nil {
 			return nil, err
 		}
@@ -354,6 +358,7 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 			SourcePath:       resolvedPath,
 			TargetPath:       resolvedPath,
 			LaunchArgsPrefix: []string{resolvedPath},
+			LaunchEnv:        cachedBunLaunchEnv,
 			IsClaude:         true,
 			ConfigPath:       configPath,
 			LogWriter:        log,
@@ -365,14 +370,14 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 		if compatOutcome != nil && strings.TrimSpace(compatOutcome.TargetPath) != "" {
 			patchTargetPath = compatOutcome.TargetPath
 		}
-		if isClaude && !managedNPMClaude && !builtinPatchAllowed && !config.PathsEqual(patchTargetPath, resolvedPath) {
+		if isClaude && !builtinPatchAllowed && !config.PathsEqual(patchTargetPath, resolvedPath) {
 			if err := disableClaudeBytePatch(patchTargetPath, configPath, log, opts.dryRun); err != nil {
 				return nil, err
 			}
 		}
 	}
 	specs := append(builtinSpecs, customSpecs...)
-	if len(specs) == 0 && !glibcCompat {
+	if len(specs) == 0 && !glibcCompat && len(cachedBunLaunchEnv) == 0 {
 		return nil, nil
 	}
 
@@ -436,9 +441,13 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 			outcome = &patchOutcome{
 				SourcePath:   resolvedPath,
 				TargetPath:   patchTargetPath,
+				LaunchEnv:    cachedBunLaunchEnv,
 				HistoryStore: historyStore,
 			}
 		}
+	}
+	if len(outcome.LaunchEnv) == 0 && len(cachedBunLaunchEnv) > 0 {
+		outcome.LaunchEnv = append([]string{}, cachedBunLaunchEnv...)
 	}
 	if strings.TrimSpace(outcome.SourcePath) == "" {
 		outcome.SourcePath = resolvedPath
@@ -455,6 +464,9 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 		}
 		if len(outcome.LaunchArgsPrefix) == 0 {
 			outcome.LaunchArgsPrefix = append([]string{}, compatOutcome.LaunchArgsPrefix...)
+		}
+		if len(outcome.LaunchEnv) == 0 {
+			outcome.LaunchEnv = append([]string{}, compatOutcome.LaunchEnv...)
 		}
 		outcome.Applied = outcome.Applied || compatOutcome.Applied
 	}

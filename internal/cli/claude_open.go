@@ -109,9 +109,6 @@ func validateRulesModeLaunch(claudePath string, patchOpts exePatchOptions) error
 	if !isClaudeExecutable(claudePath, resolvedPath) {
 		return fmt.Errorf("YOLO rule mode requires the Claude executable; wrappers or renamed binaries are unsupported: %s", claudePath)
 	}
-	if isManagedNPMClaudeLauncherPath(resolvedPath, os.Getenv) {
-		return fmt.Errorf("YOLO rule mode requires a native Claude executable; npm or wrapper installs are unsupported: %s", claudePath)
-	}
 	return nil
 }
 
