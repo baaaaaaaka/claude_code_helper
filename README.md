@@ -317,6 +317,8 @@ host:
 claude-proxy upgrade-claude
 # or choose a specific SSH profile when upgrade-claude is using proxy mode
 claude-proxy upgrade-claude --profile <profile>
+# install a specific Claude Code version
+claude-proxy upgrade-claude --version 2.1.112
 ```
 
 `upgrade-claude` expects `claude-proxy` to have already created its config
@@ -327,7 +329,10 @@ multiple profiles exist in that state, pass `--profile` to choose one. If you
 previously chose direct mode, `--profile` is ignored until you re-enable proxy
 mode first (for example with `Ctrl+P` in the TUI). On EL7-style hosts,
 the usable launcher it leaves behind may be the host-local recovered launcher
-instead of the newest official native install.
+instead of the newest official native install. When `--version` names a
+specific numeric Claude Code version, `upgrade-claude` also removes newer
+versions from the default Claude Code version store under the current user's
+home directory; it does not clean up versions under custom install locations.
 
 ## Long-lived instances (optional)
 

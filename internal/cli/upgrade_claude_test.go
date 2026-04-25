@@ -1180,6 +1180,13 @@ func TestNewUpgradeClaudeCmdExists(t *testing.T) {
 	if f.DefValue != "" {
 		t.Fatalf("expected empty default for --profile, got %q", f.DefValue)
 	}
+	versionFlag := cmd.Flags().Lookup("version")
+	if versionFlag == nil {
+		t.Fatalf("expected --version flag")
+	}
+	if versionFlag.DefValue != "" {
+		t.Fatalf("expected empty default for --version, got %q", versionFlag.DefValue)
+	}
 }
 
 func TestUpgradeClaudeCmdRegistered(t *testing.T) {
@@ -1348,6 +1355,310 @@ func TestRunUpgradeClaudeWithProfileFlag(t *testing.T) {
 	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 	if lines[0] != proxyURL || lines[1] != proxyURL {
 		t.Fatalf("expected proxy env %q, got %q", proxyURL, strings.Join(lines, ","))
+	}
+}
+
+func TestRunUpgradeClaudeSpecificVersionCleansHigherDefaultVersions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip symlink test on windows")
+	}
+
+	prevLookPath := claudeInstallLookPathFn
+	claudeInstallLookPathFn = func(file string) (string, error) {
+		return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
+	}
+	t.Cleanup(func() {
+		claudeInstallLookPathFn = prevLookPath
+	})
+
+	store := newTempStore(t)
+	disabled := false
+	if err := store.Save(config.Config{
+		Version:      config.CurrentVersion,
+		ProxyEnabled: &disabled,
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	rootDir := t.TempDir()
+	homeDir := filepath.Join(rootDir, "home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	defaultVersionsDir := filepath.Join(homeDir, ".local", "share", "claude", "versions")
+	if err := os.MkdirAll(defaultVersionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir default versions dir: %v", err)
+	}
+	higherDefault := filepath.Join(defaultVersionsDir, "2.1.91")
+	if err := os.WriteFile(higherDefault, testNativeExecutableStubBytesWithMarker(claudeInstallGOOS, "higher-default"), 0o700); err != nil {
+		t.Fatalf("write higher default version: %v", err)
+	}
+
+	customVersionsDir := filepath.Join(rootDir, "custom", "claude", "versions")
+	if err := os.MkdirAll(customVersionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir custom versions dir: %v", err)
+	}
+	higherCustom := filepath.Join(customVersionsDir, "2.1.91")
+	if err := os.WriteFile(higherCustom, testNativeExecutableStubBytesWithMarker(claudeInstallGOOS, "higher-custom"), 0o700); err != nil {
+		t.Fatalf("write higher custom version: %v", err)
+	}
+
+	targetPath := filepath.Join(defaultVersionsDir, "2.1.90")
+	launcherPath := filepath.Join(homeDir, ".local", "bin", testClaudeLauncherName(claudeInstallGOOS))
+	installerCalls := 0
+	prevInstaller := runClaudeInstallerFn
+	runClaudeInstallerFn = func(ctx context.Context, out io.Writer, opts installProxyOptions) error {
+		installerCalls++
+		if opts.TargetVersion != "2.1.90" {
+			t.Fatalf("expected normalized target version 2.1.90, got %q", opts.TargetVersion)
+		}
+		if err := os.WriteFile(targetPath, testNativeExecutableStubBytesWithMarker(claudeInstallGOOS, "target"), 0o700); err != nil {
+			t.Fatalf("write target version: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(launcherPath), 0o755); err != nil {
+			t.Fatalf("mkdir launcher dir: %v", err)
+		}
+		if err := os.Remove(launcherPath); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("remove old launcher: %v", err)
+		}
+		if err := os.Symlink(targetPath, launcherPath); err != nil {
+			t.Fatalf("symlink launcher: %v", err)
+		}
+		_, _ = fmt.Fprintf(out, "Version: 2.1.90\nLocation: %s\n", launcherPath)
+		return nil
+	}
+	t.Cleanup(func() {
+		runClaudeInstallerFn = prevInstaller
+	})
+
+	root := &rootOptions{configPath: store.Path()}
+	cmd := newUpgradeClaudeCmd(root)
+	cmd.SetArgs([]string{"--version", "v2.1.90"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetContext(context.Background())
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("upgrade-claude --version error: %v", err)
+	}
+	if installerCalls != 1 {
+		t.Fatalf("expected one installer call, got %d", installerCalls)
+	}
+	if _, err := os.Stat(targetPath); err != nil {
+		t.Fatalf("expected target default version to remain: %v", err)
+	}
+	if _, err := os.Stat(higherDefault); !os.IsNotExist(err) {
+		t.Fatalf("expected higher default version to be removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(higherCustom); err != nil {
+		t.Fatalf("expected higher custom version to remain: %v", err)
+	}
+}
+
+func TestRunUpgradeClaudeSpecificVersionRestoresHigherDefaultVersionsWhenPatchFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip symlink test on windows")
+	}
+	withExePatchTestHooks(t)
+
+	prevLookPath := claudeInstallLookPathFn
+	claudeInstallLookPathFn = func(file string) (string, error) {
+		return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
+	}
+	t.Cleanup(func() {
+		claudeInstallLookPathFn = prevLookPath
+	})
+
+	store := newTempStore(t)
+	disabled := false
+	if err := store.Save(config.Config{
+		Version:      config.CurrentVersion,
+		ProxyEnabled: &disabled,
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	homeDir := filepath.Join(t.TempDir(), "home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	defaultVersionsDir := filepath.Join(homeDir, ".local", "share", "claude", "versions")
+	if err := os.MkdirAll(defaultVersionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir default versions dir: %v", err)
+	}
+	higherDefault := filepath.Join(defaultVersionsDir, "2.1.91")
+	higherDefaultBytes := testNativeExecutableStubBytesWithMarker(claudeInstallGOOS, "higher-default")
+	if err := os.WriteFile(higherDefault, higherDefaultBytes, 0o700); err != nil {
+		t.Fatalf("write higher default version: %v", err)
+	}
+
+	targetPath := filepath.Join(defaultVersionsDir, "2.1.90")
+	launcherPath := filepath.Join(homeDir, ".local", "bin", testClaudeLauncherName(claudeInstallGOOS))
+	prevInstaller := runClaudeInstallerFn
+	runClaudeInstallerFn = func(ctx context.Context, out io.Writer, opts installProxyOptions) error {
+		if err := os.WriteFile(targetPath, testNativeExecutableStubBytesWithMarker(claudeInstallGOOS, "target"), 0o700); err != nil {
+			t.Fatalf("write target version: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(launcherPath), 0o755); err != nil {
+			t.Fatalf("mkdir launcher dir: %v", err)
+		}
+		if err := os.Remove(launcherPath); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("remove old launcher: %v", err)
+		}
+		if err := os.Symlink(targetPath, launcherPath); err != nil {
+			t.Fatalf("symlink launcher: %v", err)
+		}
+		_, _ = fmt.Fprintf(out, "Version: 2.1.90\nLocation: %s\n", launcherPath)
+		return nil
+	}
+	t.Cleanup(func() {
+		runClaudeInstallerFn = prevInstaller
+	})
+
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		return nil, fmt.Errorf("patch failed")
+	}
+
+	root := &rootOptions{
+		configPath: store.Path(),
+		exePatch: exePatchOptions{
+			enabledFlag:    true,
+			policySettings: true,
+		},
+	}
+	cmd := newUpgradeClaudeCmd(root)
+	cmd.SetArgs([]string{"--version", "2.1.90"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetContext(context.Background())
+
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "patch failed") {
+		t.Fatalf("expected patch failure, got %v", err)
+	}
+	got, readErr := os.ReadFile(higherDefault)
+	if readErr != nil {
+		t.Fatalf("expected higher default version to be restored: %v", readErr)
+	}
+	if string(got) != string(higherDefaultBytes) {
+		t.Fatalf("expected restored higher default version bytes to match original")
+	}
+	entries, readDirErr := os.ReadDir(defaultVersionsDir)
+	if readDirErr != nil {
+		t.Fatalf("read default versions dir: %v", readDirErr)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".claude-proxy-stash-") {
+			t.Fatalf("expected no leftover stash entry after failed upgrade, found %s", entry.Name())
+		}
+	}
+}
+
+func TestClaudeVersionCleanupStashSkipsNonNumericTargets(t *testing.T) {
+	for _, target := range []string{"", "latest", "stable"} {
+		t.Run(target, func(t *testing.T) {
+			homeDir := filepath.Join(t.TempDir(), "home")
+			t.Setenv("HOME", homeDir)
+			t.Setenv("USERPROFILE", homeDir)
+
+			versionsDir := filepath.Join(homeDir, ".local", "share", "claude", "versions")
+			if err := os.MkdirAll(versionsDir, 0o755); err != nil {
+				t.Fatalf("mkdir versions dir: %v", err)
+			}
+			higher := filepath.Join(versionsDir, "2.1.91")
+			if err := os.WriteFile(higher, []byte("keep"), 0o700); err != nil {
+				t.Fatalf("write higher version: %v", err)
+			}
+
+			stash := newClaudeVersionCleanupStash(target)
+			if err := stash.Stash(io.Discard, claudeInstallGOOS, os.Getenv); err != nil {
+				t.Fatalf("stash error: %v", err)
+			}
+			if err := stash.Commit(io.Discard); err != nil {
+				t.Fatalf("commit error: %v", err)
+			}
+			if got, err := os.ReadFile(higher); err != nil || string(got) != "keep" {
+				t.Fatalf("expected non-numeric target %q to keep higher version, got %q err=%v", target, got, err)
+			}
+		})
+	}
+}
+
+func TestClaudeVersionCleanupStashRestoresOriginalAcrossRetryDuplicate(t *testing.T) {
+	homeDir := filepath.Join(t.TempDir(), "home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	versionsDir := filepath.Join(homeDir, ".local", "share", "claude", "versions")
+	if err := os.MkdirAll(versionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir versions dir: %v", err)
+	}
+	higher := filepath.Join(versionsDir, "2.1.91")
+	if err := os.WriteFile(higher, []byte("original"), 0o700); err != nil {
+		t.Fatalf("write original higher version: %v", err)
+	}
+
+	stash := newClaudeVersionCleanupStash("2.1.90")
+	if err := stash.Stash(io.Discard, claudeInstallGOOS, os.Getenv); err != nil {
+		t.Fatalf("first stash error: %v", err)
+	}
+	if err := os.WriteFile(higher, []byte("retry"), 0o700); err != nil {
+		t.Fatalf("write retry higher version: %v", err)
+	}
+	if err := stash.Stash(io.Discard, claudeInstallGOOS, os.Getenv); err != nil {
+		t.Fatalf("second stash error: %v", err)
+	}
+	if err := stash.Restore(); err != nil {
+		t.Fatalf("restore error: %v", err)
+	}
+	got, err := os.ReadFile(higher)
+	if err != nil {
+		t.Fatalf("read restored higher version: %v", err)
+	}
+	if string(got) != "original" {
+		t.Fatalf("expected original higher version to be restored, got %q", got)
+	}
+	entries, err := os.ReadDir(versionsDir)
+	if err != nil {
+		t.Fatalf("read versions dir: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".claude-proxy-stash-") {
+			t.Fatalf("expected duplicate stash to be removed, found %s", entry.Name())
+		}
+	}
+}
+
+func TestNormalizeClaudeInstallTarget(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{input: "", want: ""},
+		{input: " latest ", want: "latest"},
+		{input: "stable", want: "stable"},
+		{input: "v2.1.90", want: "2.1.90"},
+		{input: "V2.1.90", want: "2.1.90"},
+		{input: "2.1.90-beta.1", want: "2.1.90-beta.1"},
+		{input: "2.1", wantErr: true},
+		{input: "2.1.90;rm", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		got, err := normalizeClaudeInstallTarget(tc.input)
+		if tc.wantErr {
+			if err == nil {
+				t.Fatalf("normalizeClaudeInstallTarget(%q) expected error", tc.input)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("normalizeClaudeInstallTarget(%q) unexpected error: %v", tc.input, err)
+		}
+		if got != tc.want {
+			t.Fatalf("normalizeClaudeInstallTarget(%q) = %q, want %q", tc.input, got, tc.want)
+		}
 	}
 }
 

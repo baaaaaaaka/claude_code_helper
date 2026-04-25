@@ -164,6 +164,14 @@ jobs:
             -run '^(TestFindManagedClaudePath(FallsBackToUnixMigratedLocalInstall|FallsBackToUserHomeDirWhenHomeEnvMissing|IncludesRecoveredLauncher(|WithoutHomeEnv))|TestFindInstalledClaudePathPrefersLookPathWhenManagedLocationMissing|TestEnsureClaudeInstalled(IgnoresPathClaudeAndUsesManagedInstall|ReusesRecoveredLauncher|ExportsGitBashBeforeReturningManagedWindowsInstall|ReturnsExportGitBashError)|TestBuildClaudeResumeCommand(UsesManagedClaudeWhenUnset|UsesManagedClaudeViaUserHomeFallbackWhenEnvMissing|UsesRecoveredLauncherWhenHomeEnvMissing))$' \
             -count=1
 
+      - name: Upgrade Claude version targeting regression suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./internal/cli \
+            -run '^(TestRunClaudeInstallerWithEnv(InjectsTargetVersion|ClearsInheritedTargetWhenUnset)|TestRunUpgradeClaudeSpecificVersion(CleansHigherDefaultVersions|RestoresHigherDefaultVersionsWhenPatchFails)|TestClaudeVersionCleanupStash(SkipsNonNumericTargets|RestoresOriginalAcrossRetryDuplicate)|TestNormalizeClaudeInstallTarget)$' \
+            -count=1
+
       - name: Old-kernel Claude install regressions (Linux only)
         if: runner.os == 'Linux'
         shell: bash

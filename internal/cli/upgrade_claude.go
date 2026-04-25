@@ -3,11 +3,13 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +26,7 @@ var (
 
 func newUpgradeClaudeCmd(root *rootOptions) *cobra.Command {
 	var profile string
+	var claudeVersion string
 
 	cmd := &cobra.Command{
 		Use:   "upgrade-claude",
@@ -36,16 +39,17 @@ func newUpgradeClaudeCmd(root *rootOptions) *cobra.Command {
 		}, "\n"),
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runUpgradeClaude(cmd, root, profile)
+			return runUpgradeClaude(cmd, root, profile, claudeVersion)
 		},
 	}
 
 	cmd.Flags().StringVar(&profile, "profile", "", "SSH profile to use for proxy")
+	cmd.Flags().StringVar(&claudeVersion, "version", "", "Claude Code version to install (for example 2.1.112; also accepts stable/latest)")
 
 	return cmd
 }
 
-func runUpgradeClaude(cmd *cobra.Command, root *rootOptions, profileRef string) error {
+func runUpgradeClaude(cmd *cobra.Command, root *rootOptions, profileRef string, claudeVersion string) (err error) {
 	store, err := config.NewStore(root.configPath)
 	if err != nil {
 		return err
@@ -67,6 +71,11 @@ func runUpgradeClaude(cmd *cobra.Command, root *rootOptions, profileRef string) 
 	if err != nil {
 		return err
 	}
+	targetVersion, err := normalizeClaudeInstallTarget(claudeVersion)
+	if err != nil {
+		return err
+	}
+	opts.TargetVersion = targetVersion
 
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
@@ -90,11 +99,26 @@ func runUpgradeClaude(cmd *cobra.Command, root *rootOptions, profileRef string) 
 		return err
 	}
 
+	versionCleanup := newClaudeVersionCleanupStash(targetVersion)
+	defer func() {
+		if err == nil {
+			return
+		}
+		if restoreErr := versionCleanup.Restore(); restoreErr != nil {
+			err = fmt.Errorf("%w; also failed to restore stashed Claude versions: %v", err, restoreErr)
+		}
+	}()
+	if err := versionCleanup.Stash(installOut, claudeInstallGOOS, os.Getenv); err != nil {
+		return err
+	}
+
 	claudePath := "claude"
 	if path, ok := findInstalledClaudePath(claudeInstallGOOS, installLog.String(), os.Getenv); ok {
 		claudePath = path
+	} else if targetVersion != "" {
+		return fmt.Errorf("Claude installer finished for %s but managed Claude launcher was not found", targetVersion)
 	}
-	claudePath, err = maybeRepairInstalledClaude(ctx, installOut, &installLog, opts, root.exePatch, beforeInstall, claudePath)
+	claudePath, err = maybeRepairInstalledClaude(ctx, installOut, &installLog, opts, root.exePatch, beforeInstall, claudePath, versionCleanup)
 	if err != nil {
 		return err
 	}
@@ -103,10 +127,12 @@ func runUpgradeClaude(cmd *cobra.Command, root *rootOptions, profileRef string) 
 		return err
 	}
 
-	return finalizeUpgradedClaudeLauncher(ctx, out, root, claudePath, true)
+	return finalizeUpgradedClaudeLauncher(ctx, out, root, claudePath, true, func() error {
+		return versionCleanup.Commit(out)
+	})
 }
 
-func finalizeUpgradedClaudeLauncher(ctx context.Context, out io.Writer, root *rootOptions, claudePath string, invalidatePatchState bool) error {
+func finalizeUpgradedClaudeLauncher(ctx context.Context, out io.Writer, root *rootOptions, claudePath string, invalidatePatchState bool, beforeComplete func() error) error {
 	// Remove stale exe-patch backup and history so the patch system treats
 	// the freshly-installed binary as new rather than re-patching the old
 	// backup over the top.
@@ -124,6 +150,11 @@ func finalizeUpgradedClaudeLauncher(ctx context.Context, out io.Writer, root *ro
 		}
 	}
 
+	if beforeComplete != nil {
+		if err := beforeComplete(); err != nil {
+			return err
+		}
+	}
 	_, _ = fmt.Fprintln(out, "Claude Code launcher refresh complete.")
 	return nil
 }
@@ -210,7 +241,7 @@ func snapshotInstalledClaudeBinary(path string) (installedClaudeBinaryState, err
 	return state, nil
 }
 
-func maybeRepairInstalledClaude(ctx context.Context, installOut io.Writer, installLog *bytes.Buffer, installOpts installProxyOptions, patchOpts exePatchOptions, before installedClaudeBinaryState, claudePath string) (string, error) {
+func maybeRepairInstalledClaude(ctx context.Context, installOut io.Writer, installLog *bytes.Buffer, installOpts installProxyOptions, patchOpts exePatchOptions, before installedClaudeBinaryState, claudePath string, versionCleanup *claudeVersionCleanupStash) (string, error) {
 	after := snapshotInstalledClaudeBinaryBestEffort(claudePath)
 	shouldRepair, reason, err := shouldRepairInstalledClaude(ctx, before, after, patchOpts)
 	if err != nil {
@@ -245,6 +276,9 @@ func maybeRepairInstalledClaude(ctx context.Context, installOut io.Writer, insta
 		return "", restoreOriginal(fmt.Errorf("Claude installer retry failed: %w", err))
 	}
 	appendInstallOutput(installLog, retryLog.String())
+	if err := versionCleanup.Stash(installOut, claudeInstallGOOS, os.Getenv); err != nil {
+		return "", restoreOriginal(err)
+	}
 
 	retriedClaudePath := claudePath
 	if path, ok := findInstalledClaudePath(claudeInstallGOOS, retryLog.String(), os.Getenv); ok {
@@ -522,6 +556,269 @@ func removeStashedClaudeVersionFile(stashedPath string) {
 		return
 	}
 	_ = os.Remove(stashedPath)
+}
+
+func normalizeClaudeInstallTarget(raw string) (string, error) {
+	target := strings.TrimSpace(raw)
+	if target == "" {
+		return "", nil
+	}
+	lower := strings.ToLower(target)
+	if lower == "latest" || lower == "stable" {
+		return lower, nil
+	}
+	if len(target) > 1 && (target[0] == 'v' || target[0] == 'V') && target[1] >= '0' && target[1] <= '9' {
+		target = target[1:]
+	}
+	if !validClaudeInstallVersion(target) {
+		return "", fmt.Errorf("invalid Claude Code version %q; expected stable, latest, or X.Y.Z", raw)
+	}
+	return target, nil
+}
+
+func validClaudeInstallVersion(version string) bool {
+	core := version
+	suffix := ""
+	if before, after, ok := strings.Cut(version, "-"); ok {
+		core = before
+		suffix = after
+		if suffix == "" {
+			return false
+		}
+		for _, ch := range suffix {
+			if !isClaudeVersionSuffixChar(ch) {
+				return false
+			}
+		}
+	}
+	parts := strings.Split(core, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, ch := range part {
+			if ch < '0' || ch > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isClaudeVersionSuffixChar(ch rune) bool {
+	return (ch >= '0' && ch <= '9') ||
+		(ch >= 'A' && ch <= 'Z') ||
+		(ch >= 'a' && ch <= 'z') ||
+		ch == '.' ||
+		ch == '-' ||
+		ch == '+'
+}
+
+type claudeVersionCleanupStash struct {
+	target      string
+	targetTuple []int
+	enabled     bool
+	entries     []claudeVersionCleanupStashEntry
+}
+
+type claudeVersionCleanupStashEntry struct {
+	OriginalPath string
+	StashedPath  string
+	Restore      bool
+	Committed    bool
+}
+
+func newClaudeVersionCleanupStash(target string) *claudeVersionCleanupStash {
+	targetTuple, ok := claudeVersionTuple(target)
+	return &claudeVersionCleanupStash{
+		target:      strings.TrimSpace(target),
+		targetTuple: targetTuple,
+		enabled:     ok,
+	}
+}
+
+func (s *claudeVersionCleanupStash) Stash(out io.Writer, goos string, getenv func(string) string) error {
+	if s == nil || !s.enabled {
+		return nil
+	}
+
+	for _, dir := range defaultClaudeVersionStoreDirs(goos, getenv) {
+		entries, err := os.ReadDir(dir)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect default Claude version dir %s: %w", dir, err)
+		}
+		for _, entry := range entries {
+			entryTuple, ok := claudeVersionTuple(entry.Name())
+			if !ok || compareClaudeVersionTuple(entryTuple, s.targetTuple) <= 0 {
+				continue
+			}
+			originalPath := filepath.Join(dir, entry.Name())
+			stashedPath, err := uniqueClaudeVersionStashPath(dir, entry.Name())
+			if err != nil {
+				return err
+			}
+			if err := os.Rename(originalPath, stashedPath); err != nil {
+				return fmt.Errorf("stash default Claude version %s: %w", originalPath, diskspace.AnnotateWriteError(stashedPath, err))
+			}
+			s.entries = append(s.entries, claudeVersionCleanupStashEntry{
+				OriginalPath: originalPath,
+				StashedPath:  stashedPath,
+				Restore:      !s.hasRestoreEntry(originalPath),
+			})
+		}
+	}
+	return nil
+}
+
+func (s *claudeVersionCleanupStash) Commit(out io.Writer) error {
+	if s == nil || len(s.entries) == 0 {
+		return nil
+	}
+
+	removed := 0
+	for i := range s.entries {
+		entry := &s.entries[i]
+		if entry.Committed || strings.TrimSpace(entry.StashedPath) == "" {
+			continue
+		}
+		if err := os.RemoveAll(entry.StashedPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove stashed Claude version %s: %w", entry.StashedPath, err)
+		}
+		entry.Committed = true
+		removed++
+	}
+	if removed > 0 && out != nil {
+		_, _ = fmt.Fprintf(out, "Removed %d Claude Code version(s) newer than %s from the default install path.\n", removed, s.target)
+	}
+	return nil
+}
+
+func (s *claudeVersionCleanupStash) Restore() error {
+	if s == nil || len(s.entries) == 0 {
+		return nil
+	}
+
+	errs := []error{}
+	for i := len(s.entries) - 1; i >= 0; i-- {
+		entry := &s.entries[i]
+		if entry.Committed || strings.TrimSpace(entry.StashedPath) == "" {
+			continue
+		}
+		if _, err := os.Lstat(entry.StashedPath); err != nil {
+			if os.IsNotExist(err) && !entry.Restore {
+				continue
+			}
+			errs = append(errs, fmt.Errorf("inspect stashed Claude version %s: %w", entry.StashedPath, err))
+			continue
+		}
+		if !entry.Restore {
+			if err := os.RemoveAll(entry.StashedPath); err != nil && !os.IsNotExist(err) {
+				errs = append(errs, fmt.Errorf("remove duplicate stashed Claude version %s: %w", entry.StashedPath, err))
+			}
+			entry.Committed = true
+			continue
+		}
+		if _, err := os.Lstat(entry.OriginalPath); err == nil {
+			errs = append(errs, fmt.Errorf("cannot restore stashed Claude version %s: original path already exists", entry.OriginalPath))
+			continue
+		} else if !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("inspect Claude version restore path %s: %w", entry.OriginalPath, err))
+			continue
+		}
+		if err := os.Rename(entry.StashedPath, entry.OriginalPath); err != nil {
+			errs = append(errs, fmt.Errorf("restore stashed Claude version %s: %w", entry.OriginalPath, diskspace.AnnotateWriteError(entry.OriginalPath, err)))
+			continue
+		}
+		entry.Committed = true
+	}
+	return errors.Join(errs...)
+}
+
+func (s *claudeVersionCleanupStash) hasRestoreEntry(path string) bool {
+	for _, entry := range s.entries {
+		if entry.Restore && config.PathsEqual(entry.OriginalPath, path) {
+			return true
+		}
+	}
+	return false
+}
+
+func uniqueClaudeVersionStashPath(dir string, name string) (string, error) {
+	for i := 0; i < 100; i++ {
+		candidate := filepath.Join(dir, fmt.Sprintf(".claude-proxy-stash-%d-%d-%d-%s", os.Getpid(), time.Now().UnixNano(), i, name))
+		if _, err := os.Lstat(candidate); os.IsNotExist(err) {
+			return candidate, nil
+		} else if err != nil {
+			return "", fmt.Errorf("inspect Claude version stash path %s: %w", candidate, err)
+		}
+	}
+	return "", fmt.Errorf("cannot choose an unused Claude version stash path in %s", dir)
+}
+
+func defaultClaudeVersionStoreDirs(goos string, getenv func(string) string) []string {
+	dirs := []string{}
+	for _, home := range installHomeCandidates(goos, getenv) {
+		dirs = appendInstallCandidate(dirs, goos, filepath.Join(home, ".local", "share", "claude", "versions"))
+	}
+	return dirs
+}
+
+func claudeVersionTuple(version string) ([]int, bool) {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return nil, false
+	}
+	if len(version) > 1 && (version[0] == 'v' || version[0] == 'V') {
+		version = version[1:]
+	}
+	if before, _, ok := strings.Cut(version, "-"); ok {
+		version = before
+	}
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		return nil, false
+	}
+	tuple := make([]int, 0, len(parts))
+	for _, part := range parts {
+		if part == "" {
+			return nil, false
+		}
+		for _, ch := range part {
+			if ch < '0' || ch > '9' {
+				return nil, false
+			}
+		}
+		n, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, false
+		}
+		tuple = append(tuple, n)
+	}
+	return tuple, true
+}
+
+func compareClaudeVersionTuple(a []int, b []int) int {
+	for i := 0; i < len(a) && i < len(b); i++ {
+		if a[i] > b[i] {
+			return 1
+		}
+		if a[i] < b[i] {
+			return -1
+		}
+	}
+	if len(a) > len(b) {
+		return 1
+	}
+	if len(a) < len(b) {
+		return -1
+	}
+	return 0
 }
 
 func upgradeClaudeInstallOpts(cfg config.Config, profileRef string) (installProxyOptions, error) {

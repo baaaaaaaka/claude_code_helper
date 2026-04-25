@@ -1989,6 +1989,53 @@ func TestRunClaudeInstallerWithEnvInjectsWindowsGitBashPath(t *testing.T) {
 	}
 }
 
+func TestRunClaudeInstallerWithEnvInjectsTargetVersion(t *testing.T) {
+	dir := t.TempDir()
+	outFile := filepath.Join(dir, "env.txt")
+	setIsolatedStubPath(t, dir)
+	t.Setenv("OUT_FILE", outFile)
+	if runtime.GOOS == "windows" {
+		writeStub(t, dir, "powershell", "#!/bin/sh\nexit 0\n", "@echo off\r\necho %CLAUDE_CODE_INSTALL_TARGET% > \"%OUT_FILE%\"\r\nexit /b 0\r\n")
+	} else {
+		writeStub(t, dir, "bash", "#!/bin/sh\nprintf \"%s\\n\" \"$CLAUDE_CODE_INSTALL_TARGET\" > \"$OUT_FILE\"\nexit 0\n", "@echo off\r\n")
+	}
+
+	if err := runClaudeInstallerWithEnv(context.Background(), io.Discard, installProxyOptions{TargetVersion: "2.1.90"}, nil); err != nil {
+		t.Fatalf("runClaudeInstallerWithEnv error: %v", err)
+	}
+	content, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read env file: %v", err)
+	}
+	if got := strings.TrimSpace(string(content)); got != "2.1.90" {
+		t.Fatalf("expected target env 2.1.90, got %q", got)
+	}
+}
+
+func TestRunClaudeInstallerWithEnvClearsInheritedTargetWhenUnset(t *testing.T) {
+	dir := t.TempDir()
+	outFile := filepath.Join(dir, "env.txt")
+	setIsolatedStubPath(t, dir)
+	t.Setenv("OUT_FILE", outFile)
+	t.Setenv(claudeInstallTargetEnv, "2.1.90")
+	if runtime.GOOS == "windows" {
+		writeStub(t, dir, "powershell", "#!/bin/sh\nexit 0\n", "@echo off\r\necho [%CLAUDE_CODE_INSTALL_TARGET%] > \"%OUT_FILE%\"\r\nexit /b 0\r\n")
+	} else {
+		writeStub(t, dir, "bash", "#!/bin/sh\nprintf \"[%s]\\n\" \"$CLAUDE_CODE_INSTALL_TARGET\" > \"$OUT_FILE\"\nexit 0\n", "@echo off\r\n")
+	}
+
+	if err := runClaudeInstallerWithEnv(context.Background(), io.Discard, installProxyOptions{}, nil); err != nil {
+		t.Fatalf("runClaudeInstallerWithEnv error: %v", err)
+	}
+	content, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read env file: %v", err)
+	}
+	if got := strings.TrimSpace(string(content)); got != "[]" {
+		t.Fatalf("expected inherited target env to be cleared, got %q", got)
+	}
+}
+
 func TestExportCurrentProcessGitBashPathSetenvError(t *testing.T) {
 	prevGOOS := claudeInstallGOOS
 	prevSetenv := claudeInstallSetenvFn

@@ -35,7 +35,8 @@ type installCmd struct {
 	args []string
 }
 
-const claudeInstallBootstrap = `url="https://claude.ai/install.sh"; if command -v curl >/dev/null 2>&1; then curl -fsSL "$url" | bash; elif command -v wget >/dev/null 2>&1; then wget -qO- "$url" | bash; else echo "need curl or wget" >&2; exit 1; fi`
+const claudeInstallTargetEnv = "CLAUDE_CODE_INSTALL_TARGET"
+const claudeInstallBootstrap = `target="${CLAUDE_CODE_INSTALL_TARGET:-}"; url="https://claude.ai/install.sh"; run_installer() { if [ -n "$target" ]; then bash -s -- "$target"; else bash; fi; }; if command -v curl >/dev/null 2>&1; then curl -fsSL "$url" | run_installer; elif command -v wget >/dev/null 2>&1; then wget -qO- "$url" | run_installer; else echo "need curl or wget" >&2; exit 1; fi`
 const windowsGitBashInstallHelp = "Claude Code on Windows needs Git Bash. Install Git for Windows or set CLAUDE_CODE_GIT_BASH_PATH to your bash.exe and rerun the command."
 const managedClaudeProbeTimeout = 5 * time.Second
 
@@ -54,7 +55,12 @@ try {
     throw "Installer endpoint returned HTML content instead of a PowerShell script."
   }
   $ErrorActionPreference = $previousErrorActionPreference
-  Invoke-Expression $content
+  if ([string]::IsNullOrWhiteSpace($env:CLAUDE_CODE_INSTALL_TARGET)) {
+    Invoke-Expression $content
+  } else {
+    $scriptBlock = [ScriptBlock]::Create($content)
+    & $scriptBlock $env:CLAUDE_CODE_INSTALL_TARGET
+  }
 } catch {
   $details = $_ | Out-String
   try {
@@ -191,6 +197,7 @@ type installProxyOptions struct {
 	Profile            *config.Profile
 	Instances          []config.Instance
 	LauncherProbePatch *exePatchOptions
+	TargetVersion      string
 }
 
 const explicitClaudePathFlagHelp = "Override Claude CLI path (skips claude-proxy-managed install/recovery; exe patching may still apply at launch)"
@@ -385,7 +392,9 @@ func runClaudeInstallerWithEnv(ctx context.Context, out io.Writer, installOpts i
 	if proxyURL != "" && out != nil {
 		_, _ = fmt.Fprintln(out, "Using SSH proxy for Claude installer.")
 	}
-	if err := runOfficialClaudeInstallerWithEnv(ctx, out, proxyURL, extraEnv); err != nil {
+	installerEnv := append([]string{}, extraEnv...)
+	installerEnv = setInstallEnvValue(installerEnv, claudeInstallTargetEnv, strings.TrimSpace(installOpts.TargetVersion))
+	if err := runOfficialClaudeInstallerWithEnv(ctx, out, proxyURL, installerEnv); err != nil {
 		return err
 	}
 	return nil
@@ -656,7 +665,7 @@ func installerCandidates(goos string) []installCmd {
 		return []installCmd{
 			{path: "powershell", args: []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", claudeInstallBootstrapWindows}},
 			{path: "pwsh", args: []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", claudeInstallBootstrapWindows}},
-			{path: "cmd.exe", args: []string{"/c", "curl -fsSL https://claude.ai/install.cmd -o install.cmd && install.cmd && del install.cmd"}},
+			{path: "cmd.exe", args: []string{"/c", "curl -fsSL https://claude.ai/install.cmd -o install.cmd && (if defined CLAUDE_CODE_INSTALL_TARGET (install.cmd \"%CLAUDE_CODE_INSTALL_TARGET%\") else (install.cmd)) && del install.cmd"}},
 		}
 	case "darwin", "linux":
 		return []installCmd{
