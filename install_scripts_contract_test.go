@@ -41,7 +41,8 @@ func TestWorkflowSmokeCoverageContracts(t *testing.T) {
 	ci := readTextFile(t, filepath.Join(repoRoot, ".github", "workflows", "ci.yml"))
 	for _, needle := range []string{
 		"actionlint:",
-		"uses: rhysd/actionlint@v1",
+		`go-version: "1.25.9"`,
+		"go run github.com/rhysd/actionlint/cmd/actionlint@latest",
 	} {
 		if !strings.Contains(ci, needle) {
 			t.Fatalf("expected ci.yml to contain %q", needle)
@@ -91,6 +92,16 @@ func TestWorkflowSmokeCoverageContracts(t *testing.T) {
 	} {
 		if !strings.Contains(glibc, needle) {
 			t.Fatalf("expected glibc compat build workflow to contain %q", needle)
+		}
+	}
+
+	glibcSmoke := readTextFile(t, filepath.Join(repoRoot, "scripts", "glibc", "test_centos7_claude_with_glibc_compat.sh"))
+	for _, needle := range []string{
+		"direct execution already works on CentOS 7; wrapper compatibility path also works.",
+		"direct execution failed with missing GLIBC symbols; wrapper recovered it.",
+	} {
+		if !strings.Contains(glibcSmoke, needle) {
+			t.Fatalf("expected glibc compat smoke to contain %q", needle)
 		}
 	}
 }
