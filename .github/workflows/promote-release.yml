@@ -33,7 +33,7 @@ jobs:
           fi
 
           # Extract base version (strip pre-release suffix).
-          release_tag="$(echo "$rc_tag" | sed 's/-.*//')"
+          release_tag="${rc_tag%%-*}"
           echo "Promoting $rc_tag -> $release_tag"
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
 

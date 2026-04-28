@@ -87,7 +87,8 @@ func TestWorkflowSmokeCoverageContracts(t *testing.T) {
 	for _, needle := range []string{
 		"Smoke test local bundle on CentOS7",
 		"BUNDLE: ${{ github.workspace }}/dist/glibc-compat/${{ env.GLIBC_COMPAT_BUNDLE }}",
-		`export CLAUDE_VERSION="$(tr -d '\r\n' < scripts/claude_patch_version.txt)"`,
+		`CLAUDE_VERSION="$(tr -d '\r\n' < scripts/claude_patch_version.txt)"`,
+		"export CLAUDE_VERSION",
 		"bash scripts/glibc/test_centos7_claude_with_glibc_compat.sh",
 	} {
 		if !strings.Contains(glibc, needle) {

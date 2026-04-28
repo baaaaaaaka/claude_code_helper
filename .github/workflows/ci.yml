@@ -105,7 +105,7 @@ jobs:
           EOF
           sudo /usr/sbin/sshd -t -f "$SSH_TEST_DIR/sshd_config"
           sudo /usr/sbin/sshd -f "$SSH_TEST_DIR/sshd_config"
-          for i in {1..20}; do
+          for _ in {1..20}; do
             if ssh -i "$SSH_TEST_DIR/test_key" -p 22222 \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
@@ -115,11 +115,13 @@ jobs:
             fi
             sleep 0.2
           done
-          echo "SSH_TEST_ENABLED=1" >> "$GITHUB_ENV"
-          echo "SSH_TEST_HOST=127.0.0.1" >> "$GITHUB_ENV"
-          echo "SSH_TEST_PORT=22222" >> "$GITHUB_ENV"
-          echo "SSH_TEST_USER=${SSH_TEST_USER}" >> "$GITHUB_ENV"
-          echo "SSH_TEST_KEY=$SSH_TEST_DIR/test_key" >> "$GITHUB_ENV"
+          {
+            echo "SSH_TEST_ENABLED=1"
+            echo "SSH_TEST_HOST=127.0.0.1"
+            echo "SSH_TEST_PORT=22222"
+            echo "SSH_TEST_USER=${SSH_TEST_USER}"
+            echo "SSH_TEST_KEY=$SSH_TEST_DIR/test_key"
+          } >> "$GITHUB_ENV"
 
       - name: go vet
         run: go vet ./...
@@ -283,7 +285,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="$(cat scripts/claude_patch_version.txt | tr -d '\r\n')"
+          version="$(tr -d '\r\n' < scripts/claude_patch_version.txt)"
           if [ -z "$version" ]; then
             echo "Missing Claude patch version in scripts/claude_patch_version.txt" >&2
             exit 1
@@ -443,7 +445,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="$(cat scripts/claude_patch_version.txt | tr -d '\r\n')"
+          version="$(tr -d '\r\n' < scripts/claude_patch_version.txt)"
           if [ -z "$version" ]; then
             echo "Missing Claude patch version in scripts/claude_patch_version.txt" >&2
             exit 1
