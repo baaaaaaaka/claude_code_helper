@@ -78,6 +78,28 @@ func TestSessionParsingHelpers(t *testing.T) {
 		}
 	})
 
+	t.Run("ReadSessionMessages falls back to tool_result when empty", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "session.jsonl")
+		content := `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","is_error":true,"content":[{"type":"text","text":"command failed"}]}]},"timestamp":"2026-01-01T00:00:00Z"}`
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write session file: %v", err)
+		}
+		msgs, err := ReadSessionMessages(path, 0)
+		if err != nil {
+			t.Fatalf("ReadSessionMessages error: %v", err)
+		}
+		if len(msgs) != 1 {
+			t.Fatalf("expected 1 fallback message, got %d", len(msgs))
+		}
+		if msgs[0].Role != "tool_result" {
+			t.Fatalf("unexpected role: %#v", msgs[0])
+		}
+		if !strings.Contains(msgs[0].Content, "Tool result error (toolu_1)") || !strings.Contains(msgs[0].Content, "command failed") {
+			t.Fatalf("unexpected tool result content: %q", msgs[0].Content)
+		}
+	})
+
 	t.Run("ReadSessionMessages skips fallback when displayable exists", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "session.jsonl")

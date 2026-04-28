@@ -188,6 +188,25 @@ retry_cmd() {
   done
 }
 
+resolve_clp_entrypoint() {
+  local install_dir="$1"
+  local path_candidate=""
+
+  path_candidate="$(command -v clp 2>/dev/null || true)"
+  if [[ -n "$path_candidate" && -x "$path_candidate" ]]; then
+    printf '%s\n' "$path_candidate"
+    return 0
+  fi
+
+  if [[ -x "$install_dir/clp" ]]; then
+    printf '%s\n' "$install_dir/clp"
+    return 0
+  fi
+
+  echo "clp was not found in PATH or executable at $install_dir/clp" >&2
+  return 1
+}
+
 mkdir -p "$HOME/.local/bin"
 
 script_url="https://github.com/${repo}/releases/download/${tag}/install.sh"
@@ -202,6 +221,8 @@ trap 'rm -f "$script_path"' EXIT
 bash "$script_path" --repo "$repo" --version "$tag" --dir "$HOME/.local/bin"
 
 "$HOME/.local/bin/claude-proxy" --version | grep -q "${tag#v}"
+clp_entrypoint="$(resolve_clp_entrypoint "$HOME/.local/bin")"
+"$clp_entrypoint" --version | grep -q "${tag#v}"
 "$HOME/.local/bin/claude-proxy" proxy doctor || true
 
 cfg="$HOME/claude-proxy-config.json"

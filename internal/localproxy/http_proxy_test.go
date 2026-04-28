@@ -85,6 +85,54 @@ func TestHTTPProxy_ForwardsPlainHTTP(t *testing.T) {
 	}
 }
 
+func TestHTTPProxy_ForwardsPostHeadersAndQuery(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method=%s want POST", r.Method)
+		}
+		if r.URL.Path != "/submit" || r.URL.RawQuery != "q=one&flag=true" {
+			t.Fatalf("url=%q rawQuery=%q", r.URL.Path, r.URL.RawQuery)
+		}
+		if got := r.Header.Get("X-Test-Header"); got != "kept" {
+			t.Fatalf("X-Test-Header=%q want kept", got)
+		}
+		if got := r.Header.Get("Proxy-Connection"); got != "" {
+			t.Fatalf("Proxy-Connection should be stripped, got %q", got)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if string(body) != "payload" {
+			t.Fatalf("body=%q want payload", string(body))
+		}
+		w.Header().Set("X-Origin", "seen")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte("created"))
+	}))
+	defer origin.Close()
+
+	p := NewHTTPProxy(dialerFunc(func(network, addr string) (net.Conn, error) {
+		return net.DialTimeout(network, addr, 2*time.Second)
+	}), Options{})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, origin.URL+"/submit?q=one&flag=true", strings.NewReader("payload"))
+	req.Header.Set("X-Test-Header", "kept")
+	req.Header.Set("Proxy-Connection", "keep-alive")
+	p.handleHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status=%d want %d body=%q", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Origin"); got != "seen" {
+		t.Fatalf("X-Origin=%q want seen", got)
+	}
+	if strings.TrimSpace(rec.Body.String()) != "created" {
+		t.Fatalf("body=%q want created", rec.Body.String())
+	}
+}
+
 func TestHTTPProxyEdgeCases(t *testing.T) {
 	t.Run("Start rejects double start", func(t *testing.T) {
 		p := NewHTTPProxy(dialerFunc(func(network, addr string) (net.Conn, error) {
@@ -112,6 +160,21 @@ func TestHTTPProxyEdgeCases(t *testing.T) {
 		}), Options{})
 		if _, err := p.Start(addr); err == nil {
 			t.Fatalf("expected Start to fail for occupied port")
+		}
+	})
+
+	t.Run("Close is idempotent", func(t *testing.T) {
+		p := NewHTTPProxy(dialerFunc(func(network, addr string) (net.Conn, error) {
+			return nil, io.EOF
+		}), Options{})
+		if _, err := p.Start("127.0.0.1:0"); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if err := p.Close(context.Background()); err != nil {
+			t.Fatalf("first Close: %v", err)
+		}
+		if err := p.Close(context.Background()); err != nil {
+			t.Fatalf("second Close: %v", err)
 		}
 	})
 

@@ -90,12 +90,27 @@ func (p *HTTPProxy) Start(listenAddr string) (actualAddr string, err error) {
 func (p *HTTPProxy) Close(ctx context.Context) error {
 	p.mu.Lock()
 	srv := p.server
-	p.mu.Unlock()
-
 	if srv == nil {
+		p.mu.Unlock()
 		return nil
 	}
-	return srv.Shutdown(ctx)
+	p.mu.Unlock()
+
+	err := srv.Shutdown(ctx)
+	if errors.Is(err, http.ErrServerClosed) {
+		err = nil
+	}
+	if err != nil {
+		return err
+	}
+
+	p.mu.Lock()
+	if p.server == srv {
+		p.server = nil
+		p.listener = nil
+	}
+	p.mu.Unlock()
+	return nil
 }
 
 func (p *HTTPProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {

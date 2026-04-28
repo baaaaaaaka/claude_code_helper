@@ -43,25 +43,55 @@ func TestBuildArgs_IncludesRequiredOptions(t *testing.T) {
 	}
 }
 
-func TestBuildArgs_ValidatesPorts(t *testing.T) {
-	_, err := BuildArgs(TunnelConfig{
-		Host:      "h",
-		Port:      0,
-		User:      "u",
-		SocksPort: 1,
+func TestBuildArgs_NoUserAndBatchModeFalse(t *testing.T) {
+	args, err := BuildArgs(TunnelConfig{
+		Host:      " example.com ",
+		Port:      22,
+		User:      "  ",
+		SocksPort: 1080,
+		BatchMode: false,
 	})
-	if err == nil {
-		t.Fatalf("expected error for invalid ssh port")
+	if err != nil {
+		t.Fatalf("BuildArgs error: %v", err)
 	}
 
-	_, err = BuildArgs(TunnelConfig{
-		Host:      "h",
-		Port:      22,
-		User:      "u",
-		SocksPort: 0,
-	})
-	if err == nil {
-		t.Fatalf("expected error for invalid socks port")
+	want := []string{
+		"-N",
+		"-o", "ExitOnForwardFailure=yes",
+		"-o", "ConnectTimeout=15",
+		"-o", "ServerAliveInterval=15",
+		"-o", "ServerAliveCountMax=3",
+		"-o", "TCPKeepAlive=yes",
+		"-p", "22",
+		"-D", "127.0.0.1:1080",
+		"example.com",
+	}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("args mismatch\n got: %#v\nwant: %#v", args, want)
+	}
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "-o" && args[i+1] == "BatchMode=yes" {
+			t.Fatalf("BatchMode option should be omitted when false: %#v", args)
+		}
+	}
+}
+
+func TestBuildArgs_ValidatesPorts(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  TunnelConfig
+	}{
+		{name: "zero ssh port", cfg: TunnelConfig{Host: "h", Port: 0, User: "u", SocksPort: 1}},
+		{name: "high ssh port", cfg: TunnelConfig{Host: "h", Port: 65536, User: "u", SocksPort: 1}},
+		{name: "zero socks port", cfg: TunnelConfig{Host: "h", Port: 22, User: "u", SocksPort: 0}},
+		{name: "high socks port", cfg: TunnelConfig{Host: "h", Port: 22, User: "u", SocksPort: 65536}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := BuildArgs(tt.cfg); err == nil {
+				t.Fatalf("expected error for invalid ports")
+			}
+		})
 	}
 }
 
@@ -75,6 +105,16 @@ func TestTunnelLifecycleFailures(t *testing.T) {
 		})
 		if err == nil {
 			t.Fatalf("expected error for missing host")
+		}
+
+		_, err = BuildArgs(TunnelConfig{
+			Host:      "   ",
+			Port:      22,
+			User:      "alice",
+			SocksPort: 1,
+		})
+		if err == nil {
+			t.Fatalf("expected error for blank host")
 		}
 	})
 

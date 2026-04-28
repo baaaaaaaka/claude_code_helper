@@ -50,6 +50,29 @@ func TestFindReusableInstance_PicksMostRecentHealthy(t *testing.T) {
 	}
 }
 
+func TestFindReusableInstance_ReturnsCopy(t *testing.T) {
+	port, closeFn := startHealthServer(t, "inst-a")
+	defer closeFn()
+
+	instances := []config.Instance{{
+		ID:         "inst-a",
+		ProfileID:  "prof-1",
+		Kind:       config.InstanceKindDaemon,
+		HTTPPort:   port,
+		DaemonPID:  os.Getpid(),
+		LastSeenAt: time.Now(),
+	}}
+
+	got := FindReusableInstance(instances, "prof-1", HealthClient{Timeout: 500 * time.Millisecond})
+	if got == nil {
+		t.Fatalf("expected an instance")
+	}
+	got.ID = "mutated"
+	if instances[0].ID != "inst-a" {
+		t.Fatalf("expected source instance to be unchanged, got %q", instances[0].ID)
+	}
+}
+
 func TestFindReusableInstance_IgnoresWrongInstanceID(t *testing.T) {
 	port, closeFn := startHealthServer(t, "different-id")
 	defer closeFn()

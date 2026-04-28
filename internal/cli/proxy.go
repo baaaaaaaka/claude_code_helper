@@ -132,6 +132,7 @@ func newProxyStartCmd(root *rootOptions) *cobra.Command {
 			logPath := filepath.Join(filepath.Dir(store.Path()), "instances", instanceID+".log")
 			pid, err := proxyDaemonLauncher(exe, args, logPath)
 			if err != nil {
+				_ = removeProxyInstance(store, instanceID)
 				return err
 			}
 			_ = store.Update(func(cfg *config.Config) error {

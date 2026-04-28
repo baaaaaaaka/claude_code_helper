@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -29,13 +30,17 @@ type TunnelConfig struct {
 }
 
 func (c TunnelConfig) destination() string {
-	if c.User == "" {
-		return c.Host
+	host := strings.TrimSpace(c.Host)
+	user := strings.TrimSpace(c.User)
+	if user == "" {
+		return host
 	}
-	return c.User + "@" + c.Host
+	return user + "@" + host
 }
 
 func BuildArgs(c TunnelConfig) ([]string, error) {
+	c.Host = strings.TrimSpace(c.Host)
+	c.User = strings.TrimSpace(c.User)
 	if c.Host == "" {
 		return nil, errors.New("host is required")
 	}

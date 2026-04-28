@@ -87,6 +87,61 @@ func TestInstallPs1ChecksumMismatch(t *testing.T) {
 	}
 }
 
+func TestInstallPs1ChecksumFallbackExecutesWithoutGetFileHash(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("powershell"); err != nil {
+		t.Skip("powershell not available")
+	}
+
+	repoRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	scriptPath := filepath.Join(repoRoot, "install.ps1")
+	payloadPath := filepath.Join(t.TempDir(), "payload.bin")
+	payload := []byte("fallback checksum payload")
+	if err := os.WriteFile(payloadPath, payload, 0o600); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	want := fmt.Sprintf("%x", sha256.Sum256(payload))
+
+	script := `
+$ErrorActionPreference = "Stop"
+$tokens = $null
+$errors = $null
+$content = Get-Content -LiteralPath $env:INSTALL_PS1_PATH -Raw
+$ast = [System.Management.Automation.Language.Parser]::ParseInput($content, [ref]$tokens, [ref]$errors)
+if ($errors -and $errors.Count -gt 0) {
+  throw "failed to parse install.ps1"
+}
+$fn = $ast.Find({
+  param($node)
+  $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq "Get-SHA256Hex"
+}, $true)
+if ($null -eq $fn) {
+  throw "Get-SHA256Hex function not found"
+}
+Invoke-Expression $fn.Extent.Text
+function global:Get-Command {
+  param([Parameter(ValueFromRemainingArguments = $true)] [object[]] $Args)
+  return $null
+}
+Get-SHA256Hex -path $env:PAYLOAD_PATH
+`
+	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
+	cmd.Env = append(os.Environ(),
+		"INSTALL_PS1_PATH="+scriptPath,
+		"PAYLOAD_PATH="+payloadPath,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("fallback checksum probe failed: %v\n%s", err, string(out))
+	}
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Fatalf("fallback checksum mismatch: got %q want %q", got, want)
+	}
+}
+
 func TestInstallPs1RemovesLegacyAlias(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("powershell"); err != nil {

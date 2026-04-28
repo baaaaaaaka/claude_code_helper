@@ -95,6 +95,16 @@ jobs:
           check_max_glibc "$lib_dir/libstdc++.so.6" "GLIBC_2.31"
           check_max_glibc "$lib_dir/libgcc_s.so.1" "GLIBC_2.31"
 
+      - name: Smoke test local bundle on CentOS7
+        shell: bash
+        timeout-minutes: 20
+        env:
+          BUNDLE: ${{ github.workspace }}/dist/glibc-compat/${{ env.GLIBC_COMPAT_BUNDLE }}
+        run: |
+          set -euo pipefail
+          export CLAUDE_VERSION="$(tr -d '\r\n' < scripts/claude_patch_version.txt)"
+          bash scripts/glibc/test_centos7_claude_with_glibc_compat.sh
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:

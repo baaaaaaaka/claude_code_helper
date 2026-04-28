@@ -1,7 +1,6 @@
 package claudehistory
 
 import (
-	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -9,22 +8,23 @@ import (
 
 func TestIndexHelpers(t *testing.T) {
 	t.Run("ResolveClaudeDir prefers override and env", func(t *testing.T) {
-		t.Setenv("HOME", filepath.Join(t.TempDir(), "home"))
+		home := filepath.Join(t.TempDir(), "home")
+		t.Setenv("HOME", home)
+		t.Setenv(EnvClaudeDir, "$HOME/env-claude")
 		override, err := ResolveClaudeDir("$HOME/custom")
 		if err != nil {
 			t.Fatalf("ResolveClaudeDir override error: %v", err)
 		}
-		if override != filepath.Join(os.Getenv("HOME"), "custom") {
+		if override != filepath.Join(home, "custom") {
 			t.Fatalf("expected override expansion, got %q", override)
 		}
 
-		t.Setenv(EnvClaudeDir, filepath.Join(t.TempDir(), "env-claude"))
 		envPath, err := ResolveClaudeDir("")
 		if err != nil {
 			t.Fatalf("ResolveClaudeDir env error: %v", err)
 		}
-		if envPath != os.Getenv(EnvClaudeDir) {
-			t.Fatalf("expected env path %q, got %q", os.Getenv(EnvClaudeDir), envPath)
+		if envPath != filepath.Join(home, "env-claude") {
+			t.Fatalf("expected expanded env path %q, got %q", filepath.Join(home, "env-claude"), envPath)
 		}
 	})
 

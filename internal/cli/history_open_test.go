@@ -181,6 +181,109 @@ func TestHistoryOpenCmdReturnsAmbiguousAliasError(t *testing.T) {
 	}
 }
 
+func TestHistoryOpenCmdForwardsLaunchOptions(t *testing.T) {
+	store := newTempStore(t)
+	enabled := true
+	mode := string(config.YoloModeRules)
+	cfg := config.Config{
+		Version:      config.CurrentVersion,
+		ProxyEnabled: &enabled,
+		YoloMode:     &mode,
+		Profiles: []config.Profile{
+			{ID: "p1", Name: "one", Host: "host1", Port: 22, User: "user"},
+			{ID: "p2", Name: "two", Host: "host2", Port: 22, User: "user"},
+		},
+		Instances: []config.Instance{{
+			ID:        "inst-1",
+			ProfileID: "p2",
+			HTTPPort:  18080,
+			SocksPort: 19090,
+			DaemonPID: 1234,
+		}},
+	}
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	claudeDir := filepath.Join(t.TempDir(), "claude-home")
+	claudePath := filepath.Join(t.TempDir(), "claude")
+	profileRef := ""
+	wantSession := claudehistory.Session{SessionID: "sess-1", FilePath: filepath.Join(t.TempDir(), "sess-1.jsonl")}
+	wantProject := claudehistory.Project{Key: "proj-1", Path: "/tmp/project", Sessions: []claudehistory.Session{wantSession}}
+
+	prevDiscover := discoverHistoryFunc
+	prevRun := runClaudeSessionFunc
+	t.Cleanup(func() {
+		discoverHistoryFunc = prevDiscover
+		runClaudeSessionFunc = prevRun
+	})
+
+	discoverHistoryFunc = func(ctx context.Context, dir string) ([]claudehistory.Project, error) {
+		if dir != claudeDir {
+			t.Fatalf("expected discover claudeDir %q, got %q", claudeDir, dir)
+		}
+		return []claudehistory.Project{wantProject}, nil
+	}
+
+	called := false
+	runClaudeSessionFunc = func(
+		ctx context.Context,
+		root *rootOptions,
+		gotStore *config.Store,
+		profile *config.Profile,
+		instances []config.Instance,
+		session claudehistory.Session,
+		project claudehistory.Project,
+		path string,
+		dir string,
+		useProxy bool,
+		yoloMode config.YoloMode,
+		log io.Writer,
+	) error {
+		called = true
+		if root.configPath != store.Path() {
+			t.Fatalf("expected root config path %q, got %q", store.Path(), root.configPath)
+		}
+		if gotStore.Path() != store.Path() {
+			t.Fatalf("expected store path %q, got %q", store.Path(), gotStore.Path())
+		}
+		if profile == nil || profile.ID != "p2" {
+			t.Fatalf("expected profile p2, got %#v", profile)
+		}
+		if len(instances) != 1 || instances[0].ID != "inst-1" || instances[0].HTTPPort != 18080 {
+			t.Fatalf("unexpected instances: %#v", instances)
+		}
+		if session.SessionID != wantSession.SessionID {
+			t.Fatalf("expected session %q, got %q", wantSession.SessionID, session.SessionID)
+		}
+		if project.Key != wantProject.Key || project.Path != wantProject.Path {
+			t.Fatalf("unexpected project: %#v", project)
+		}
+		if path != claudePath {
+			t.Fatalf("expected claudePath %q, got %q", claudePath, path)
+		}
+		if dir != claudeDir {
+			t.Fatalf("expected claudeDir %q, got %q", claudeDir, dir)
+		}
+		if !useProxy {
+			t.Fatalf("expected useProxy=true")
+		}
+		if yoloMode != config.YoloModeRules {
+			t.Fatalf("expected rules yolo mode, got %q", yoloMode)
+		}
+		return nil
+	}
+
+	cmd := newHistoryOpenCmd(&rootOptions{configPath: store.Path()}, &claudeDir, &claudePath, &profileRef)
+	cmd.SetArgs([]string{"--profile", "two", "sess-1"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if !called {
+		t.Fatalf("expected runClaudeSession to be called")
+	}
+}
+
 func TestHistoryOpenCmdCancellationIsFatal(t *testing.T) {
 	store := newTempStore(t)
 	disabled := false

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -319,6 +320,60 @@ func TestProxyStartCmdForegroundError(t *testing.T) {
 	cmd.SetArgs([]string{"--foreground", "p1"})
 	if err := cmd.Execute(); err == nil {
 		t.Fatalf("expected foreground start to fail without ssh")
+	}
+}
+
+func TestProxyStartCmdBackgroundLauncherFailureCleansInstance(t *testing.T) {
+	store := newTempStore(t)
+	cfg := config.Config{
+		Version: config.CurrentVersion,
+		Profiles: []config.Profile{{
+			ID:   "p1",
+			Name: "profile",
+			Host: "host",
+			Port: 22,
+			User: "user",
+		}},
+	}
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	prevID := newProxyInstanceID
+	prevExecutable := proxyExecutable
+	prevLauncher := proxyDaemonLauncher
+	t.Cleanup(func() {
+		newProxyInstanceID = prevID
+		proxyExecutable = prevExecutable
+		proxyDaemonLauncher = prevLauncher
+	})
+
+	newProxyInstanceID = func() (string, error) { return "inst-launch-fail", nil }
+	proxyExecutable = func() (string, error) { return "/bin/claude-proxy", nil }
+	launcherErr := errors.New("launcher failed")
+	proxyDaemonLauncher = func(exe string, args []string, logPath string) (int, error) {
+		if exe != "/bin/claude-proxy" {
+			t.Fatalf("unexpected executable: %q", exe)
+		}
+		if !strings.Contains(strings.Join(args, " "), "inst-launch-fail") {
+			t.Fatalf("expected launcher args to include instance id, got %#v", args)
+		}
+		return 0, launcherErr
+	}
+
+	cmd := newProxyStartCmd(&rootOptions{configPath: store.Path()})
+	cmd.SetArgs([]string{"p1"})
+	err := cmd.Execute()
+	if !errors.Is(err, launcherErr) {
+		t.Fatalf("expected launcher error, got %v", err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if len(loaded.Instances) != 0 {
+		t.Fatalf("expected launcher failure to clean recorded instance, got %#v", loaded.Instances)
 	}
 }
 

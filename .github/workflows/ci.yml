@@ -9,6 +9,16 @@ permissions:
   contents: read
 
 jobs:
+  actionlint:
+    name: Actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check workflows
+        uses: rhysd/actionlint@v1
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

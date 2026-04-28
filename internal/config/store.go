@@ -6,16 +6,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 
 	"github.com/gofrs/flock"
 )
 
 type Store struct {
-	mu   sync.Mutex
-	path string
-	lock *flock.Flock
+	mu     sync.Mutex
+	path   string
+	pathMu *sync.Mutex
+	lock   *flock.Flock
 }
+
+var storePathLocks sync.Map
 
 func DefaultPath() (string, error) {
 	base, err := os.UserConfigDir()
@@ -41,8 +46,9 @@ func NewStore(pathOverride string) (*Store, error) {
 	}
 
 	return &Store{
-		path: path,
-		lock: flock.New(path + ".lock"),
+		path:   path,
+		pathMu: storePathMutex(path),
+		lock:   flock.New(path + ".lock"),
 	}, nil
 }
 
@@ -51,6 +57,8 @@ func (s *Store) Path() string { return s.path }
 func (s *Store) Load() (Config, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pathMu.Lock()
+	defer s.pathMu.Unlock()
 
 	if err := s.lock.Lock(); err != nil {
 		return Config{}, fmt.Errorf("lock config: %w", err)
@@ -63,6 +71,8 @@ func (s *Store) Load() (Config, error) {
 func (s *Store) Save(cfg Config) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pathMu.Lock()
+	defer s.pathMu.Unlock()
 
 	if err := s.lock.Lock(); err != nil {
 		return fmt.Errorf("lock config: %w", err)
@@ -75,6 +85,8 @@ func (s *Store) Save(cfg Config) error {
 func (s *Store) Update(fn func(*Config) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pathMu.Lock()
+	defer s.pathMu.Unlock()
 
 	if err := s.lock.Lock(); err != nil {
 		return fmt.Errorf("lock config: %w", err)
@@ -91,6 +103,20 @@ func (s *Store) Update(fn func(*Config) error) error {
 	}
 
 	return s.saveUnlocked(cfg)
+}
+
+func storePathMutex(path string) *sync.Mutex {
+	key := path
+	if abs, err := filepath.Abs(path); err == nil {
+		key = abs
+	} else {
+		key = filepath.Clean(path)
+	}
+	if runtime.GOOS == "windows" {
+		key = strings.ToLower(key)
+	}
+	mu, _ := storePathLocks.LoadOrStore(key, &sync.Mutex{})
+	return mu.(*sync.Mutex)
 }
 
 func (s *Store) loadUnlocked() (Config, error) {

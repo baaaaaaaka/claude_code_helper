@@ -102,6 +102,64 @@ func TestStore_UpdateIsSerialized(t *testing.T) {
 	}
 }
 
+func TestStore_UpdateIsSerializedAcrossInstances(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	const n = 30
+	stores := make([]*Store, n)
+	for i := range stores {
+		store, err := NewStore(path)
+		if err != nil {
+			t.Fatalf("NewStore %d: %v", i, err)
+		}
+		stores[i] = store
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, n)
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			errCh <- stores[i].Update(func(cfg *Config) error {
+				cfg.UpsertInstance(Instance{
+					ID:         fmt.Sprintf("inst-%02d", i),
+					ProfileID:  "prof",
+					Kind:       InstanceKindDaemon,
+					HTTPPort:   10000 + i,
+					SocksPort:  11000 + i,
+					DaemonPID:  1000 + i,
+					StartedAt:  time.Now(),
+					LastSeenAt: time.Now(),
+				})
+				time.Sleep(time.Millisecond)
+				return nil
+			})
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+	}
+
+	store, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore final: %v", err)
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Instances) != n {
+		t.Fatalf("Instances len=%d want %d", len(cfg.Instances), n)
+	}
+}
+
 func TestStore_ErrorPaths(t *testing.T) {
 	t.Run("Load rejects invalid JSON", func(t *testing.T) {
 		dir := t.TempDir()

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -272,6 +273,69 @@ func TestRunHistoryTuiHandlesProxyToggle(t *testing.T) {
 	cmd.SetContext(context.Background())
 	if err := runHistoryTui(cmd, &rootOptions{configPath: store.Path()}, "", "", claudePath, 0); err != nil {
 		t.Fatalf("runHistoryTui error: %v", err)
+	}
+}
+
+func TestRunHistoryTuiForwardsYoloOptions(t *testing.T) {
+	store := newTempStore(t)
+	disabled := false
+	mode := string(config.YoloModeRules)
+	if err := store.Save(config.Config{
+		Version:      config.CurrentVersion,
+		ProxyEnabled: &disabled,
+		YoloMode:     &mode,
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	prevSelect := selectSession
+	prevRequireTTY := historyRequireTTYFn
+	t.Cleanup(func() {
+		selectSession = prevSelect
+		historyRequireTTYFn = prevRequireTTY
+	})
+	historyRequireTTYFn = func() error { return nil }
+
+	refreshInterval := 42 * time.Millisecond
+	called := false
+	selectSession = func(ctx context.Context, opts tui.Options) (*tui.Selection, error) {
+		called = true
+		if !opts.YoloVisible {
+			t.Fatalf("expected yolo controls to be visible")
+		}
+		if opts.YoloMode != config.YoloModeRules {
+			t.Fatalf("expected rules yolo mode, got %q", opts.YoloMode)
+		}
+		if opts.RefreshInterval != refreshInterval {
+			t.Fatalf("expected refresh interval %s, got %s", refreshInterval, opts.RefreshInterval)
+		}
+		if opts.PersistYolo == nil {
+			t.Fatalf("expected PersistYolo callback")
+		}
+		if err := opts.PersistYolo(config.YoloModeBypass); err != nil {
+			t.Fatalf("PersistYolo error: %v", err)
+		}
+		return nil, nil
+	}
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	if err := runHistoryTui(cmd, &rootOptions{configPath: store.Path()}, "", "", "", refreshInterval); err != nil {
+		t.Fatalf("runHistoryTui error: %v", err)
+	}
+	if !called {
+		t.Fatalf("expected selectSession to be called")
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if loaded.YoloMode == nil || *loaded.YoloMode != string(config.YoloModeBypass) {
+		t.Fatalf("expected yolo mode to persist bypass, got %#v", loaded.YoloMode)
+	}
+	if loaded.YoloEnabled == nil || !*loaded.YoloEnabled {
+		t.Fatalf("expected legacy yolo enabled compatibility flag, got %#v", loaded.YoloEnabled)
 	}
 }
 

@@ -47,7 +47,6 @@ jobs:
   install-smoke:
     name: Install smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.allowFailure || false }}
     needs: [goreleaser]
     strategy:
       fail-fast: false
@@ -56,7 +55,6 @@ jobs:
           - os: ubuntu-latest
           - os: macos-latest
           - os: windows-latest
-            allowFailure: true
 
     steps:
       - name: Checkout
@@ -69,10 +67,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          install_dir="$HOME/.local/bin"
           chmod +x ./install.sh
-          ./install.sh --repo "${GITHUB_REPOSITORY}" --version "${RELEASE_TAG}" --dir "$HOME/.local/bin"
-          "$HOME/.local/bin/claude-proxy" --version | grep -q "${RELEASE_TAG#v}"
-          "$HOME/.local/bin/claude-proxy" proxy doctor || true
+          ./install.sh --repo "${GITHUB_REPOSITORY}" --version "${RELEASE_TAG}" --dir "$install_dir"
+          export PATH="$install_dir:$PATH"
+          "$install_dir/claude-proxy" --version | grep -q "${RELEASE_TAG#v}"
+          "$install_dir/clp" --version | grep -q "${RELEASE_TAG#v}"
+          clp --version | grep -q "${RELEASE_TAG#v}"
+          "$install_dir/claude-proxy" proxy doctor || true
 
       - name: Install (Windows)
         if: runner.os == 'Windows'
@@ -81,9 +83,17 @@ jobs:
           $ErrorActionPreference = "Stop"
           $installDir = Join-Path $env:USERPROFILE ".local\\bin"
           .\\install.ps1 -Repo $env:GITHUB_REPOSITORY -Version $env:RELEASE_TAG -InstallDir $installDir
+          $env:Path = "$installDir;$env:Path"
           $exe = Join-Path $installDir "claude-proxy.exe"
+          $clpCmd = Join-Path $installDir "clp.cmd"
           & $exe --version | Select-String ($env:RELEASE_TAG.TrimStart("v")) | Out-Null
-          & $exe proxy doctor | Out-Default
+          & $clpCmd --version | Select-String ($env:RELEASE_TAG.TrimStart("v")) | Out-Null
+          & clp.cmd --version | Select-String ($env:RELEASE_TAG.TrimStart("v")) | Out-Null
+          try {
+            & $exe proxy doctor | Out-Default
+          } catch {
+            Write-Warning "proxy doctor failed after install smoke: $($_.Exception.Message)"
+          }
 
   install-container-smoke:
     name: Install smoke (containers)
