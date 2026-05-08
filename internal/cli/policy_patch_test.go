@@ -60,6 +60,29 @@ func TestPolicySettingsDisablePatch_ReplacesDirectReturnGetter(t *testing.T) {
 	}
 }
 
+func TestPolicySettingsDisablePatch_ReplacesDirectReturnGetterWithMultipleParams(t *testing.T) {
+	requireExePatchEnabled(t)
+	startRe := regexp.MustCompile(policySettingsGetterStage1)
+	input := []byte("function tC8(H,$){if(H===\"policySettings\")return zfq($).settings;let q=sY(H),{settings:K}=q?U_H(q,$):{settings:null};return K}")
+
+	out, stats, err := applyPolicySettingsDisablePatch(input, startRe, nil, false)
+	if err != nil {
+		t.Fatalf("applyPolicySettingsDisablePatch error: %v", err)
+	}
+	if len(out) != len(input) {
+		t.Fatalf("expected output length %d, got %d", len(input), len(out))
+	}
+	if !bytes.Contains(out, []byte("if(H===\"policySettings\")return null")) {
+		t.Fatalf("expected policySettings direct return to be replaced")
+	}
+	if bytes.Contains(out, []byte("return zfq($).settings")) {
+		t.Fatalf("expected original policySettings loader to be replaced")
+	}
+	if stats.Segments != 1 || stats.Eligible != 1 || stats.Replacements != 1 || stats.Changed != 1 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+}
+
 func TestPolicySettingsDisablePatch_NoMatch(t *testing.T) {
 	requireExePatchEnabled(t)
 	startRe := regexp.MustCompile(policySettingsGetterStage1)
