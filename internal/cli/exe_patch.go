@@ -159,6 +159,8 @@ type exePatchStats struct {
 const (
 	// Match the settings getter that starts with a policySettings guard.
 	policySettingsGetterStage1 = `function\s+[A-Za-z0-9_$]+\s*\(\s*[A-Za-z0-9_$]+\s*\)\s*\{\s*if\(\s*(?:[A-Za-z0-9_$]+\s*={2,3}\s*['"]policySettings['"]|['"]policySettings['"]\s*={2,3}\s*[A-Za-z0-9_$]+)\s*\)\{`
+	// Claude 2.1.133 flattened the policy settings getter guard to a direct return.
+	policySettingsDirectReturnStage1 = `function\s+[A-Za-z0-9_$]+\s*\(\s*[A-Za-z0-9_$]+\s*\)\s*\{\s*if\(\s*(?:[A-Za-z0-9_$]+\s*={2,3}\s*['"]policySettings['"]|['"]policySettings['"]\s*={2,3}\s*[A-Za-z0-9_$]+)\s*\)\s*return\s+[^;{}]+;`
 )
 
 func policySettingsSpecs() ([]exePatchSpec, error) {

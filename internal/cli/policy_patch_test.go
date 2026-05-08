@@ -26,6 +26,40 @@ func TestPolicySettingsDisablePatch_ReplacesGetterBlock(t *testing.T) {
 	}
 }
 
+func TestPolicySettingsDisablePatch_ReplacesDirectReturnGetter(t *testing.T) {
+	requireExePatchEnabled(t)
+	startRe := regexp.MustCompile(policySettingsGetterStage1)
+	input := []byte("function f5q(H){if(H===\"policySettings\")return Y5q().settings;let $=VO(H),{settings:q}=$?si($):{settings:null};return q}")
+
+	out, stats, err := applyPolicySettingsDisablePatch(input, startRe, nil, false)
+	if err != nil {
+		t.Fatalf("applyPolicySettingsDisablePatch error: %v", err)
+	}
+	if len(out) != len(input) {
+		t.Fatalf("expected output length %d, got %d", len(input), len(out))
+	}
+	if !bytes.Contains(out, []byte("if(H===\"policySettings\")return null")) {
+		t.Fatalf("expected policySettings direct return to be replaced")
+	}
+	if bytes.Contains(out, []byte("return Y5q().settings")) {
+		t.Fatalf("expected original policySettings loader to be replaced")
+	}
+	if stats.Segments != 1 || stats.Eligible != 1 || stats.Replacements != 1 || stats.Changed != 1 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+
+	out2, stats2, err := applyPolicySettingsDisablePatch(out, startRe, nil, false)
+	if err != nil {
+		t.Fatalf("reapply applyPolicySettingsDisablePatch error: %v", err)
+	}
+	if !bytes.Equal(out2, out) {
+		t.Fatalf("expected reapply to keep output unchanged")
+	}
+	if stats2.Segments != 1 || stats2.Eligible != 1 || stats2.Replacements != 1 || stats2.Changed != 0 {
+		t.Fatalf("unexpected reapply stats: %+v", stats2)
+	}
+}
+
 func TestPolicySettingsDisablePatch_NoMatch(t *testing.T) {
 	requireExePatchEnabled(t)
 	startRe := regexp.MustCompile(policySettingsGetterStage1)

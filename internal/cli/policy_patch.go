@@ -23,12 +23,39 @@ const (
 	remoteSettingsAPIPathPatched     = "/api/claude_code/settingS"
 )
 
+var policySettingsDirectReturnRe = regexp.MustCompile(policySettingsDirectReturnStage1)
+
 func applyPolicySettingsDisablePatch(data []byte, startRe *regexp.Regexp, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
 	stats := exePatchStats{Label: "policySettings-disable"}
 	if startRe == nil {
 		return nil, stats, errors.New("policySettings getter regex is nil")
 	}
 
+	out, blockStats, err := applyPolicySettingsBlockDisablePatch(data, startRe, log, preview)
+	if err != nil {
+		return nil, stats, err
+	}
+	stats.add(blockStats)
+
+	out, returnStats, err := applyPolicySettingsDirectReturnDisablePatch(out, policySettingsDirectReturnRe, log, preview)
+	if err != nil {
+		return nil, stats, err
+	}
+	stats.add(returnStats)
+
+	return out, stats, nil
+}
+
+func (s *exePatchStats) add(other exePatchStats) {
+	s.Segments += other.Segments
+	s.Eligible += other.Eligible
+	s.Patched += other.Patched
+	s.Changed += other.Changed
+	s.Replacements += other.Replacements
+}
+
+func applyPolicySettingsBlockDisablePatch(data []byte, startRe *regexp.Regexp, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
+	stats := exePatchStats{Label: "policySettings-disable"}
 	matches := startRe.FindAllIndex(data, -1)
 	if len(matches) == 0 {
 		return data, stats, nil
@@ -82,6 +109,69 @@ func applyPolicySettingsDisablePatch(data []byte, startRe *regexp.Regexp, log io
 			copy(patched[contentStart:contentEnd], repl)
 		}
 		lastEnd = blockEnd
+	}
+
+	if stats.Eligible == 0 {
+		return data, stats, nil
+	}
+	if patched == nil {
+		return data, stats, nil
+	}
+	return patched, stats, nil
+}
+
+func applyPolicySettingsDirectReturnDisablePatch(data []byte, startRe *regexp.Regexp, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
+	stats := exePatchStats{Label: "policySettings-disable"}
+	if startRe == nil {
+		return nil, stats, errors.New("policySettings direct-return regex is nil")
+	}
+
+	matches := startRe.FindAllIndex(data, -1)
+	if len(matches) == 0 {
+		return data, stats, nil
+	}
+	stats.Segments = len(matches)
+
+	var patched []byte
+	lastEnd := 0
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		if match[0] < lastEnd {
+			continue
+		}
+		segment := data[match[0]:match[1]]
+		returnRel := bytes.Index(segment, []byte("return"))
+		semiRel := bytes.LastIndexByte(segment, ';')
+		if returnRel < 0 || semiRel <= returnRel {
+			continue
+		}
+
+		contentStart := match[0] + returnRel
+		contentEnd := match[0] + semiRel
+		if contentEnd <= contentStart {
+			continue
+		}
+
+		repl := paddedLiteral("return null", contentEnd-contentStart)
+		before := data[contentStart:contentEnd]
+		if preview {
+			logPatchPreview(log, "policySettings-disable", before, repl)
+		}
+
+		stats.Eligible++
+		stats.Patched++
+		stats.Replacements++
+		if !bytes.Equal(before, repl) {
+			stats.Changed++
+			if patched == nil {
+				patched = make([]byte, len(data))
+				copy(patched, data)
+			}
+			copy(patched[contentStart:contentEnd], repl)
+		}
+		lastEnd = match[1]
 	}
 
 	if stats.Eligible == 0 {
