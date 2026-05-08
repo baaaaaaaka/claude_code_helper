@@ -418,7 +418,10 @@ func TestRunClaudeJSONSpecDoesNotMutateConfigOnYoloFallback(t *testing.T) {
 		t.Fatalf("save config: %v", err)
 	}
 
-	spec := preparedClaudeRunJSONSpec{Cwd: t.TempDir()}
+	spec := preparedClaudeRunJSONSpec{
+		Cwd:      t.TempDir(),
+		Headless: true,
+	}
 	root := &rootOptions{configPath: store.Path()}
 	if err := runClaudeJSONSpec(context.Background(), root, store, nil, nil, spec, claudePath, "", false, true, io.Discard); err != nil {
 		t.Fatalf("runClaudeJSONSpec error: %v", err)
