@@ -72,6 +72,41 @@ install_build_deps() {
   yum -y install devtoolset-9-gcc devtoolset-9-gcc-c++ devtoolset-9-binutils devtoolset-9-make
 }
 
+download_glibc_tarball() {
+  local tarball="$1"
+  local attempts="${DOWNLOAD_ATTEMPTS:-5}"
+  local url status
+
+  for url in \
+    "https://mirrors.kernel.org/gnu/glibc/${tarball}" \
+    "https://mirror.csclub.uwaterloo.ca/gnu/glibc/${tarball}" \
+    "https://ftp.wayne.edu/gnu/glibc/${tarball}" \
+    "https://ftpmirror.gnu.org/glibc/${tarball}" \
+    "https://ftp.gnu.org/gnu/glibc/${tarball}"; do
+    echo "Downloading ${url}"
+    rm -f "$tarball"
+    set +e
+    wget \
+      --tries="$attempts" \
+      --waitretry=10 \
+      --retry-connrefused \
+      --timeout=60 \
+      --read-timeout=60 \
+      --progress=dot:giga \
+      -O "$tarball" \
+      "$url"
+    status=$?
+    set -e
+    if [[ "$status" -eq 0 ]]; then
+      return 0
+    fi
+    echo "Download failed with exit code ${status}: ${url}" >&2
+  done
+
+  echo "Failed to download ${tarball} from all GNU mirrors" >&2
+  return 1
+}
+
 build_glibc() {
   local src="glibc-${GLIBC_VERSION}"
   local tarball="${src}.tar.xz"
@@ -83,7 +118,7 @@ build_glibc() {
   rm -rf "$src_dir" "$build_dir" "$stage"
   mkdir -p "$src_dir" "$build_dir" "$stage"
   cd "$src_dir"
-  wget -q "https://ftp.gnu.org/gnu/glibc/${tarball}"
+  download_glibc_tarball "$tarball"
   tar -xf "$tarball"
 
   # devtoolset activation can fail with nounset when MANPATH is undefined.
