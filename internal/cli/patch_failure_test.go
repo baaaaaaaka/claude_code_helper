@@ -439,6 +439,105 @@ func TestResolveYoloBypassArgsUsesCachedProbe(t *testing.T) {
 	}
 }
 
+func TestResolveYoloBypassArgsRefreshesLegacyCachedProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script test on windows")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "claude")
+	body := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--version\" ]; then\n" +
+		"  echo \"Claude Code 9.9.9\"\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"if [ \"$1\" = \"--help\" ]; then\n" +
+		"  echo \"--dangerously-skip-permissions\"\n" +
+		"  echo \"--permission-mode\"\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"exit 1\n"
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+		t.Fatalf("write probe script: %v", err)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	store, err := config.NewStore(configPath)
+	if err != nil {
+		t.Fatalf("new config store: %v", err)
+	}
+	if err := store.Update(func(cfg *config.Config) error {
+		cfg.UpsertYoloBypassProbe(config.YoloBypassProbe{
+			ProxyVersion:  currentProxyVersionFn(),
+			ClaudeVersion: "9.9.9",
+			Args:          []string{"--permission-mode", "bypassPermissions"},
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("seed cached probe: %v", err)
+	}
+
+	got := resolveYoloBypassArgs(path, configPath)
+	want := []string{"--dangerously-skip-permissions", "--permission-mode", "bypassPermissions"}
+	if len(got) != len(want) {
+		t.Fatalf("expected refreshed args %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("expected refreshed args %v, got %v", want, got)
+		}
+	}
+
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cached, ok := cfg.FindYoloBypassProbe(currentProxyVersionFn(), "9.9.9", "")
+	if !ok || !yoloBypassArgsIncludeDangerousSkip(cached) {
+		t.Fatalf("expected refreshed args to be cached, got %v ok=%v", cached, ok)
+	}
+}
+
+func TestResolveYoloBypassArgsDoesNotTrustLegacyCacheWhenRefreshFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skip shell script test on windows")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "claude")
+	body := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--version\" ]; then\n" +
+		"  echo \"Claude Code 9.9.9\"\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"if [ \"$1\" = \"--help\" ]; then\n" +
+		"  echo \"usage: claude\"\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"exit 1\n"
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+		t.Fatalf("write probe script: %v", err)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	store, err := config.NewStore(configPath)
+	if err != nil {
+		t.Fatalf("new config store: %v", err)
+	}
+	if err := store.Update(func(cfg *config.Config) error {
+		cfg.UpsertYoloBypassProbe(config.YoloBypassProbe{
+			ProxyVersion:  currentProxyVersionFn(),
+			ClaudeVersion: "9.9.9",
+			Args:          []string{"--permission-mode", "bypassPermissions"},
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("seed cached probe: %v", err)
+	}
+
+	if got := resolveYoloBypassArgs(path, configPath); got != nil {
+		t.Fatalf("expected legacy cached args to be ignored when refresh is unsupported, got %v", got)
+	}
+}
+
 func TestResolveYoloBypassArgsDoesNotCacheProbeFailure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skip shell script test on windows")
@@ -481,7 +580,7 @@ func TestResolveYoloBypassArgsDoesNotCacheProbeFailure(t *testing.T) {
 	}
 }
 
-func TestResolveYoloBypassArgsCachesSuccessfulUnsupportedProbe(t *testing.T) {
+func TestResolveYoloBypassArgsDoesNotCacheUnsupportedProbe(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skip shell script test on windows")
 	}
@@ -520,8 +619,10 @@ func TestResolveYoloBypassArgsCachesSuccessfulUnsupportedProbe(t *testing.T) {
 		t.Fatalf("rewrite probe script: %v", err)
 	}
 
-	if got := resolveYoloBypassArgs(path, configPath); got != nil {
-		t.Fatalf("expected cached unsupported result to suppress reprobe, got %v", got)
+	got := resolveYoloBypassArgs(path, configPath)
+	want := []string{"--dangerously-skip-permissions"}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("expected unsupported probe not to be cached; want %v, got %v", want, got)
 	}
 }
 

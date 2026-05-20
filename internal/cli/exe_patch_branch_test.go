@@ -149,8 +149,8 @@ func TestExePatchOptionsCompileSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile error: %v", err)
 	}
-	if len(specs) != 5 {
-		t.Fatalf("expected 5 specs, got %d", len(specs))
+	if len(specs) != 6 {
+		t.Fatalf("expected 6 specs, got %d", len(specs))
 	}
 }
 

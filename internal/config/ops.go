@@ -133,6 +133,9 @@ func (c Config) FindYoloBypassProbe(proxyVersion, claudeVersion, claudePath stri
 			if strings.TrimSpace(entry.ClaudeVersion) != claudeVersion {
 				continue
 			}
+			if len(entry.Args) == 0 {
+				continue
+			}
 			return append([]string(nil), entry.Args...), true
 		}
 		return nil, false
@@ -148,6 +151,9 @@ func (c Config) FindYoloBypassProbe(proxyVersion, claudeVersion, claudePath stri
 			continue
 		}
 		if strings.TrimSpace(entry.ClaudePath) != claudePath {
+			continue
+		}
+		if len(entry.Args) == 0 {
 			continue
 		}
 		return append([]string(nil), entry.Args...), true

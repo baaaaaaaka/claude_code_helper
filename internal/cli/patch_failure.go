@@ -101,10 +101,20 @@ func resolveYoloBypassArgs(path string, configPath string) []string {
 	proxyVersion := currentProxyVersionFn()
 	claudeVersion := strings.TrimSpace(resolveClaudeVersionFn(resolvedPath))
 	if args, ok := lookupCachedYoloBypassArgs(configPath, proxyVersion, claudeVersion, resolvedPath); ok {
-		return append([]string(nil), args...)
+		if yoloBypassArgsIncludeDangerousSkip(args) {
+			return append([]string(nil), args...)
+		}
+		probedArgs, err := probeYoloBypassArgsFn(resolvedPath)
+		if err == nil && len(probedArgs) > 0 {
+			if configPath != "" {
+				_ = rememberYoloBypassArgs(configPath, proxyVersion, claudeVersion, resolvedPath, probedArgs)
+			}
+			return append([]string(nil), probedArgs...)
+		}
+		return nil
 	}
 	args, err := probeYoloBypassArgsFn(resolvedPath)
-	if err == nil && configPath != "" {
+	if err == nil && len(args) > 0 && configPath != "" {
 		_ = rememberYoloBypassArgs(configPath, proxyVersion, claudeVersion, resolvedPath, args)
 	}
 	return append([]string(nil), args...)
@@ -148,7 +158,7 @@ func lookupCachedYoloBypassArgs(configPath string, proxyVersion string, claudeVe
 
 func rememberYoloBypassArgs(configPath string, proxyVersion string, claudeVersion string, claudePath string, args []string) error {
 	configPath = strings.TrimSpace(configPath)
-	if configPath == "" {
+	if configPath == "" || len(args) == 0 {
 		return nil
 	}
 	store, err := config.NewStore(configPath)
@@ -166,6 +176,15 @@ func rememberYoloBypassArgs(configPath string, proxyVersion string, claudeVersio
 		})
 		return nil
 	})
+}
+
+func yoloBypassArgsIncludeDangerousSkip(args []string) bool {
+	for _, arg := range args {
+		if strings.TrimSpace(arg) == "--dangerously-skip-permissions" {
+			return true
+		}
+	}
+	return false
 }
 
 func hasYoloBypassPermissionsArg(cmdArgs []string) bool {

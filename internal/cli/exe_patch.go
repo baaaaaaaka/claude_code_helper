@@ -172,6 +172,10 @@ func policySettingsSpecs() ([]exePatchSpec, error) {
 	if err != nil {
 		return nil, err
 	}
+	decisionSpec, err := bypassPermissionDecisionPatchSpec()
+	if err != nil {
+		return nil, err
+	}
 	rootSpec, err := rootBypassGuardPatchSpec()
 	if err != nil {
 		return nil, err
@@ -181,7 +185,7 @@ func policySettingsSpecs() ([]exePatchSpec, error) {
 		return nil, err
 	}
 
-	return []exePatchSpec{disableSpec, gateSpec, rootSpec, remoteSpec}, nil
+	return []exePatchSpec{disableSpec, gateSpec, decisionSpec, rootSpec, remoteSpec}, nil
 }
 
 func policySettingsDisablePatchSpec() (exePatchSpec, error) {
@@ -206,6 +210,17 @@ func bypassPermissionsGatePatchSpec() (exePatchSpec, error) {
 		applyID: "bypass-permissions-gate-v1",
 		apply: func(data []byte, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
 			return applyBypassPermissionsGatePatch(data, log, preview)
+		},
+		fixedLength: true,
+	}, nil
+}
+
+func bypassPermissionDecisionPatchSpec() (exePatchSpec, error) {
+	return exePatchSpec{
+		label:   "bypass-permission-decision",
+		applyID: "bypass-permission-decision-v1",
+		apply: func(data []byte, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
+			return applyBypassPermissionDecisionPatch(data, log, preview)
 		},
 		fixedLength: true,
 	}, nil

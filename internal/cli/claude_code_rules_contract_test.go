@@ -30,8 +30,8 @@ const remotePath="/api/claude_code/settings";`)
 	if err != nil {
 		t.Fatalf("applyExePatches error: %v", err)
 	}
-	if len(stats) != 4 {
-		t.Fatalf("expected 4 built-in policy patch stats, got %d", len(stats))
+	if len(stats) != 5 {
+		t.Fatalf("expected 5 built-in policy patch stats, got %d", len(stats))
 	}
 	got := string(out)
 

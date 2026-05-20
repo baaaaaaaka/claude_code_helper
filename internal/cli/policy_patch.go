@@ -3,8 +3,10 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"regexp"
+	"strings"
 )
 
 const maxNonPrintablePercent = 10
@@ -21,9 +23,13 @@ const (
 	remoteSettingsFilePatched        = "remote-settings.jsoN"
 	remoteSettingsAPIPath            = "/api/claude_code/settings"
 	remoteSettingsAPIPathPatched     = "/api/claude_code/settingS"
+	permissionDecisionAskRuleAnchor  = "ask rule/safety check requires full permission pipeline"
+	permissionDecisionPatchMarker    = "tengu_bypass_permission_decision_v1"
 )
 
 var policySettingsDirectReturnRe = regexp.MustCompile(policySettingsDirectReturnStage1)
+var permissionDecisionFunctionRe = regexp.MustCompile(`async function\s+([A-Za-z0-9_$]+)\s*\(([^)]*)\)\s*\{`)
+var permissionDecisionRuleCheckRe = regexp.MustCompile(`let\s+[A-Za-z0-9_$]+\s*=\s*await\s+([A-Za-z0-9_$]+)\s*\(`)
 
 func applyPolicySettingsDisablePatch(data []byte, startRe *regexp.Regexp, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
 	stats := exePatchStats{Label: "policySettings-disable"}
@@ -224,6 +230,85 @@ func applyBypassPermissionsGatePatch(data []byte, log io.Writer, preview bool) (
 	return patched, stats, nil
 }
 
+func applyBypassPermissionDecisionPatch(data []byte, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
+	stats := exePatchStats{Label: "bypass-permission-decision"}
+	anchor := []byte(permissionDecisionAskRuleAnchor)
+	marker := []byte(permissionDecisionPatchMarker)
+	markerCount := bytes.Count(data, marker)
+
+	if bytes.Count(data, anchor) == 0 {
+		if markerCount == 0 {
+			return data, stats, nil
+		}
+		markBypassPermissionDecisionAlreadyPatched(&stats, markerCount)
+		return data, stats, nil
+	}
+
+	var patched []byte
+	lastEnd := 0
+	searchStart := 0
+	for {
+		rel := bytes.Index(data[searchStart:], anchor)
+		if rel < 0 {
+			break
+		}
+		anchorIdx := searchStart + rel
+		searchStart = anchorIdx + len(anchor)
+		stats.Segments++
+
+		start, end, ok := findPermissionDecisionFunction(data, anchorIdx)
+		if !ok || start < lastEnd {
+			continue
+		}
+		segment := data[start:end]
+		if !looksLikePermissionDecisionFunction(segment) {
+			continue
+		}
+		replacement, err := buildBypassPermissionDecisionReplacement(segment)
+		if err != nil {
+			return nil, stats, err
+		}
+		if len(replacement) > len(segment) {
+			return nil, stats, fmt.Errorf("bypass permission decision replacement is longer than target segment: %d > %d", len(replacement), len(segment))
+		}
+
+		repl := paddedLiteral(replacement, len(segment))
+		if preview {
+			logPatchPreview(log, stats.Label, segment, repl)
+		}
+		stats.Eligible++
+		stats.Patched++
+		stats.Replacements++
+		if !bytes.Equal(segment, repl) {
+			stats.Changed++
+			if patched == nil {
+				patched = make([]byte, len(data))
+				copy(patched, data)
+			}
+			copy(patched[start:end], repl)
+		}
+		lastEnd = end
+	}
+
+	if stats.Eligible == 0 {
+		if markerCount > 0 {
+			markBypassPermissionDecisionAlreadyPatched(&stats, markerCount)
+		}
+		return data, stats, nil
+	}
+	if patched == nil {
+		return data, stats, nil
+	}
+	return patched, stats, nil
+}
+
+func markBypassPermissionDecisionAlreadyPatched(stats *exePatchStats, markerCount int) {
+	stats.Segments += markerCount
+	stats.Eligible += markerCount
+	stats.Patched += markerCount
+	stats.Replacements += markerCount
+}
+
 func applyRemoteSettingsDisablePatch(data []byte, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
 	stats := exePatchStats{Label: "remote-settings-disable"}
 	replacements := []struct {
@@ -360,6 +445,259 @@ func paddedLiteral(literal string, length int) []byte {
 		out[i] = ' '
 	}
 	return out
+}
+
+func findPermissionDecisionFunction(data []byte, anchorIdx int) (int, int, bool) {
+	if anchorIdx < 0 || anchorIdx > len(data) {
+		return 0, 0, false
+	}
+	windowStart := anchorIdx - 4096
+	if windowStart < 0 {
+		windowStart = 0
+	}
+	sigRel := bytes.LastIndex(data[windowStart:anchorIdx], []byte("async function "))
+	if sigRel < 0 {
+		return 0, 0, false
+	}
+	start := windowStart + sigRel
+	openRel := bytes.IndexByte(data[start:anchorIdx], '{')
+	if openRel < 0 {
+		return 0, 0, false
+	}
+	blockStart := start + openRel
+	_, blockEnd, ok := findBlock(data, blockStart)
+	if !ok || blockEnd <= anchorIdx {
+		return 0, 0, false
+	}
+	return start, blockEnd, true
+}
+
+func looksLikePermissionDecisionFunction(segment []byte) bool {
+	return bytes.Contains(segment, []byte(".requiresUserInteraction?.()")) &&
+		bytes.Contains(segment, []byte("canUseTool is required")) &&
+		bytes.Contains(segment, []byte(permissionDecisionAskRuleAnchor))
+}
+
+func buildBypassPermissionDecisionReplacement(segment []byte) (string, error) {
+	headerEnd := bytes.IndexByte(segment, '{')
+	if headerEnd < 0 {
+		return "", errors.New("permission decision function missing opening brace")
+	}
+	match := permissionDecisionFunctionRe.FindSubmatch(segment[:headerEnd+1])
+	if len(match) != 3 {
+		return "", errors.New("permission decision function signature did not match")
+	}
+	name := string(match[1])
+	params := splitJSParams(string(match[2]))
+	if len(params) != 7 {
+		return "", fmt.Errorf("permission decision function has %d parameters, expected 7", len(params))
+	}
+	ruleCheck := findPermissionDecisionRuleCheckName(segment)
+	if ruleCheck == "" {
+		return "", errors.New("permission decision rule-check function did not match")
+	}
+	locals, err := pickJSLocalNames(params, 5)
+	if err != nil {
+		return "", err
+	}
+
+	hookResult := params[0]
+	tool := params[1]
+	input := params[2]
+	context := params[3]
+	decide := params[4]
+	assistantMessage := params[5]
+	toolUseID := params[6]
+	effectiveInput := locals[0]
+	behavior := locals[1]
+	requiresInteraction := locals[2]
+	hasUpdatedInput := locals[3]
+	ruleDecision := locals[4]
+
+	var b strings.Builder
+	b.WriteString("async function ")
+	b.WriteString(name)
+	b.WriteByte('(')
+	b.WriteString(strings.Join(params, ","))
+	b.WriteString("){if(")
+	b.WriteString(hookResult)
+	b.WriteString("?.behavior===\"deny\")return{decision:")
+	b.WriteString(hookResult)
+	b.WriteString(",input:")
+	b.WriteString(input)
+	b.WriteString("};let ")
+	b.WriteString(effectiveInput)
+	b.WriteByte('=')
+	b.WriteString(hookResult)
+	b.WriteString("?.updatedInput??")
+	b.WriteString(input)
+	b.WriteString(";if(")
+	b.WriteString(context)
+	b.WriteString(".getAppState().toolPermissionContext.mode===\"bypassPermissions\")return{decision:{behavior:\"allow\",updatedInput:")
+	b.WriteString(effectiveInput)
+	b.WriteString(",decisionReason:{type:\"mode\",mode:\"bypassPermissions\"}},input:")
+	b.WriteString(effectiveInput)
+	b.WriteString("};if(")
+	b.WriteString(hookResult)
+	b.WriteString("?.behavior!==\"allow\"&&")
+	b.WriteString(hookResult)
+	b.WriteString("?.behavior!==\"ask\")return{decision:await ")
+	b.WriteString(decide)
+	b.WriteByte('(')
+	b.WriteString(tool)
+	b.WriteByte(',')
+	b.WriteString(input)
+	b.WriteByte(',')
+	b.WriteString(context)
+	b.WriteByte(',')
+	b.WriteString(assistantMessage)
+	b.WriteByte(',')
+	b.WriteString(toolUseID)
+	b.WriteString("),input:")
+	b.WriteString(input)
+	b.WriteString("};let ")
+	b.WriteString(behavior)
+	b.WriteByte('=')
+	b.WriteString(hookResult)
+	b.WriteString(".behavior,")
+	b.WriteString(requiresInteraction)
+	b.WriteByte('=')
+	b.WriteString(tool)
+	b.WriteString(".requiresUserInteraction?.(),")
+	b.WriteString(hasUpdatedInput)
+	b.WriteByte('=')
+	b.WriteString(requiresInteraction)
+	b.WriteString("&&")
+	b.WriteString(hookResult)
+	b.WriteString(".updatedInput!==void 0;if(")
+	b.WriteString(behavior)
+	b.WriteString("===\"allow\"&&(")
+	b.WriteString(requiresInteraction)
+	b.WriteString("&&!")
+	b.WriteString(hasUpdatedInput)
+	b.WriteString("||")
+	b.WriteString(context)
+	b.WriteString(".requireCanUseTool))return{decision:await ")
+	b.WriteString(decide)
+	b.WriteByte('(')
+	b.WriteString(tool)
+	b.WriteByte(',')
+	b.WriteString(effectiveInput)
+	b.WriteByte(',')
+	b.WriteString(context)
+	b.WriteByte(',')
+	b.WriteString(assistantMessage)
+	b.WriteByte(',')
+	b.WriteString(toolUseID)
+	b.WriteString("),input:")
+	b.WriteString(effectiveInput)
+	b.WriteString("};let ")
+	b.WriteString(ruleDecision)
+	b.WriteString("=await ")
+	b.WriteString(ruleCheck)
+	b.WriteByte('(')
+	b.WriteString(tool)
+	b.WriteByte(',')
+	b.WriteString(effectiveInput)
+	b.WriteByte(',')
+	b.WriteString(context)
+	b.WriteString(");if(")
+	b.WriteString(ruleDecision)
+	b.WriteString("?.behavior===\"deny\")return{decision:")
+	b.WriteString(ruleDecision)
+	b.WriteString(",input:")
+	b.WriteString(effectiveInput)
+	b.WriteString("};if(")
+	b.WriteString(ruleDecision)
+	b.WriteString("?.behavior===\"ask\")return{decision:await ")
+	b.WriteString(decide)
+	b.WriteByte('(')
+	b.WriteString(tool)
+	b.WriteByte(',')
+	b.WriteString(effectiveInput)
+	b.WriteByte(',')
+	b.WriteString(context)
+	b.WriteByte(',')
+	b.WriteString(assistantMessage)
+	b.WriteByte(',')
+	b.WriteString(toolUseID)
+	b.WriteString("),input:")
+	b.WriteString(effectiveInput)
+	b.WriteString("};if(")
+	b.WriteString(behavior)
+	b.WriteString("===\"allow\")return{decision:")
+	b.WriteString(hookResult)
+	b.WriteString(",input:")
+	b.WriteString(effectiveInput)
+	b.WriteString("};return{decision:await ")
+	b.WriteString(decide)
+	b.WriteByte('(')
+	b.WriteString(tool)
+	b.WriteByte(',')
+	b.WriteString(effectiveInput)
+	b.WriteByte(',')
+	b.WriteString(context)
+	b.WriteByte(',')
+	b.WriteString(assistantMessage)
+	b.WriteByte(',')
+	b.WriteString(toolUseID)
+	b.WriteByte(',')
+	b.WriteString(hookResult)
+	b.WriteString("),input:")
+	b.WriteString(effectiveInput)
+	b.WriteString("}}/*")
+	b.WriteString(permissionDecisionPatchMarker)
+	b.WriteString("*/")
+	return b.String(), nil
+}
+
+func splitJSParams(raw string) []string {
+	parts := strings.Split(raw, ",")
+	params := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		params = append(params, part)
+	}
+	return params
+}
+
+func findPermissionDecisionRuleCheckName(segment []byte) string {
+	search := segment
+	if anchorIdx := bytes.Index(segment, []byte(permissionDecisionAskRuleAnchor)); anchorIdx >= 0 {
+		search = segment[:anchorIdx]
+	}
+	matches := permissionDecisionRuleCheckRe.FindAllSubmatch(search, -1)
+	if len(matches) == 0 {
+		return ""
+	}
+	match := matches[len(matches)-1]
+	if len(match) != 2 {
+		return ""
+	}
+	return string(match[1])
+}
+
+func pickJSLocalNames(params []string, count int) ([]string, error) {
+	used := make(map[string]bool, len(params)+count)
+	for _, param := range params {
+		used[param] = true
+	}
+	candidates := []string{"O", "M", "w", "D", "j", "Y", "f", "L", "P", "Q", "B", "I", "u", "F", "g", "l", "c", "i", "e", "s"}
+	out := make([]string, 0, count)
+	for _, candidate := range candidates {
+		if used[candidate] {
+			continue
+		}
+		used[candidate] = true
+		out = append(out, candidate)
+		if len(out) == count {
+			return out, nil
+		}
+	}
+	return nil, fmt.Errorf("not enough local identifiers for permission decision patch: need %d, got %d", count, len(out))
 }
 
 func findBlock(data []byte, openBrace int) (int, int, bool) {

@@ -221,6 +221,24 @@ func TestConfigProfileAndPatchFailureEdges(t *testing.T) {
 		}
 	})
 
+	t.Run("YoloBypassProbe ignores empty args", func(t *testing.T) {
+		cfg := Config{Version: CurrentVersion}
+		cfg.UpsertYoloBypassProbe(YoloBypassProbe{
+			ProxyVersion:  "v1",
+			ClaudeVersion: "2.1.145",
+		})
+		cfg.UpsertYoloBypassProbe(YoloBypassProbe{
+			ProxyVersion: "v1",
+			ClaudePath:   "/tmp/claude",
+		})
+		if got, ok := cfg.FindYoloBypassProbe("v1", "2.1.145", "/ignored"); ok {
+			t.Fatalf("expected empty version-scoped probe to miss, got %#v", got)
+		}
+		if got, ok := cfg.FindYoloBypassProbe("v1", "", "/tmp/claude"); ok {
+			t.Fatalf("expected empty path-scoped probe to miss, got %#v", got)
+		}
+	})
+
 	t.Run("YoloBypassProbe upsert overwrites matching key", func(t *testing.T) {
 		cfg := Config{Version: CurrentVersion}
 		cfg.UpsertYoloBypassProbe(YoloBypassProbe{

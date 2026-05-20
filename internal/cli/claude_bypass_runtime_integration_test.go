@@ -88,7 +88,13 @@ func TestClaudePatchBypassRuntimeIntegration(t *testing.T) {
 		})
 	}
 
-	configDir, projectDir := newRuntimeEnvDirs(t, tmpDir, runtimePromptSettings{})
+	configDir, projectDir := newRuntimeEnvDirs(t, tmpDir, runtimePromptSettings{
+		User: runtimeSettingsSpec{
+			Permissions: &runtimePermissionsSpec{
+				Ask: []string{"Bash(*)"},
+			},
+		},
+	})
 	token := fmt.Sprintf("BYPASS_%d", time.Now().UnixNano())
 	outFile := filepath.Join(projectDir, "bypass-proof.txt")
 	command := fmt.Sprintf("printf %s > %s && printf BYPASS_OK", shQuote(token), shQuote(outFile))
@@ -204,7 +210,13 @@ func TestClaudePatchBypassRuntimeIntegrationWithProxy(t *testing.T) {
 		})
 	}
 
-	configDir, projectDir := newRuntimeEnvDirs(t, tmpDir, runtimePromptSettings{})
+	configDir, projectDir := newRuntimeEnvDirs(t, tmpDir, runtimePromptSettings{
+		User: runtimeSettingsSpec{
+			Permissions: &runtimePermissionsSpec{
+				Ask: []string{"Bash(*)"},
+			},
+		},
+	})
 	token := fmt.Sprintf("BYPASS_PROXY_%d", time.Now().UnixNano())
 	outFile := filepath.Join(projectDir, "bypass-proxy-proof.txt")
 	command := fmt.Sprintf("printf %s > %s && printf BYPASS_OK", shQuote(token), shQuote(outFile))

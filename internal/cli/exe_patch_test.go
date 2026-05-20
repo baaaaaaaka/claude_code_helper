@@ -106,8 +106,8 @@ func TestPolicySettingsPatchesPreview(t *testing.T) {
 	if !bytes.Contains(out, []byte("if(H===\"policySettings\"){return null;")) {
 		t.Fatalf("expected policySettings replacement to start with return null")
 	}
-	if len(stats) != 4 {
-		t.Fatalf("expected stats for four specs, got %d", len(stats))
+	if len(stats) != 5 {
+		t.Fatalf("expected stats for five specs, got %d", len(stats))
 	}
 	if stats[0].Changed == 0 || stats[0].Replacements != 1 || stats[0].Eligible != 1 || stats[0].Segments != 1 {
 		t.Fatalf("unexpected stats: %+v", stats[0])

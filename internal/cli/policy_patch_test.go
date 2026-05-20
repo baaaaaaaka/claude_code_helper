@@ -139,6 +139,103 @@ func TestBypassPermissionsGatePatch_NoMatch(t *testing.T) {
 	}
 }
 
+func TestBypassPermissionDecisionPatch_ForcesBypassAllow(t *testing.T) {
+	requireExePatchEnabled(t)
+	input := permissionDecisionPatchFixture()
+
+	out, stats, err := applyBypassPermissionDecisionPatch(input, nil, false)
+	if err != nil {
+		t.Fatalf("applyBypassPermissionDecisionPatch error: %v", err)
+	}
+	if len(out) != len(input) {
+		t.Fatalf("expected output length %d, got %d", len(input), len(out))
+	}
+	if !bytes.Contains(out, []byte(permissionDecisionPatchMarker)) {
+		t.Fatalf("expected patched marker")
+	}
+	if !bytes.Contains(out, []byte(`toolPermissionContext.mode==="bypassPermissions"`)) {
+		t.Fatalf("expected bypass mode short circuit")
+	}
+	if bytes.Contains(out, []byte(permissionDecisionAskRuleAnchor)) {
+		t.Fatalf("expected ask-rule prompt path to be replaced")
+	}
+	if stats.Segments != 1 || stats.Eligible != 1 || stats.Replacements != 1 || stats.Changed != 1 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+
+	out2, stats2, err := applyBypassPermissionDecisionPatch(out, nil, false)
+	if err != nil {
+		t.Fatalf("reapply applyBypassPermissionDecisionPatch error: %v", err)
+	}
+	if !bytes.Equal(out2, out) {
+		t.Fatalf("expected reapply to keep output unchanged")
+	}
+	if stats2.Segments != 1 || stats2.Eligible != 1 || stats2.Replacements != 1 || stats2.Changed != 0 {
+		t.Fatalf("unexpected reapply stats: %+v", stats2)
+	}
+}
+
+func TestBypassPermissionDecisionPatch_ReapplyWithResidualAnchorUsesMarker(t *testing.T) {
+	requireExePatchEnabled(t)
+	patched, _, err := applyBypassPermissionDecisionPatch(permissionDecisionPatchFixture(), nil, false)
+	if err != nil {
+		t.Fatalf("applyBypassPermissionDecisionPatch error: %v", err)
+	}
+	withResidualAnchor := append(append([]byte{}, patched...), []byte(`const stringTable="ask rule/safety check requires full permission pipeline";`)...)
+
+	out, stats, err := applyBypassPermissionDecisionPatch(withResidualAnchor, nil, false)
+	if err != nil {
+		t.Fatalf("reapply applyBypassPermissionDecisionPatch error: %v", err)
+	}
+	if !bytes.Equal(out, withResidualAnchor) {
+		t.Fatalf("expected reapply to keep output unchanged")
+	}
+	if stats.Eligible == 0 || stats.Replacements == 0 || stats.Changed != 0 {
+		t.Fatalf("expected marker to report already-patched state, got %+v", stats)
+	}
+}
+
+func TestBypassPermissionDecisionPatch_UsesRuleCheckNearestAskAnchor(t *testing.T) {
+	requireExePatchEnabled(t)
+	input := bytes.Replace(
+		permissionDecisionPatchFixture(),
+		[]byte("let D=await uDH($,M,K);"),
+		[]byte("let P=await preflight($,M,K);let D=await uDH($,M,K);"),
+		1,
+	)
+
+	out, _, err := applyBypassPermissionDecisionPatch(input, nil, false)
+	if err != nil {
+		t.Fatalf("applyBypassPermissionDecisionPatch error: %v", err)
+	}
+	if !bytes.Contains(out, []byte("await uDH(")) {
+		t.Fatalf("expected replacement to keep the ask-rule checker")
+	}
+	if bytes.Contains(out, []byte("await preflight(")) {
+		t.Fatalf("expected replacement not to use earlier unrelated await")
+	}
+}
+
+func TestBypassPermissionDecisionPatch_NoMatch(t *testing.T) {
+	requireExePatchEnabled(t)
+	input := []byte("async function other(){return 1}")
+
+	out, stats, err := applyBypassPermissionDecisionPatch(input, nil, false)
+	if err != nil {
+		t.Fatalf("applyBypassPermissionDecisionPatch error: %v", err)
+	}
+	if !bytes.Equal(out, input) {
+		t.Fatalf("expected output to be unchanged")
+	}
+	if stats.Segments != 0 || stats.Eligible != 0 || stats.Changed != 0 || stats.Replacements != 0 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+}
+
+func permissionDecisionPatchFixture() []byte {
+	return []byte("async function oO8(H,$,q,K,_,A,z){let Y=$.requiresUserInteraction?.(),f=K.requireCanUseTool;if(H?.behavior===\"deny\")return N(`Hook denied tool use for ${$.name}`),{decision:H,input:q};if(H?.behavior!==\"allow\"&&H?.behavior!==\"ask\")return{decision:await _($,q,K,A,z),input:q};let O=H.behavior,M=H.updatedInput??q,w=Y&&H.updatedInput!==void 0;if(O===\"allow\"&&(Y&&!w||f))return N(`Hook approved tool use for ${$.name}, but canUseTool is required`),{decision:await _($,M,K,A,z),input:M};let D=await uDH($,M,K);if(D?.behavior===\"deny\")return N(`Hook returned '${O}' for ${$.name}, but deny rule overrides: ${D.message}`),{decision:D,input:M};if(D?.behavior===\"ask\")return N(`Hook returned '${O}' for ${$.name}, but ask rule/safety check requires full permission pipeline`),{decision:await _($,M,K,A,z),input:M};if(O===\"allow\")return N(w?`Hook satisfied user interaction for ${$.name} via updatedInput`:`Hook approved tool use for ${$.name}, bypassing permission prompt`),{decision:H,input:M};return{decision:await _($,M,K,A,z,H),input:M}}async function*aO8(){}")
+}
+
 func TestRemoteSettingsDisablePatch_ReplacesPaths(t *testing.T) {
 	requireExePatchEnabled(t)
 	input := []byte("remote-settings.json -- /api/claude_code/settings")
