@@ -95,6 +95,7 @@ func newHistoryTuiCmd(root *rootOptions, claudeDir *string, claudePath *string, 
 	cmd.Flags().StringVar(claudePath, "claude-path", "", explicitClaudePathFlagHelp)
 	cmd.Flags().StringVar(profileRef, "profile", "", "Proxy profile id or name")
 	cmd.Flags().DurationVar(&refreshInterval, "refresh-interval", defaultRefreshInterval, "Auto-refresh interval (0 to disable)")
+	addClaudeLaunchFlags(cmd, &root.claudeLaunch)
 	return cmd
 }
 
@@ -231,6 +232,7 @@ func newHistoryOpenCmd(root *rootOptions, claudeDir *string, claudePath *string,
 	}
 	cmd.Flags().StringVar(claudePath, "claude-path", "", explicitClaudePathFlagHelp)
 	cmd.Flags().StringVar(profileRef, "profile", "", "Proxy profile id or name")
+	addClaudeLaunchFlags(cmd, &root.claudeLaunch)
 	return cmd
 }
 

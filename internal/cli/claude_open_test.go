@@ -1041,6 +1041,50 @@ func TestRunClaudeSessionWiresRunnerCallbacks(t *testing.T) {
 	})
 }
 
+func TestRunClaudeSessionAddsLaunchOptionsBeforeResume(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	claudePath := writeClaudeHelpStub(t)
+	store := newTempStore(t)
+	root := &rootOptions{
+		configPath: store.Path(),
+		claudeLaunch: claudeLaunchOptions{
+			Model:  "opus",
+			Effort: "xhigh",
+		},
+	}
+	projectDir := t.TempDir()
+	session := claudehistory.Session{SessionID: "sess-1", ProjectPath: projectDir}
+	project := claudehistory.Project{Path: projectDir}
+
+	var patchCalls [][]string
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		patchCalls = append(patchCalls, cloneArgs(cmdArgs))
+		return &patchOutcome{TargetPath: fmt.Sprintf("patch-%d", len(patchCalls))}, nil
+	}
+	runTargetWithFallbackWithOptionsFn = func(ctx context.Context, cmdArgs []string, proxyURL string, healthCheck func() error, patchOutcome *patchOutcome, fatalCh <-chan error, opts runTargetOptions) error {
+		want := []string{claudePath, "--permission-mode", "bypassPermissions", "--model", "opus", "--effort", "xhigh", "--resume", "sess-1"}
+		requireArgsEqual(t, cmdArgs, want)
+		outcome, err := opts.OnYoloRetryPrepare([]string{claudePath, "--model", "opus", "--effort", "xhigh", "--resume", "sess-1"})
+		if err != nil {
+			return err
+		}
+		if outcome == nil || outcome.TargetPath != "patch-2" {
+			t.Fatalf("expected retry patch outcome, got %#v", outcome)
+		}
+		return nil
+	}
+
+	if err := runClaudeSession(context.Background(), root, store, nil, nil, session, project, claudePath, "", false, config.YoloModeBypass, io.Discard); err != nil {
+		t.Fatalf("runClaudeSession error: %v", err)
+	}
+	if len(patchCalls) != 2 {
+		t.Fatalf("expected 2 patch calls, got %d", len(patchCalls))
+	}
+	requireArgsEqual(t, patchCalls[0], []string{claudePath, "--permission-mode", "bypassPermissions", "--model", "opus", "--effort", "xhigh", "--resume", "sess-1"})
+	requireArgsEqual(t, patchCalls[1], []string{claudePath, "--model", "opus", "--effort", "xhigh", "--resume", "sess-1"})
+}
+
 func TestRunClaudeSessionWiresRulesModePatchWithoutBypassArg(t *testing.T) {
 	withExePatchTestHooks(t)
 
@@ -1120,6 +1164,39 @@ func TestRunClaudeSessionRejectsRulesModeWithoutActiveBuiltInPatch(t *testing.T)
 	}
 	if !strings.Contains(err.Error(), "active built-in Claude patch") {
 		t.Fatalf("expected missing active patch error, got %v", err)
+	}
+}
+
+func TestRunClaudeNewSessionAddsLaunchOptions(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	claudePath := writeClaudeHelpStub(t)
+	store := newTempStore(t)
+	root := &rootOptions{
+		configPath: store.Path(),
+		claudeLaunch: claudeLaunchOptions{
+			Model:  "sonnet",
+			Effort: "high",
+		},
+	}
+	projectDir := t.TempDir()
+
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		want := []string{claudePath, "--model", "sonnet", "--effort", "high"}
+		requireArgsEqual(t, cmdArgs, want)
+		return nil, nil
+	}
+	runTargetWithFallbackWithOptionsFn = func(ctx context.Context, cmdArgs []string, proxyURL string, healthCheck func() error, patchOutcome *patchOutcome, fatalCh <-chan error, opts runTargetOptions) error {
+		want := []string{claudePath, "--model", "sonnet", "--effort", "high"}
+		requireArgsEqual(t, cmdArgs, want)
+		if opts.Cwd != projectDir {
+			t.Fatalf("expected cwd %s, got %s", projectDir, opts.Cwd)
+		}
+		return nil
+	}
+
+	if err := runClaudeNewSession(context.Background(), root, store, nil, nil, projectDir, claudePath, "", false, config.YoloModeOff, io.Discard); err != nil {
+		t.Fatalf("runClaudeNewSession error: %v", err)
 	}
 }
 

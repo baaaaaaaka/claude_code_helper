@@ -51,6 +51,8 @@ later with `Ctrl+P` in the TUI.
 - Press Enter to open a Claude Code session.
 - If there is no history yet, Enter starts a new session in the current directory.
 - If you have multiple profiles, select one with `claude-proxy <profile>`.
+- Override Claude's model or thinking effort for a launched session:
+  `claude-proxy --model opus --effort xhigh`.
 - Run any command using the current direct/proxy mode:
   `claude-proxy run -- <cmd> [args...]`.
 - Force SSH proxy mode with a profile:
@@ -64,6 +66,8 @@ Example `spec.json`:
 ```json
 {
   "cwd": ".",
+  "model": "sonnet",
+  "effort": "high",
   "args": ["--print", "--output-format", "json"],
   "prompt": "Summarize the current directory",
   "headless": true,
@@ -73,12 +77,18 @@ Example `spec.json`:
 }
 ```
 
+`model` and `effort` are optional per-run overrides passed to Claude as
+`--model` and `--effort`; omit them to use Claude's normal defaults. You can
+also pass them on the command line with
+`claude-proxy run-json --model sonnet --effort high path/to/spec.json`.
 `run-json` passes Claude arguments from `args`. If the first token is
 `claude`, it is ignored so copied Claude commands still work. `cwd` is
 required; use `"."` to run in the spec file directory. `stdinPath`,
 `stdoutPath`, and `stderrPath` are resolved relative to the spec file
 directory. Relative paths inside raw Claude `args` are still resolved by
-Claude from the launched working directory (`cwd`). If the user has
+Claude from the launched working directory (`cwd`). Do not set model or effort
+in both top-level fields/flags and raw `args`; `run-json` rejects that
+ambiguous combination. If the user has
 previously unlocked YOLO mode in the TUI, `run-json` will try Claude's
 bypass-permissions launch mode automatically when the spec does not already
 provide explicit Claude permission flags, and will fall back to normal mode

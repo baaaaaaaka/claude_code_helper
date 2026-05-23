@@ -16,8 +16,9 @@ var (
 )
 
 type rootOptions struct {
-	configPath string
-	exePatch   exePatchOptions
+	configPath   string
+	exePatch     exePatchOptions
+	claudeLaunch claudeLaunchOptions
 }
 
 func Execute() int {
@@ -71,6 +72,7 @@ func newRootCmd() *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&opts.exePatch.glibcCompat, "exe-patch-glibc-compat", exePatchGlibcCompatDefault(), "Apply Linux glibc compat patch via patchelf when Claude fails with missing GLIBC symbols (requires --exe-patch-enabled)")
 	cmd.PersistentFlags().StringVar(&opts.exePatch.glibcCompatRoot, "exe-patch-glibc-root", exePatchGlibcCompatRootDefault(), "Optional path to extracted glibc compat runtime root; when unset clp auto-downloads from GitHub release assets (env: CLAUDE_PROXY_GLIBC_COMPAT_ROOT)")
 	cmd.PersistentFlags().BoolVar(&opts.exePatch.dryRun, "exe-patch-dry-run", false, "Run exe patch in memory without writing or launching the command (requires --exe-patch-enabled)")
+	addClaudeLaunchFlags(cmd, &opts.claudeLaunch)
 
 	cmd.AddCommand(
 		newInitCmd(opts),

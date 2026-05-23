@@ -19,6 +19,8 @@ import (
 type claudeRunJSONSpec struct {
 	Cwd                  string   `json:"cwd,omitempty"`
 	Args                 []string `json:"args,omitempty"`
+	Model                string   `json:"model,omitempty"`
+	Effort               string   `json:"effort,omitempty"`
 	Prompt               *string  `json:"prompt,omitempty"`
 	StdinPath            string   `json:"stdinPath,omitempty"`
 	StdoutPath           string   `json:"stdoutPath,omitempty"`
@@ -32,6 +34,7 @@ type preparedClaudeRunJSONSpec struct {
 	SpecDir              string
 	Cwd                  string
 	Args                 []string
+	Launch               claudeLaunchOptions
 	Prompt               *string
 	StdinPath            string
 	StdoutPath           string
@@ -107,6 +110,7 @@ func newRunJSONCmd(root *rootOptions) *cobra.Command {
 	cmd.Flags().StringVar(&claudeDir, "claude-dir", "", "Override Claude Code data dir (default: ~/.claude)")
 	cmd.Flags().StringVar(&claudePath, "claude-path", "", explicitClaudePathFlagHelp)
 	cmd.Flags().StringVar(&profileRef, "profile", "", "Proxy profile id or name")
+	addClaudeLaunchFlags(cmd, &root.claudeLaunch)
 	return cmd
 }
 
@@ -168,6 +172,10 @@ func prepareClaudeRunJSONSpec(specPath string, raw claudeRunJSONSpec) (preparedC
 	specDir := filepath.Dir(absPath)
 
 	args := normalizeClaudeRunJSONArgs(raw.Args)
+	launch := claudeLaunchOptions{Model: raw.Model, Effort: raw.Effort}.normalized()
+	if err := validateClaudeLaunchArgConflicts("run-json spec", launch, args); err != nil {
+		return preparedClaudeRunJSONSpec{}, err
+	}
 
 	if strings.TrimSpace(raw.Cwd) == "" {
 		return preparedClaudeRunJSONSpec{}, fmt.Errorf("run-json spec requires cwd; use \".\" to run in the spec file directory")
@@ -191,6 +199,7 @@ func prepareClaudeRunJSONSpec(specPath string, raw claudeRunJSONSpec) (preparedC
 		SpecDir:              specDir,
 		Cwd:                  cwd,
 		Args:                 append([]string(nil), args...),
+		Launch:               launch,
 		Prompt:               raw.Prompt,
 		StdinPath:            stdinPath,
 		StdoutPath:           stdoutPath,
@@ -314,6 +323,10 @@ func runClaudeJSONSpec(
 	if useProxy && profile == nil {
 		return fmt.Errorf("proxy mode enabled but no profile configured")
 	}
+	launch := mergeClaudeLaunchOptions(root.claudeLaunch, spec.Launch)
+	if err := validateClaudeLaunchArgConflicts("run-json", launch, spec.Args); err != nil {
+		return err
+	}
 
 	claudePathResolved, err := ensureClaudeInstalled(ctx, claudePath, launcherLog, installProxyOptions{
 		UseProxy:           useProxy,
@@ -338,6 +351,7 @@ func runClaudeJSONSpec(
 	if len(yoloArgs) > 0 {
 		cmdArgs = append(cmdArgs, yoloArgs...)
 	}
+	cmdArgs = appendClaudeLaunchArgs(cmdArgs, launch)
 	cmdArgs = append(cmdArgs, spec.Args...)
 	if spec.Prompt != nil {
 		cmdArgs = append(cmdArgs, *spec.Prompt)

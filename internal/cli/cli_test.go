@@ -47,6 +47,12 @@ func TestNewRootCmdFlags(t *testing.T) {
 	if cmd.PersistentFlags().Lookup("exe-patch-glibc-root") == nil {
 		t.Fatalf("expected exe-patch-glibc-root flag to exist")
 	}
+	if cmd.Flags().Lookup("model") == nil {
+		t.Fatalf("expected root model flag to exist")
+	}
+	if cmd.Flags().Lookup("effort") == nil {
+		t.Fatalf("expected root effort flag to exist")
+	}
 }
 
 func TestNewNotImplementedCmd(t *testing.T) {

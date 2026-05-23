@@ -230,6 +230,7 @@ func runClaudeSession(
 	if err != nil {
 		return err
 	}
+	args = insertClaudeLaunchArgsBeforeResume(args, root.claudeLaunch)
 
 	cmdArgs := append([]string{path}, args...)
 	yoloMode, patchOpts, exePatchOutcome, err := prepareClaudeLaunchPatchState(
@@ -330,6 +331,7 @@ func runClaudeNewSession(
 	if isBypassYoloMode(yoloMode) {
 		cmdArgs = append(cmdArgs, yoloArgs...)
 	}
+	cmdArgs = appendClaudeLaunchArgs(cmdArgs, root.claudeLaunch)
 
 	yoloMode, patchOpts, exePatchOutcome, err := prepareClaudeLaunchPatchState(
 		ctx,

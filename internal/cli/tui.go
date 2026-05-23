@@ -25,5 +25,6 @@ func newTuiCmd(root *rootOptions) *cobra.Command {
 	cmd.Flags().StringVar(&claudePath, "claude-path", "", explicitClaudePathFlagHelp)
 	cmd.Flags().StringVar(&profileRef, "profile", "", "Proxy profile id or name")
 	cmd.Flags().DurationVar(&refreshInterval, "refresh-interval", defaultRefreshInterval, "Auto-refresh interval (0 to disable)")
+	addClaudeLaunchFlags(cmd, &root.claudeLaunch)
 	return cmd
 }

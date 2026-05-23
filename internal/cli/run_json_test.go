@@ -119,6 +119,56 @@ func TestLoadClaudeRunJSONSpecNormalizesClaudeArgs(t *testing.T) {
 	}
 }
 
+func TestLoadClaudeRunJSONSpecReadsLaunchOptions(t *testing.T) {
+	specPath := writeRunJSONSpec(t, t.TempDir(), `{
+  "cwd": ".",
+  "model": " sonnet ",
+  "effort": " high ",
+  "args": ["--print"]
+}`)
+
+	spec, err := loadClaudeRunJSONSpec(specPath)
+	if err != nil {
+		t.Fatalf("loadClaudeRunJSONSpec error: %v", err)
+	}
+	if spec.Launch.Model != "sonnet" || spec.Launch.Effort != "high" {
+		t.Fatalf("unexpected launch options: %#v", spec.Launch)
+	}
+}
+
+func TestLoadClaudeRunJSONSpecRejectsLaunchArgConflicts(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "model split",
+			body: `{"cwd":".","model":"opus","args":["--model","sonnet"]}`,
+		},
+		{
+			name: "model inline",
+			body: `{"cwd":".","model":"opus","args":["--model=sonnet"]}`,
+		},
+		{
+			name: "effort split",
+			body: `{"cwd":".","effort":"high","args":["--effort","low"]}`,
+		},
+		{
+			name: "effort inline",
+			body: `{"cwd":".","effort":"high","args":["--effort=low"]}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			specPath := writeRunJSONSpec(t, t.TempDir(), tc.body)
+			if _, err := loadClaudeRunJSONSpec(specPath); err == nil {
+				t.Fatalf("expected launch conflict error")
+			}
+		})
+	}
+}
+
 func TestLoadClaudeRunJSONSpecRejectsInvalidPaths(t *testing.T) {
 	t.Run("missing stdin", func(t *testing.T) {
 		specPath := writeRunJSONSpec(t, t.TempDir(), `{"cwd":".","stdinPath":"missing.jsonl"}`)
@@ -381,6 +431,49 @@ func TestRunJSONCmdExplicitProfileUsesProxy(t *testing.T) {
 	}
 }
 
+func TestRunJSONCmdPassesClaudeLaunchFlags(t *testing.T) {
+	store := newTempStore(t)
+	if err := store.Save(config.Config{Version: config.CurrentVersion}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	specDir := t.TempDir()
+	specPath := writeRunJSONSpec(t, specDir, `{"cwd":"."}`)
+
+	prevRun := runClaudeJSONSpecFunc
+	t.Cleanup(func() { runClaudeJSONSpecFunc = prevRun })
+
+	called := false
+	runClaudeJSONSpecFunc = func(
+		ctx context.Context,
+		root *rootOptions,
+		store *config.Store,
+		profile *config.Profile,
+		instances []config.Instance,
+		spec preparedClaudeRunJSONSpec,
+		claudePath string,
+		claudeDir string,
+		useProxy bool,
+		yoloBypassUnlocked bool,
+		log io.Writer,
+	) error {
+		called = true
+		if root.claudeLaunch.Model != "sonnet" || root.claudeLaunch.Effort != "high" {
+			t.Fatalf("unexpected launch flags: %#v", root.claudeLaunch)
+		}
+		return nil
+	}
+
+	cmd := newRunJSONCmd(&rootOptions{configPath: store.Path()})
+	cmd.SetArgs([]string{"--model", "sonnet", "--effort", "high", specPath})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("run-json command error: %v", err)
+	}
+	if !called {
+		t.Fatalf("expected runClaudeJSONSpec to be called")
+	}
+}
+
 func TestRunClaudeJSONSpecDoesNotMutateConfigOnYoloFallback(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skip shell script execution on windows")
@@ -433,6 +526,72 @@ func TestRunClaudeJSONSpecDoesNotMutateConfigOnYoloFallback(t *testing.T) {
 	}
 	if got.YoloMode == nil || *got.YoloMode != string(config.YoloModeRules) {
 		t.Fatalf("expected yolo mode to stay rules, got %#v", got.YoloMode)
+	}
+}
+
+func TestRunClaudeJSONSpecAddsLaunchOptions(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	claudePath := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claudePath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write claude stub: %v", err)
+	}
+
+	store := newTempStore(t)
+	root := &rootOptions{configPath: store.Path()}
+	spec := preparedClaudeRunJSONSpec{
+		Cwd:    t.TempDir(),
+		Args:   []string{"--print"},
+		Launch: claudeLaunchOptions{Model: "sonnet", Effort: "high"},
+		Prompt: stringPtr("hello"),
+	}
+
+	prevRun := runTargetWithFallbackWithOptionsFn
+	prevPatch := maybePatchExecutableCtxFn
+	t.Cleanup(func() {
+		runTargetWithFallbackWithOptionsFn = prevRun
+		maybePatchExecutableCtxFn = prevPatch
+	})
+
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		want := []string{claudePath, "--model", "sonnet", "--effort", "high", "--print", "hello"}
+		requireArgsEqual(t, cmdArgs, want)
+		return nil, nil
+	}
+	runTargetWithFallbackWithOptionsFn = func(ctx context.Context, cmdArgs []string, proxyURL string, healthCheck func() error, patchOutcome *patchOutcome, fatalCh <-chan error, opts runTargetOptions) error {
+		want := []string{claudePath, "--model", "sonnet", "--effort", "high", "--print", "hello"}
+		requireArgsEqual(t, cmdArgs, want)
+		return nil
+	}
+
+	if err := runClaudeJSONSpec(context.Background(), root, store, nil, nil, spec, claudePath, "", false, false, io.Discard); err != nil {
+		t.Fatalf("runClaudeJSONSpec error: %v", err)
+	}
+}
+
+func TestRunClaudeJSONSpecRejectsFlagConflictWithArgs(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	claudePath := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claudePath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write claude stub: %v", err)
+	}
+
+	store := newTempStore(t)
+	root := &rootOptions{
+		configPath: store.Path(),
+		claudeLaunch: claudeLaunchOptions{
+			Model: "opus",
+		},
+	}
+	spec := preparedClaudeRunJSONSpec{
+		Cwd:  t.TempDir(),
+		Args: []string{"--model", "sonnet", "--print"},
+	}
+
+	err := runClaudeJSONSpec(context.Background(), root, store, nil, nil, spec, claudePath, "", false, false, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "model conflicts") {
+		t.Fatalf("expected model conflict error, got %v", err)
 	}
 }
 

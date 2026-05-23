@@ -244,6 +244,9 @@ func TestHistoryOpenCmdForwardsLaunchOptions(t *testing.T) {
 		if root.configPath != store.Path() {
 			t.Fatalf("expected root config path %q, got %q", store.Path(), root.configPath)
 		}
+		if root.claudeLaunch.Model != "opus" || root.claudeLaunch.Effort != "xhigh" {
+			t.Fatalf("unexpected Claude launch options: %#v", root.claudeLaunch)
+		}
 		if gotStore.Path() != store.Path() {
 			t.Fatalf("expected store path %q, got %q", store.Path(), gotStore.Path())
 		}
@@ -275,7 +278,7 @@ func TestHistoryOpenCmdForwardsLaunchOptions(t *testing.T) {
 	}
 
 	cmd := newHistoryOpenCmd(&rootOptions{configPath: store.Path()}, &claudeDir, &claudePath, &profileRef)
-	cmd.SetArgs([]string{"--profile", "two", "sess-1"})
+	cmd.SetArgs([]string{"--profile", "two", "--model", "opus", "--effort", "xhigh", "sess-1"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute error: %v", err)
 	}
