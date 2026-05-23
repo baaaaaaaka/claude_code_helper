@@ -569,6 +569,50 @@ func TestRunClaudeJSONSpecAddsLaunchOptions(t *testing.T) {
 	}
 }
 
+func TestRunClaudeJSONSpecCliLaunchOptionsOverrideSpecDefaults(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	claudePath := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claudePath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write claude stub: %v", err)
+	}
+
+	store := newTempStore(t)
+	root := &rootOptions{
+		configPath: store.Path(),
+		claudeLaunch: claudeLaunchOptions{
+			Model: "opus",
+		},
+	}
+	spec := preparedClaudeRunJSONSpec{
+		Cwd:    t.TempDir(),
+		Args:   []string{"--print"},
+		Launch: claudeLaunchOptions{Model: "sonnet", Effort: "high"},
+	}
+
+	prevRun := runTargetWithFallbackWithOptionsFn
+	prevPatch := maybePatchExecutableCtxFn
+	t.Cleanup(func() {
+		runTargetWithFallbackWithOptionsFn = prevRun
+		maybePatchExecutableCtxFn = prevPatch
+	})
+
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		want := []string{claudePath, "--model", "opus", "--effort", "high", "--print"}
+		requireArgsEqual(t, cmdArgs, want)
+		return nil, nil
+	}
+	runTargetWithFallbackWithOptionsFn = func(ctx context.Context, cmdArgs []string, proxyURL string, healthCheck func() error, patchOutcome *patchOutcome, fatalCh <-chan error, opts runTargetOptions) error {
+		want := []string{claudePath, "--model", "opus", "--effort", "high", "--print"}
+		requireArgsEqual(t, cmdArgs, want)
+		return nil
+	}
+
+	if err := runClaudeJSONSpec(context.Background(), root, store, nil, nil, spec, claudePath, "", false, false, io.Discard); err != nil {
+		t.Fatalf("runClaudeJSONSpec error: %v", err)
+	}
+}
+
 func TestRunClaudeJSONSpecRejectsFlagConflictWithArgs(t *testing.T) {
 	withExePatchTestHooks(t)
 

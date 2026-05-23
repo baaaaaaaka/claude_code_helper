@@ -140,6 +140,93 @@ func TestRunHistoryTuiRunsNewSession(t *testing.T) {
 	}
 }
 
+func TestTuiCmdPassesClaudeLaunchFlags(t *testing.T) {
+	store := newTempStore(t)
+	disabled := false
+	if err := store.Save(config.Config{Version: config.CurrentVersion, ProxyEnabled: &disabled}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	projectDir := t.TempDir()
+	prevSelect := selectSession
+	prevRunNew := runClaudeNewSessionFn
+	prevRun := runClaudeSessionFunc
+	prevRequireTTY := historyRequireTTYFn
+	t.Cleanup(func() {
+		selectSession = prevSelect
+		runClaudeNewSessionFn = prevRunNew
+		runClaudeSessionFunc = prevRun
+		historyRequireTTYFn = prevRequireTTY
+	})
+	historyRequireTTYFn = func() error { return nil }
+
+	selectSession = func(ctx context.Context, opts tui.Options) (*tui.Selection, error) {
+		return &tui.Selection{Cwd: projectDir}, nil
+	}
+	runClaudeNewSessionFn = func(ctx context.Context, root *rootOptions, store *config.Store, profile *config.Profile, instances []config.Instance, cwd string, path string, dir string, useProxy bool, yoloMode config.YoloMode, log io.Writer) error {
+		if root.claudeLaunch.Model != "sonnet" || root.claudeLaunch.Effort != "high" {
+			t.Fatalf("unexpected Claude launch options: %#v", root.claudeLaunch)
+		}
+		return nil
+	}
+	runClaudeSessionFunc = func(ctx context.Context, root *rootOptions, store *config.Store, profile *config.Profile, instances []config.Instance, session claudehistory.Session, project claudehistory.Project, path string, dir string, useProxy bool, yoloMode config.YoloMode, log io.Writer) error {
+		t.Fatalf("unexpected runClaudeSession call")
+		return nil
+	}
+
+	root := &rootOptions{configPath: store.Path()}
+	cmd := newTuiCmd(root)
+	cmd.SetArgs([]string{"--model", "sonnet", "--effort", "high"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+}
+
+func TestHistoryTuiCmdPassesClaudeLaunchFlags(t *testing.T) {
+	store := newTempStore(t)
+	disabled := false
+	if err := store.Save(config.Config{Version: config.CurrentVersion, ProxyEnabled: &disabled}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	projectDir := t.TempDir()
+	prevSelect := selectSession
+	prevRunNew := runClaudeNewSessionFn
+	prevRun := runClaudeSessionFunc
+	prevRequireTTY := historyRequireTTYFn
+	t.Cleanup(func() {
+		selectSession = prevSelect
+		runClaudeNewSessionFn = prevRunNew
+		runClaudeSessionFunc = prevRun
+		historyRequireTTYFn = prevRequireTTY
+	})
+	historyRequireTTYFn = func() error { return nil }
+
+	selectSession = func(ctx context.Context, opts tui.Options) (*tui.Selection, error) {
+		return &tui.Selection{Cwd: projectDir}, nil
+	}
+	runClaudeNewSessionFn = func(ctx context.Context, root *rootOptions, store *config.Store, profile *config.Profile, instances []config.Instance, cwd string, path string, dir string, useProxy bool, yoloMode config.YoloMode, log io.Writer) error {
+		if root.claudeLaunch.Model != "opus" || root.claudeLaunch.Effort != "max" {
+			t.Fatalf("unexpected Claude launch options: %#v", root.claudeLaunch)
+		}
+		return nil
+	}
+	runClaudeSessionFunc = func(ctx context.Context, root *rootOptions, store *config.Store, profile *config.Profile, instances []config.Instance, session claudehistory.Session, project claudehistory.Project, path string, dir string, useProxy bool, yoloMode config.YoloMode, log io.Writer) error {
+		t.Fatalf("unexpected runClaudeSession call")
+		return nil
+	}
+
+	claudeDir := ""
+	claudePath := ""
+	profileRef := ""
+	root := &rootOptions{configPath: store.Path()}
+	cmd := newHistoryTuiCmd(root, &claudeDir, &claudePath, &profileRef)
+	cmd.SetArgs([]string{"--model", "opus", "--effort", "max"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+}
+
 func TestRunHistoryTuiRunsSession(t *testing.T) {
 	store := newTempStore(t)
 	disabled := false

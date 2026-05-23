@@ -44,6 +44,50 @@ func TestRootDefaultClpRunsTuiWithoutArgs(t *testing.T) {
 	}
 }
 
+func TestRootDefaultClpLaunchFlagsReachNewSession(t *testing.T) {
+	store := newTempStore(t)
+	disabled := false
+	if err := store.Save(config.Config{Version: config.CurrentVersion, ProxyEnabled: &disabled}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	projectDir := t.TempDir()
+	prevSelect := selectSession
+	prevRunNew := runClaudeNewSessionFn
+	prevRun := runClaudeSessionFunc
+	prevRequireTTY := historyRequireTTYFn
+	t.Cleanup(func() {
+		selectSession = prevSelect
+		runClaudeNewSessionFn = prevRunNew
+		runClaudeSessionFunc = prevRun
+		historyRequireTTYFn = prevRequireTTY
+	})
+	historyRequireTTYFn = func() error { return nil }
+
+	selectSession = func(ctx context.Context, opts tui.Options) (*tui.Selection, error) {
+		return &tui.Selection{Cwd: projectDir, UseProxy: opts.ProxyEnabled}, nil
+	}
+	runClaudeNewSessionFn = func(ctx context.Context, root *rootOptions, store *config.Store, profile *config.Profile, instances []config.Instance, cwd string, path string, dir string, useProxy bool, yoloMode config.YoloMode, log io.Writer) error {
+		if root.claudeLaunch.Model != "opus" || root.claudeLaunch.Effort != "xhigh" {
+			t.Fatalf("unexpected Claude launch options: %#v", root.claudeLaunch)
+		}
+		if cwd != projectDir {
+			t.Fatalf("expected cwd %q, got %q", projectDir, cwd)
+		}
+		return nil
+	}
+	runClaudeSessionFunc = func(ctx context.Context, root *rootOptions, store *config.Store, profile *config.Profile, instances []config.Instance, session claudehistory.Session, project claudehistory.Project, path string, dir string, useProxy bool, yoloMode config.YoloMode, log io.Writer) error {
+		t.Fatalf("unexpected runClaudeSession call")
+		return nil
+	}
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"--config", store.Path(), "--model", "opus", "--effort", "xhigh"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+}
+
 func TestRootDefaultClpForwardsSingleProfile(t *testing.T) {
 	store := newTempStore(t)
 	enabled := true
