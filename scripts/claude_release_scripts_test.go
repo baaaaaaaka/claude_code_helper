@@ -2,6 +2,8 @@ package scripts_test
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -191,6 +193,106 @@ func TestClaudeReleaseVersionsRequiresPython(t *testing.T) {
 		t.Fatalf("expected python missing error")
 	}
 	if !strings.Contains(string(out), "Need python3 or python") {
+		t.Fatalf("unexpected output: %s", string(out))
+	}
+}
+
+func TestClaudeReleaseVersionsSupportsNPMRegistrySource(t *testing.T) {
+	bashPath := requireBash(t)
+	repoRoot := repoRootFromScripts(t)
+	script := filepath.Join(repoRoot, "scripts", "claude_release_versions.sh")
+
+	registryPath := filepath.Join(t.TempDir(), "registry.json")
+	registryJSON := `{"versions":{"2.1.18":{},"2.1.20":{},"2.1.19":{},"invalid":{},"2.1.100":{}}}`
+	if err := os.WriteFile(registryPath, []byte(registryJSON), 0o644); err != nil {
+		t.Fatalf("write registry fixture: %v", err)
+	}
+
+	cmd := exec.Command(
+		bashPath,
+		script,
+		"--source", "npm",
+		"--npm-registry-url", "file://"+filepath.ToSlash(registryPath),
+		"--json",
+		"--min-version", "2.1.19",
+	)
+	cmd.Dir = repoRoot
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run script: %v\n%s", err, string(out))
+	}
+
+	var versions []string
+	if err := json.Unmarshal(out, &versions); err != nil {
+		t.Fatalf("unmarshal output: %v\n%s", err, string(out))
+	}
+	got := strings.Join(versions, ",")
+	want := "2.1.19,2.1.20,2.1.100"
+	if got != want {
+		t.Fatalf("versions=%q, want %q", got, want)
+	}
+}
+
+func TestClaudeReleaseVersionsFiltersNPMVersionsWithoutReleaseManifests(t *testing.T) {
+	bashPath := requireBash(t)
+	repoRoot := repoRootFromScripts(t)
+	script := filepath.Join(repoRoot, "scripts", "claude_release_versions.sh")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/registry":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"versions":{"2.1.19":{},"2.1.20":{},"2.1.100":{}}}`))
+		case "/releases/2.1.19/manifest.json", "/releases/2.1.100/manifest.json":
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cmd := exec.Command(
+		bashPath,
+		script,
+		"--source", "npm",
+		"--npm-registry-url", server.URL+"/registry",
+		"--release-bucket-url", server.URL+"/releases",
+		"--json",
+		"--min-version", "2.1.19",
+	)
+	cmd.Dir = repoRoot
+	out, err := cmd.Output()
+	if err != nil {
+		stderr := ""
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr = string(exitErr.Stderr)
+		}
+		t.Fatalf("run script: %v\nstdout:\n%s\nstderr:\n%s", err, string(out), stderr)
+	}
+
+	var versions []string
+	if err := json.Unmarshal(out, &versions); err != nil {
+		t.Fatalf("unmarshal output: %v\n%s", err, string(out))
+	}
+	got := strings.Join(versions, ",")
+	want := "2.1.19,2.1.100"
+	if got != want {
+		t.Fatalf("versions=%q, want %q\noutput:\n%s", got, want, string(out))
+	}
+}
+
+func TestClaudeReleaseVersionsRejectsUnknownSource(t *testing.T) {
+	bashPath := requireBash(t)
+	repoRoot := repoRootFromScripts(t)
+	script := filepath.Join(repoRoot, "scripts", "claude_release_versions.sh")
+
+	cmd := exec.Command(bashPath, script, "--source", "unknown", "--bucket-url", "gs://bucket")
+	cmd.Dir = repoRoot
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected unknown source error")
+	}
+	if !strings.Contains(string(out), "Unknown version source") {
 		t.Fatalf("unexpected output: %s", string(out))
 	}
 }
