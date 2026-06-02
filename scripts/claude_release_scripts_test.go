@@ -202,17 +202,21 @@ func TestClaudeReleaseVersionsSupportsNPMRegistrySource(t *testing.T) {
 	repoRoot := repoRootFromScripts(t)
 	script := filepath.Join(repoRoot, "scripts", "claude_release_versions.sh")
 
-	registryPath := filepath.Join(t.TempDir(), "registry.json")
-	registryJSON := `{"versions":{"2.1.18":{},"2.1.20":{},"2.1.19":{},"invalid":{},"2.1.100":{}}}`
-	if err := os.WriteFile(registryPath, []byte(registryJSON), 0o644); err != nil {
-		t.Fatalf("write registry fixture: %v", err)
-	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/registry" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"versions":{"2.1.18":{},"2.1.20":{},"2.1.19":{},"invalid":{},"2.1.100":{}}}`))
+	}))
+	defer server.Close()
 
 	cmd := exec.Command(
 		bashPath,
 		script,
 		"--source", "npm",
-		"--npm-registry-url", "file://"+filepath.ToSlash(registryPath),
+		"--npm-registry-url", server.URL+"/registry",
 		"--json",
 		"--min-version", "2.1.19",
 	)
