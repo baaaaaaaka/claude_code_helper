@@ -137,3 +137,4 @@ CentOS 7 is tracked for the latest Claude Code release only; older rows are not 
 | 2.1.173 | v0.0.74 | pass | pass | pass | pass | pass | pass |
 | 2.1.174 | v0.0.74 | pass | pass | pass | pass | pass | pass |
 | 2.1.175 | v0.0.74 | pass | pass | pass | pass | pass | pass |
+| 2.1.176 | v0.0.74 | pass | pass | pass | pass | pass | pass |
