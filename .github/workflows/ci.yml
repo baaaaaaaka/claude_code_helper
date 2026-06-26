@@ -175,6 +175,21 @@ jobs:
             -run '^(TestRunTargetWithFallbackCallsPatchFallbackOnStartupRollback|TestRunClaude(Session|NewSession)(FallsBackTo(RulesWhenNoFlagsExposed|OffWhenAutoRulesPatchDoesNotActivate)|KeepsYoloOffAfterAutoRulesStartupRollback))$' \
             -count=1
 
+      - name: YOLO patch mirror simulation (Linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/yolo_patch_mirror_sim.py \
+            --os-profile all \
+            --logical-source-size 240000000 \
+            --materialized-source-size 1048576 \
+            --versions 4 \
+            --repeats 1 \
+            --workers 12 \
+            --max-cache-bytes 720000000 \
+            --max-mirrors 2
+
       - name: Managed Claude regression suite
         shell: bash
         run: |
