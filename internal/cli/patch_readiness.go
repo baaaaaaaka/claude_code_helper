@@ -312,6 +312,7 @@ func markPatchedExecutableVerified(outcome *patchOutcome, verifiedAt time.Time) 
 func handlePatchedExecutableFailure(outcome *patchOutcome, err error, output string) error {
 	log := patchOutcomeLogWriter(outcome)
 	_, _ = fmt.Fprintln(log, "exe-patch: detected startup failure; restoring backup")
+	releasePatchOutcomeMirrorLease(outcome)
 	if restoreErr := restoreExecutableFromBackupFn(outcome); restoreErr != nil {
 		return fmt.Errorf("restore patched executable: %w", restoreErr)
 	}

@@ -25,6 +25,7 @@ func withExePatchTestHooks(t *testing.T) {
 	prevShouldSkip := shouldSkipPatchFailureFn
 	prevHistoryStore := newPatchHistoryStoreFn
 	prevPatch := patchExecutableFn
+	prevMirrorPatch := patchClaudeExecutableMirrorFn
 	prevCodesign := adhocCodesignFn
 	prevProbe := runClaudeProbeFn
 	prevTimedProbe := runClaudeTimedProbeFn
@@ -55,6 +56,7 @@ func withExePatchTestHooks(t *testing.T) {
 		shouldSkipPatchFailureFn = prevShouldSkip
 		newPatchHistoryStoreFn = prevHistoryStore
 		patchExecutableFn = prevPatch
+		patchClaudeExecutableMirrorFn = prevMirrorPatch
 		adhocCodesignFn = prevCodesign
 		runClaudeProbeFn = prevProbe
 		runClaudeTimedProbeFn = prevTimedProbe
@@ -414,9 +416,9 @@ func TestMaybePatchExecutableAllowsBuiltInClaudePatchWithoutBypassWhenForced(t *
 	path := writeClaudeVersionStub(t, dir, "Claude Code 1.2.3")
 	setStubPath(t, dir)
 
-	patchCalled := false
-	patchExecutableFn = func(path string, specs []exePatchSpec, log io.Writer, preview bool, dryRun bool, historyStore *config.PatchHistoryStore, proxyVersion string) (*patchOutcome, error) {
-		patchCalled = true
+	mirrorPatchCalled := false
+	patchClaudeExecutableMirrorFn = func(path string, specs []exePatchSpec, log io.Writer, preview bool, dryRun bool, historyStore *config.PatchHistoryStore, proxyVersion string) (*patchOutcome, error) {
+		mirrorPatchCalled = true
 		return nil, nil
 	}
 
@@ -431,8 +433,8 @@ func TestMaybePatchExecutableAllowsBuiltInClaudePatchWithoutBypassWhenForced(t *
 	if outcome == nil {
 		t.Fatalf("expected non-nil outcome after forced built-in patch preparation")
 	}
-	if !patchCalled {
-		t.Fatalf("expected built-in patcher to run when forced without bypass flag")
+	if !mirrorPatchCalled {
+		t.Fatalf("expected built-in mirror patcher to run when forced without bypass flag")
 	}
 	got, err := os.ReadFile(path)
 	if err != nil {
@@ -495,8 +497,8 @@ func TestMaybePatchExecutableRestoresClaudeWhenRulesModeCannotApplyBuiltins(t *t
 			if err != nil {
 				t.Fatalf("read patched claude: %v", err)
 			}
-			if string(patched) == string(original) {
-				t.Fatalf("expected executable to be patched before restore")
+			if string(patched) != string(original) {
+				t.Fatalf("expected original executable to stay unchanged before restore")
 			}
 
 			var log bytes.Buffer
@@ -507,8 +509,8 @@ func TestMaybePatchExecutableRestoresClaudeWhenRulesModeCannotApplyBuiltins(t *t
 			if outcome != nil {
 				t.Fatalf("expected nil outcome when built-in rules patch is unavailable, got %#v", outcome)
 			}
-			if !strings.Contains(log.String(), "yolo disabled; restoring original Claude executable") {
-				t.Fatalf("expected restore log, got %q", log.String())
+			if strings.Contains(log.String(), "restoring original Claude executable") {
+				t.Fatalf("expected no restore log for mirror patch, got %q", log.String())
 			}
 
 			restored, err := os.ReadFile(path)
@@ -554,6 +556,26 @@ func TestMaybePatchExecutableTracksBuiltInClaudePatchState(t *testing.T) {
 		}
 		if outcome == nil || !outcome.BuiltInClaudePatchActive {
 			t.Fatalf("expected built-in Claude patch to be active, got %#v", outcome)
+		}
+		if config.PathsEqual(outcome.TargetPath, path) {
+			t.Fatalf("expected built-in patch to launch a mirror, got source path %q", outcome.TargetPath)
+		}
+		if len(outcome.LaunchArgsPrefix) != 1 || !config.PathsEqual(outcome.LaunchArgsPrefix[0], outcome.TargetPath) {
+			t.Fatalf("expected mirror launch prefix, got outcome=%#v", outcome)
+		}
+		gotOriginal, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read original claude: %v", err)
+		}
+		if string(gotOriginal) != string(original) {
+			t.Fatalf("expected original executable to stay unchanged")
+		}
+		gotMirror, err := os.ReadFile(outcome.TargetPath)
+		if err != nil {
+			t.Fatalf("read mirror claude: %v", err)
+		}
+		if string(gotMirror) == string(original) {
+			t.Fatalf("expected mirror executable to be patched")
 		}
 	})
 
@@ -645,8 +667,8 @@ func TestMaybePatchExecutableRestoresClaudeWhenYoloDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read patched claude: %v", err)
 	}
-	if string(patched) == string(original) {
-		t.Fatalf("expected executable to be patched before restore")
+	if string(patched) != string(original) {
+		t.Fatalf("expected original executable to stay unchanged before restore")
 	}
 
 	var log bytes.Buffer
@@ -660,8 +682,8 @@ func TestMaybePatchExecutableRestoresClaudeWhenYoloDisabled(t *testing.T) {
 	if outcome != nil {
 		t.Fatalf("expected nil outcome when yolo is disabled, got %#v", outcome)
 	}
-	if !strings.Contains(log.String(), "yolo disabled; restoring original Claude executable") {
-		t.Fatalf("expected restore log, got %q", log.String())
+	if strings.Contains(log.String(), "restoring original Claude executable") {
+		t.Fatalf("expected no restore log for mirror patch, got %q", log.String())
 	}
 
 	restored, err := os.ReadFile(path)
@@ -683,8 +705,10 @@ func TestMaybePatchExecutableRestoresClaudeWhenYoloDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load history: %v", err)
 	}
-	if len(history.Entries) != 0 {
-		t.Fatalf("expected patch history to be cleared, got %d entries", len(history.Entries))
+	for _, entry := range history.Entries {
+		if config.PathsEqual(entry.Path, path) {
+			t.Fatalf("expected no source executable patch history, got %#v", entry)
+		}
 	}
 }
 

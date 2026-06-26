@@ -29,6 +29,7 @@ var (
 	shouldSkipPatchFailureFn      = shouldSkipPatchFailure
 	newPatchHistoryStoreFn        = config.NewPatchHistoryStore
 	patchExecutableFn             = patchExecutable
+	patchClaudeExecutableMirrorFn = patchClaudeExecutableMirror
 	adhocCodesignFn               = adhocCodesign
 	runClaudeProbeFn              = runClaudeProbe
 	applyClaudeGlibcCompatPatchFn = applyClaudeGlibcCompatPatch
@@ -70,6 +71,7 @@ type patchOutcome struct {
 	Verified                 bool
 	NeedsVerification        bool
 	RollbackOnStartupFailure bool
+	MirrorLeasePath          string
 	ConfigPath               string
 	LogWriter                io.Writer
 	readiness                *patchReadiness
@@ -446,7 +448,11 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 	}
 
 	if outcome == nil && len(specs) > 0 {
-		outcome, err = patchExecutableFn(patchTargetPath, specs, log, opts.preview, opts.dryRun, historyStore, proxyVersion)
+		if isClaude && builtinPatchAllowed && config.PathsEqual(patchTargetPath, resolvedPath) {
+			outcome, err = patchClaudeExecutableMirrorFn(patchTargetPath, specs, log, opts.preview, opts.dryRun, historyStore, proxyVersion)
+		} else {
+			outcome, err = patchExecutableFn(patchTargetPath, specs, log, opts.preview, opts.dryRun, historyStore, proxyVersion)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -510,7 +516,11 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 
 	bytePatchApplied := outcome.Applied
 	if bytePatchApplied && outcome.IsClaude {
-		if signErr := adhocCodesignFn(resolvedPath, log); signErr != nil {
+		signPath := resolvedPath
+		if strings.TrimSpace(outcome.TargetPath) != "" {
+			signPath = outcome.TargetPath
+		}
+		if signErr := adhocCodesignFn(signPath, log); signErr != nil {
 			_, _ = fmt.Fprintln(log, "exe-patch: codesign failed; restoring backup")
 			if restoreErr := restoreExecutableFromBackupFn(outcome); restoreErr != nil {
 				return nil, fmt.Errorf("restore patched executable: %w", restoreErr)
@@ -521,6 +531,7 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 			if recordErr := recordPatchFailureFn(configPath, outcome, formatFailureReason(signErr, "")); recordErr != nil {
 				_, _ = fmt.Fprintf(log, "exe-patch: failed to record patch failure: %v\n", recordErr)
 			}
+			releasePatchOutcomeMirrorLease(outcome)
 			return nil, nil
 		}
 	}

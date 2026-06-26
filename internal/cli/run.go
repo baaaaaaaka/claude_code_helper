@@ -40,6 +40,7 @@ func newRunCmd(root *rootOptions) *cobra.Command {
 			return runLike(cmd, root, true)
 		},
 	}
+	cmd.Flags().Bool("yolo", false, "Run Claude in YOLO bypass permission mode")
 	return cmd
 }
 
@@ -64,15 +65,26 @@ func runLike(cmd *cobra.Command, root *rootOptions, autoInit bool) error {
 	if len(after) == 0 {
 		after = []string{"claude"}
 	}
+	yoloEnabled, err := runYoloFlag(cmd)
+	if err != nil {
+		return err
+	}
+	if yoloEnabled {
+		var yoloErr error
+		after, yoloErr = prepareRunYoloArgs(after, root.configPath)
+		if yoloErr != nil {
+			return yoloErr
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	patchOutcome, err := maybePatchExecutableCtxFn(ctx, after, root.exePatch, root.configPath, cmd.ErrOrStderr())
+	patchState, err := maybePatchExecutableCtxFn(ctx, after, root.exePatch, root.configPath, cmd.ErrOrStderr())
 	if err != nil {
 		return err
 	}
-	releasePatchPrepMemoryFn(after, root.exePatch, patchOutcome)
+	releasePatchPrepMemoryFn(after, root.exePatch, patchState)
 	if root.exePatch.dryRun && root.exePatch.enabled() {
 		return nil
 	}
@@ -85,12 +97,19 @@ func runLike(cmd *cobra.Command, root *rootOptions, autoInit bool) error {
 	// An explicit positional profile keeps the historical "force proxy" behavior.
 	// Without a profile, `run` follows the saved direct/proxy preference just
 	// like the TUI and history commands.
+	runOpts := defaultRunTargetOptions()
+	if yoloEnabled {
+		runOpts.YoloEnabled = true
+		runOpts.OnYoloRetryPrepare = func(nextArgs []string) (*patchOutcome, error) {
+			return maybePatchExecutableCtxFn(ctx, nextArgs, root.exePatch, root.configPath, cmd.ErrOrStderr())
+		}
+	}
 	if profileRef != "" {
 		profile, cfg, err := ensureProfile(ctx, store, profileRef, autoInit, cmd.OutOrStdout())
 		if err != nil {
 			return err
 		}
-		return runWithProfile(ctx, store, profile, cfg.Instances, after, patchOutcome)
+		return runWithProfileOptions(ctx, store, profile, cfg.Instances, after, patchState, runOpts)
 	}
 
 	pref, err := ensureProxyPreference(ctx, store, "", cmd.ErrOrStderr())
@@ -110,7 +129,7 @@ func runLike(cmd *cobra.Command, root *rootOptions, autoInit bool) error {
 				return err
 			}
 		}
-		return runWithProfile(ctx, store, profile, cfg.Instances, after, patchOutcome)
+		return runWithProfileOptions(ctx, store, profile, cfg.Instances, after, patchState, runOpts)
 	}
 
 	if pref.NeedsPersist {
@@ -119,9 +138,39 @@ func runLike(cmd *cobra.Command, root *rootOptions, autoInit bool) error {
 		}
 	}
 
-	opts := defaultRunTargetOptions()
-	opts.UseProxy = false
-	return runTargetWithFallbackWithOptions(ctx, after, "", nil, patchOutcome, nil, opts)
+	runOpts.UseProxy = false
+	return runTargetWithFallbackWithOptionsFn(ctx, after, "", nil, patchState, nil, runOpts)
+}
+
+func runYoloFlag(cmd *cobra.Command) (bool, error) {
+	if cmd == nil || cmd.Flags().Lookup("yolo") == nil {
+		return false, nil
+	}
+	return cmd.Flags().GetBool("yolo")
+}
+
+func prepareRunYoloArgs(cmdArgs []string, configPath string) ([]string, error) {
+	if len(cmdArgs) == 0 {
+		cmdArgs = []string{"claude"}
+	}
+	if !isClaudeBinaryArg(cmdArgs[0]) {
+		return nil, fmt.Errorf("--yolo can only be used when running Claude")
+	}
+	if hasYoloBypassPermissionsArg(cmdArgs) {
+		return append([]string(nil), cmdArgs...), nil
+	}
+	if hasExplicitClaudePermissionArgs(cmdArgs) {
+		return nil, fmt.Errorf("--yolo cannot be combined with explicit Claude permission arguments")
+	}
+	yoloArgs := resolveYoloBypassArgs(cmdArgs[0], configPath)
+	if len(yoloArgs) == 0 {
+		return nil, fmt.Errorf("yolo: this Claude build does not expose bypass flags")
+	}
+	out := make([]string, 0, len(cmdArgs)+len(yoloArgs))
+	out = append(out, cmdArgs[0])
+	out = append(out, yoloArgs...)
+	out = append(out, cmdArgs[1:]...)
+	return out, nil
 }
 
 func releasePatchPrepMemory(cmdArgs []string, opts exePatchOptions, outcome *patchOutcome) {
@@ -447,13 +496,19 @@ func runTargetWithFallbackWithOptions(
 	cmdArgs []string,
 	proxyURL string,
 	healthCheck func() error,
-	patchOutcome *patchOutcome,
+	patchState *patchOutcome,
 	fatalCh <-chan error,
 	opts runTargetOptions,
 ) error {
-	if err := waitPatchedExecutableReadyFn(ctx, patchOutcome); err != nil {
+	if err := waitPatchedExecutableReadyFn(ctx, patchState); err != nil {
 		return err
 	}
+	leasedOutcomes := []*patchOutcome{patchState}
+	defer func() {
+		for _, outcome := range leasedOutcomes {
+			releasePatchOutcomeMirrorLease(outcome)
+		}
+	}()
 	attempt := 0
 	yoloRetried := false
 	patchChecked := false
@@ -462,12 +517,12 @@ func runTargetWithFallbackWithOptions(
 		attempt++
 		stdoutBuf := &synchronizedLimitedBuffer{max: maxOutputCaptureBytes}
 		stderrBuf := &synchronizedLimitedBuffer{max: maxOutputCaptureBytes}
-		launchArgs := commandArgsForOutcome(patchOutcome, cmdArgs)
+		launchArgs := commandArgsForOutcome(patchState, cmdArgs)
 		attemptOpts := opts
-		if patchOutcome != nil && len(patchOutcome.LaunchEnv) > 0 {
-			attemptOpts.ExtraEnv = append(append([]string{}, attemptOpts.ExtraEnv...), patchOutcome.LaunchEnv...)
+		if patchState != nil && len(patchState.LaunchEnv) > 0 {
+			attemptOpts.ExtraEnv = append(append([]string{}, attemptOpts.ExtraEnv...), patchState.LaunchEnv...)
 		}
-		if attemptOpts.PreserveTTY && (attemptOpts.YoloEnabled || (patchOutcome != nil && patchOutcome.RollbackOnStartupFailure)) {
+		if attemptOpts.PreserveTTY && (attemptOpts.YoloEnabled || (patchState != nil && patchState.RollbackOnStartupFailure)) {
 			attemptOpts.CaptureTTYOutput = true
 		}
 		err := runTargetOnceWithOptions(ctx, launchArgs, proxyURL, healthCheck, fatalCh, stdoutBuf, stderrBuf, attemptOpts)
@@ -485,11 +540,12 @@ func runTargetWithFallbackWithOptions(
 				_ = opts.OnYoloFallback()
 			}
 			if opts.OnYoloRetryPrepare != nil {
-				patchOutcome, err = opts.OnYoloRetryPrepare(nextArgs)
+				patchState, err = opts.OnYoloRetryPrepare(nextArgs)
 				if err != nil {
 					return err
 				}
-				if err := waitPatchedExecutableReadyFn(ctx, patchOutcome); err != nil {
+				leasedOutcomes = append(leasedOutcomes, patchState)
+				if err := waitPatchedExecutableReadyFn(ctx, patchState); err != nil {
 					return err
 				}
 				patchChecked = false
@@ -498,23 +554,24 @@ func runTargetWithFallbackWithOptions(
 			opts.YoloEnabled = false
 			continue
 		}
-		if patchOutcome != nil && patchOutcome.RollbackOnStartupFailure && !patchChecked {
+		if patchState != nil && patchState.RollbackOnStartupFailure && !patchChecked {
 			patchChecked = true
 			if isPatchedBinaryStartupFailure(err, out) {
 				_, _ = fmt.Fprintln(statusWriter, "exe-patch: detected startup failure; restoring backup")
-				if restoreErr := restoreExecutableFromBackup(patchOutcome); restoreErr != nil {
+				releasePatchOutcomeMirrorLease(patchState)
+				if restoreErr := restoreExecutableFromBackup(patchState); restoreErr != nil {
 					return fmt.Errorf("restore patched executable: %w", restoreErr)
 				}
-				if historyErr := cleanupPatchHistory(patchOutcome); historyErr != nil {
+				if historyErr := cleanupPatchHistory(patchState); historyErr != nil {
 					return fmt.Errorf("cleanup patch history: %w", historyErr)
 				}
-				if recordErr := recordPatchFailure(patchOutcome.ConfigPath, patchOutcome, formatFailureReason(err, out)); recordErr != nil {
+				if recordErr := recordPatchFailure(patchState.ConfigPath, patchState, formatFailureReason(err, out)); recordErr != nil {
 					_, _ = fmt.Fprintf(statusWriter, "exe-patch: failed to record patch failure: %v\n", recordErr)
 				}
 				if opts.OnPatchFallback != nil {
 					_ = opts.OnPatchFallback()
 				}
-				patchOutcome = nil
+				patchState = nil
 				continue
 			}
 		}

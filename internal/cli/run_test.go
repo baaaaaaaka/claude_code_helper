@@ -394,6 +394,98 @@ func TestRunLikeReleasesPatchPrepMemoryBeforeProfileSelection(t *testing.T) {
 	}
 }
 
+func TestRunLikeYoloFlagInjectsBypassArgsAndEnablesRetry(t *testing.T) {
+	withExePatchTestHooks(t)
+
+	store := newTempStore(t)
+	disabled := false
+	if err := store.Save(config.Config{
+		Version:      config.CurrentVersion,
+		ProxyEnabled: &disabled,
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	execLookPathFn = func(path string) (string, error) {
+		if path != "claude" {
+			t.Fatalf("unexpected lookup path %q", path)
+		}
+		return "/tmp/claude", nil
+	}
+	resolveExecutablePathFn = func(path string) (string, error) {
+		return path, nil
+	}
+	resolveClaudeVersionFn = func(path string) string {
+		if path != "/tmp/claude" {
+			t.Fatalf("unexpected version probe path %q", path)
+		}
+		return "1.2.3"
+	}
+	probeYoloBypassArgsFn = func(path string) ([]string, error) {
+		if path != "/tmp/claude" {
+			t.Fatalf("unexpected yolo probe path %q", path)
+		}
+		return []string{"--permission-mode", "bypassPermissions"}, nil
+	}
+
+	var patchArgs []string
+	maybePatchExecutableCtxFn = func(ctx context.Context, cmdArgs []string, opts exePatchOptions, configPath string, log io.Writer) (*patchOutcome, error) {
+		patchArgs = append([]string(nil), cmdArgs...)
+		return &patchOutcome{TargetPath: cmdArgs[0]}, nil
+	}
+
+	var runArgs []string
+	runTargetWithFallbackWithOptionsFn = func(ctx context.Context, cmdArgs []string, proxyURL string, healthCheck func() error, patchState *patchOutcome, fatalCh <-chan error, opts runTargetOptions) error {
+		runArgs = append([]string(nil), cmdArgs...)
+		if !opts.YoloEnabled {
+			t.Fatalf("expected yolo retry handling to be enabled")
+		}
+		if opts.OnYoloRetryPrepare == nil {
+			t.Fatalf("expected yolo retry prepare callback")
+		}
+		return nil
+	}
+
+	root := &rootOptions{configPath: store.Path()}
+	cmd := newRunCmd(root)
+	cmd.SetContext(context.Background())
+	cmd.SetArgs([]string{"--yolo"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("run --yolo error: %v", err)
+	}
+
+	want := []string{"claude", "--permission-mode", "bypassPermissions"}
+	if strings.Join(patchArgs, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("expected patch args %#v, got %#v", want, patchArgs)
+	}
+	if strings.Join(runArgs, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("expected run args %#v, got %#v", want, runArgs)
+	}
+}
+
+func TestPrepareRunYoloArgsRejectsNonClaudeCommand(t *testing.T) {
+	if _, err := prepareRunYoloArgs([]string{"echo"}, ""); err == nil {
+		t.Fatalf("expected non-Claude command to be rejected")
+	}
+}
+
+func TestPrepareRunYoloArgsRejectsExplicitNonBypassPermissionArgs(t *testing.T) {
+	if _, err := prepareRunYoloArgs([]string{"claude", "--permission-mode", "plan"}, ""); err == nil {
+		t.Fatalf("expected explicit non-bypass permission args to be rejected")
+	}
+}
+
+func TestPrepareRunYoloArgsKeepsExplicitBypassArgs(t *testing.T) {
+	got, err := prepareRunYoloArgs([]string{"claude", "--permission-mode", "bypassPermissions", "--print"}, "")
+	if err != nil {
+		t.Fatalf("prepareRunYoloArgs error: %v", err)
+	}
+	want := []string{"claude", "--permission-mode", "bypassPermissions", "--print"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("expected args %#v, got %#v", want, got)
+	}
+}
+
 func TestRunLikeHonorsDisabledProxyPreference(t *testing.T) {
 	store := newTempStore(t)
 	disabled := false
