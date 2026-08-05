@@ -59,8 +59,17 @@ func TestClaudeInstallLaunchIntegration(t *testing.T) {
 	if got := extractVersion(out); got == "" {
 		t.Fatalf("failed to parse claude version from output %q", strings.TrimSpace(out))
 	}
-	if expectWindowsGitBashBootstrap && !strings.Contains(installLog.String(), "installing a private Git for Windows runtime") {
-		t.Fatalf("expected installer log to show Git Bash bootstrap on Windows\ninstaller output:\n%s", installLog.String())
+	if expectWindowsGitBashBootstrap {
+		installOutput := installLog.String()
+		switch {
+		case strings.Contains(installOutput, "installing a private Git for Windows runtime"):
+			// Older Claude installers require Git Bash and exercise clp's bootstrap.
+		case strings.Contains(installOutput, "Claude Code successfully installed!"):
+			// Claude 2.1.222 can install its native Windows build without Git Bash.
+			t.Log("upstream installer completed native Windows installation without Git Bash bootstrap")
+		default:
+			t.Fatalf("expected Git Bash bootstrap or explicit native install success on Windows\ninstaller output:\n%s", installOutput)
+		}
 	}
 
 	if startupMarkerPath != "" {
