@@ -220,7 +220,7 @@ func bypassPermissionsGatePatchSpec() (exePatchSpec, error) {
 func bypassPermissionDecisionPatchSpec() (exePatchSpec, error) {
 	return exePatchSpec{
 		label:   "bypass-permission-decision",
-		applyID: "bypass-permission-decision-v1",
+		applyID: "bypass-permission-decision-v2",
 		apply: func(data []byte, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
 			return applyBypassPermissionDecisionPatch(data, log, preview)
 		},

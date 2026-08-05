@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -216,6 +217,102 @@ func TestBypassPermissionDecisionPatch_UsesRuleCheckNearestAskAnchor(t *testing.
 	}
 }
 
+func TestBypassPermissionDecisionPatch_HookAskFloorShapePreservesSemantics(t *testing.T) {
+	requireExePatchEnabled(t)
+	input := hookAskFloorPermissionDecisionPatchFixture()
+
+	out, stats, err := applyBypassPermissionDecisionPatch(input, nil, false)
+	if err != nil {
+		t.Fatalf("applyBypassPermissionDecisionPatch error: %v", err)
+	}
+	if len(out) != len(input) {
+		t.Fatalf("expected output length %d, got %d", len(input), len(out))
+	}
+	for _, want := range []string{
+		"if(nJe(t))",
+		"await hyt(",
+		"{...n,toolUseId:s},{hookUpdatedInput:e.updatedInput}",
+		"n.toolDecisions??={}",
+		"hookAskFloor:!0",
+		permissionDecisionPatchMarker,
+	} {
+		if !bytes.Contains(out, []byte(want)) {
+			t.Fatalf("expected replacement to contain %q", want)
+		}
+	}
+	if bytes.Contains(out, []byte("await preflight(")) {
+		t.Fatalf("expected replacement not to use earlier unrelated await")
+	}
+	if bytes.Contains(out, []byte(permissionDecisionAskRuleAnchor)) {
+		t.Fatalf("expected ask-rule logging anchor to be removed")
+	}
+	denyIdx := bytes.Index(out, []byte(`e?.behavior==="deny"`))
+	bypassIdx := bytes.Index(out, []byte(`toolPermissionContext.mode==="bypassPermissions"`))
+	if denyIdx < 0 || bypassIdx < 0 || denyIdx >= bypassIdx {
+		t.Fatalf("expected explicit hook deny before bypass short circuit")
+	}
+	if stats.Segments != 1 || stats.Eligible != 1 || stats.Replacements != 1 || stats.Changed != 1 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+
+	out2, stats2, err := applyBypassPermissionDecisionPatch(out, nil, false)
+	if err != nil {
+		t.Fatalf("reapply applyBypassPermissionDecisionPatch error: %v", err)
+	}
+	if !bytes.Equal(out2, out) {
+		t.Fatalf("expected reapply to keep output unchanged")
+	}
+	if stats2.Eligible != 1 || stats2.Replacements != 1 || stats2.Changed != 0 {
+		t.Fatalf("unexpected reapply stats: %+v", stats2)
+	}
+}
+
+func TestBypassPermissionDecisionPatch_HookAskFloorShapeFailsClosed(t *testing.T) {
+	requireExePatchEnabled(t)
+	input := bytes.Replace(
+		hookAskFloorPermissionDecisionPatchFixture(),
+		[]byte(`,{hookUpdatedInput:e.updatedInput}`),
+		nil,
+		1,
+	)
+
+	_, _, err := applyBypassPermissionDecisionPatch(input, nil, false)
+	if err == nil || !strings.Contains(err.Error(), "hook-ask-floor shape is incomplete") {
+		t.Fatalf("expected incomplete hook-ask-floor error, got %v", err)
+	}
+}
+
+func TestBypassPermissionDecisionPatch_HookAskFloorRuleCallFailsClosed(t *testing.T) {
+	requireExePatchEnabled(t)
+	input := bytes.Replace(
+		hookAskFloorPermissionDecisionPatchFixture(),
+		[]byte(`toolUseId:s`),
+		[]byte(`toolUseId:i`),
+		1,
+	)
+
+	_, _, err := applyBypassPermissionDecisionPatch(input, nil, false)
+	if err == nil || !strings.Contains(err.Error(), "hook-ask-floor rule-check call did not match") {
+		t.Fatalf("expected hook-ask-floor rule-check error, got %v", err)
+	}
+}
+
+func TestBypassPermissionDecisionPatch_RecognizesLegacyMarker(t *testing.T) {
+	requireExePatchEnabled(t)
+	input := []byte("/*" + permissionDecisionPatchMarkerV1 + `*/const stringTable="` + permissionDecisionAskRuleAnchor + `";`)
+
+	out, stats, err := applyBypassPermissionDecisionPatch(input, nil, false)
+	if err != nil {
+		t.Fatalf("applyBypassPermissionDecisionPatch error: %v", err)
+	}
+	if !bytes.Equal(out, input) {
+		t.Fatalf("expected legacy marker input to remain unchanged")
+	}
+	if stats.Eligible != 1 || stats.Replacements != 1 || stats.Changed != 0 {
+		t.Fatalf("expected legacy marker to report already-patched state, got %+v", stats)
+	}
+}
+
 func TestBypassPermissionDecisionPatch_NoMatch(t *testing.T) {
 	requireExePatchEnabled(t)
 	input := []byte("async function other(){return 1}")
@@ -234,6 +331,10 @@ func TestBypassPermissionDecisionPatch_NoMatch(t *testing.T) {
 
 func permissionDecisionPatchFixture() []byte {
 	return []byte("async function oO8(H,$,q,K,_,A,z){let Y=$.requiresUserInteraction?.(),f=K.requireCanUseTool;if(H?.behavior===\"deny\")return N(`Hook denied tool use for ${$.name}`),{decision:H,input:q};if(H?.behavior!==\"allow\"&&H?.behavior!==\"ask\")return{decision:await _($,q,K,A,z),input:q};let O=H.behavior,M=H.updatedInput??q,w=Y&&H.updatedInput!==void 0;if(O===\"allow\"&&(Y&&!w||f))return N(`Hook approved tool use for ${$.name}, but canUseTool is required`),{decision:await _($,M,K,A,z),input:M};let D=await uDH($,M,K);if(D?.behavior===\"deny\")return N(`Hook returned '${O}' for ${$.name}, but deny rule overrides: ${D.message}`),{decision:D,input:M};if(D?.behavior===\"ask\")return N(`Hook returned '${O}' for ${$.name}, but ask rule/safety check requires full permission pipeline`),{decision:await _($,M,K,A,z),input:M};if(O===\"allow\")return N(w?`Hook satisfied user interaction for ${$.name} via updatedInput`:`Hook approved tool use for ${$.name}, bypassing permission prompt`),{decision:H,input:M};return{decision:await _($,M,K,A,z,H),input:M}}async function*aO8(){}")
+}
+
+func hookAskFloorPermissionDecisionPatchFixture() []byte {
+	return []byte("async function edn(e,t,r,n,o,i,s){if(nJe(t))return{decision:{behavior:\"allow\",updatedInput:r},input:r};let a=n.requireCanUseTool;if(e?.behavior===\"deny\")return T(`Hook denied tool use for ${t.name}`),{decision:e,input:r};if(e?.behavior!==\"allow\"&&e?.behavior!==\"ask\")return{decision:await o(t,r,n,i,s),input:r};let p=await preflight(t,r,n);let l=e.behavior,c=e.updatedInput??r,u=await hyt(t,c,{...n,toolUseId:s},{hookUpdatedInput:e.updatedInput});if(u?.behavior===\"deny\")return T(`Hook returned '${l}' for ${t.name}, but deny rule overrides: ${u.message}`),{decision:u,input:c};if(u?.behavior===\"ask\"){let d=l===\"ask\";if(d)n.toolDecisions??={};return T(`Hook returned '${l}' for ${t.name}, but ask rule/safety check requires full permission pipeline${d?\" hook ask floor\":\"\"}`),{decision:await o(t,c,d?{...n,hookAskFloor:!0}:n,i,s),input:c}}if(l===\"allow\"){if(a)return T(`Hook approved tool use for ${t.name}, but canUseTool is required`),{decision:await o(t,c,n,i,s),input:c};return T(t.requiresUserInteraction?.()?`updated`:`approved`),{decision:e,input:c}}return{decision:await o(t,c,n,i,s,e),input:c}}async function tdn(){}")
 }
 
 func TestRemoteSettingsDisablePatch_ReplacesPaths(t *testing.T) {

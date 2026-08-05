@@ -24,12 +24,23 @@ const (
 	remoteSettingsAPIPath            = "/api/claude_code/settings"
 	remoteSettingsAPIPathPatched     = "/api/claude_code/settingS"
 	permissionDecisionAskRuleAnchor  = "ask rule/safety check requires full permission pipeline"
-	permissionDecisionPatchMarker    = "tengu_bypass_permission_decision_v1"
+	permissionDecisionPatchMarkerV1  = "tengu_bypass_permission_decision_v1"
+	permissionDecisionPatchMarker    = "tengu_bypass_permission_decision_v2"
+	permissionDecisionHookAskFloor   = "hookAskFloor"
+	permissionDecisionHookUpdated    = "hookUpdatedInput"
 )
 
 var policySettingsDirectReturnRe = regexp.MustCompile(policySettingsDirectReturnStage1)
 var permissionDecisionFunctionRe = regexp.MustCompile(`async function\s+([A-Za-z0-9_$]+)\s*\(([^)]*)\)\s*\{`)
-var permissionDecisionRuleCheckRe = regexp.MustCompile(`let\s+[A-Za-z0-9_$]+\s*=\s*await\s+([A-Za-z0-9_$]+)\s*\(`)
+
+// Claude 2.1.222 moved the awaited rule decision into a comma-separated let declaration.
+var permissionDecisionRuleCheckRe = regexp.MustCompile(`(?:\blet\s+|,)\s*([A-Za-z0-9_$]+)\s*=\s*await\s+([A-Za-z0-9_$]+)\s*\(`)
+var permissionDecisionSpecialAllowRe = regexp.MustCompile(`\{if\(([A-Za-z0-9_$]+)\(([A-Za-z0-9_$]+)\)\)return\{decision:\{behavior:"allow",updatedInput:([A-Za-z0-9_$]+)\},input:([A-Za-z0-9_$]+)\};`)
+
+type permissionDecisionRuleCheck struct {
+	resultName   string
+	functionName string
+}
 
 func applyPolicySettingsDisablePatch(data []byte, startRe *regexp.Regexp, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
 	stats := exePatchStats{Label: "policySettings-disable"}
@@ -233,8 +244,8 @@ func applyBypassPermissionsGatePatch(data []byte, log io.Writer, preview bool) (
 func applyBypassPermissionDecisionPatch(data []byte, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
 	stats := exePatchStats{Label: "bypass-permission-decision"}
 	anchor := []byte(permissionDecisionAskRuleAnchor)
-	marker := []byte(permissionDecisionPatchMarker)
-	markerCount := bytes.Count(data, marker)
+	markerCount := bytes.Count(data, []byte(permissionDecisionPatchMarker)) +
+		bytes.Count(data, []byte(permissionDecisionPatchMarkerV1))
 
 	if bytes.Count(data, anchor) == 0 {
 		if markerCount == 0 {
@@ -492,9 +503,17 @@ func buildBypassPermissionDecisionReplacement(segment []byte) (string, error) {
 	if len(params) != 7 {
 		return "", fmt.Errorf("permission decision function has %d parameters, expected 7", len(params))
 	}
-	ruleCheck := findPermissionDecisionRuleCheckName(segment)
-	if ruleCheck == "" {
+	ruleCheck, ok := findPermissionDecisionRuleCheck(segment)
+	if !ok {
 		return "", errors.New("permission decision rule-check function did not match")
+	}
+	hasHookAskFloor := bytes.Contains(segment, []byte(permissionDecisionHookAskFloor))
+	hasHookUpdatedInput := bytes.Contains(segment, []byte(permissionDecisionHookUpdated))
+	if hasHookAskFloor != hasHookUpdatedInput {
+		return "", errors.New("permission decision hook-ask-floor shape is incomplete")
+	}
+	if hasHookAskFloor {
+		return buildHookAskFloorPermissionDecisionReplacement(name, params, ruleCheck, segment)
 	}
 	locals, err := pickJSLocalNames(params, 5)
 	if err != nil {
@@ -594,7 +613,7 @@ func buildBypassPermissionDecisionReplacement(segment []byte) (string, error) {
 	b.WriteString("};let ")
 	b.WriteString(ruleDecision)
 	b.WriteString("=await ")
-	b.WriteString(ruleCheck)
+	b.WriteString(ruleCheck.functionName)
 	b.WriteByte('(')
 	b.WriteString(tool)
 	b.WriteByte(',')
@@ -651,6 +670,206 @@ func buildBypassPermissionDecisionReplacement(segment []byte) (string, error) {
 	return b.String(), nil
 }
 
+// buildHookAskFloorPermissionDecisionReplacement preserves the newer non-bypass
+// hookAskFloor path while adding the same explicit-deny-first bypass short circuit.
+func buildHookAskFloorPermissionDecisionReplacement(name string, params []string, ruleCheck permissionDecisionRuleCheck, segment []byte) (string, error) {
+	match := permissionDecisionSpecialAllowRe.FindSubmatch(segment)
+	if len(match) != 5 {
+		return "", errors.New("permission decision special-tool allow path did not match")
+	}
+	specialAllow := string(match[1])
+	if string(match[2]) != params[1] || string(match[3]) != params[2] || string(match[4]) != params[2] {
+		return "", errors.New("permission decision special-tool allow parameters did not match")
+	}
+	if !matchesHookAskFloorRuleCheckCall(params, ruleCheck, segment) {
+		return "", errors.New("permission decision hook-ask-floor rule-check call did not match")
+	}
+	if !bytes.Contains(segment, []byte(params[3]+".toolDecisions??={}")) ||
+		!bytes.Contains(segment, []byte("hookAskFloor:!0")) {
+		return "", errors.New("permission decision hook-ask-floor branch did not match")
+	}
+
+	locals, err := pickJSLocalNames(params, 5)
+	if err != nil {
+		return "", err
+	}
+
+	hookResult := params[0]
+	tool := params[1]
+	input := params[2]
+	context := params[3]
+	decide := params[4]
+	assistantMessage := params[5]
+	toolUseID := params[6]
+	effectiveInput := locals[0]
+	behavior := locals[1]
+	ruleDecision := locals[2]
+	hookAskFloor := locals[3]
+	requireCanUseTool := locals[4]
+
+	var b strings.Builder
+	b.WriteString("async function ")
+	b.WriteString(name)
+	b.WriteByte('(')
+	b.WriteString(strings.Join(params, ","))
+	b.WriteString("){if(")
+	b.WriteString(specialAllow)
+	b.WriteByte('(')
+	b.WriteString(tool)
+	b.WriteString("))return{decision:{behavior:\"allow\",updatedInput:")
+	b.WriteString(input)
+	b.WriteString("},input:")
+	b.WriteString(input)
+	b.WriteString("};let ")
+	b.WriteString(requireCanUseTool)
+	b.WriteByte('=')
+	b.WriteString(context)
+	b.WriteString(".requireCanUseTool;if(")
+	b.WriteString(hookResult)
+	b.WriteString("?.behavior===\"deny\")return{decision:")
+	b.WriteString(hookResult)
+	b.WriteString(",input:")
+	b.WriteString(input)
+	b.WriteString("};let ")
+	b.WriteString(effectiveInput)
+	b.WriteByte('=')
+	b.WriteString(hookResult)
+	b.WriteString("?.updatedInput??")
+	b.WriteString(input)
+	b.WriteString(";if(")
+	b.WriteString(context)
+	b.WriteString(".getAppState().toolPermissionContext.mode===\"bypassPermissions\")return{decision:{behavior:\"allow\",updatedInput:")
+	b.WriteString(effectiveInput)
+	b.WriteString(",decisionReason:{type:\"mode\",mode:\"bypassPermissions\"}},input:")
+	b.WriteString(effectiveInput)
+	b.WriteString("};if(")
+	b.WriteString(hookResult)
+	b.WriteString("?.behavior!==\"allow\"&&")
+	b.WriteString(hookResult)
+	b.WriteString("?.behavior!==\"ask\")return{decision:await ")
+	b.WriteString(decide)
+	b.WriteByte('(')
+	b.WriteString(tool)
+	b.WriteByte(',')
+	b.WriteString(input)
+	b.WriteByte(',')
+	b.WriteString(context)
+	b.WriteByte(',')
+	b.WriteString(assistantMessage)
+	b.WriteByte(',')
+	b.WriteString(toolUseID)
+	b.WriteString("),input:")
+	b.WriteString(input)
+	b.WriteString("};let ")
+	b.WriteString(behavior)
+	b.WriteByte('=')
+	b.WriteString(hookResult)
+	b.WriteString(".behavior,")
+	b.WriteString(ruleDecision)
+	b.WriteString("=await ")
+	b.WriteString(ruleCheck.functionName)
+	b.WriteByte('(')
+	b.WriteString(tool)
+	b.WriteByte(',')
+	b.WriteString(effectiveInput)
+	b.WriteString(",{...")
+	b.WriteString(context)
+	b.WriteString(",toolUseId:")
+	b.WriteString(toolUseID)
+	b.WriteString("},{hookUpdatedInput:")
+	b.WriteString(hookResult)
+	b.WriteString(".updatedInput});if(")
+	b.WriteString(ruleDecision)
+	b.WriteString("?.behavior===\"deny\")return{decision:")
+	b.WriteString(ruleDecision)
+	b.WriteString(",input:")
+	b.WriteString(effectiveInput)
+	b.WriteString("};if(")
+	b.WriteString(ruleDecision)
+	b.WriteString("?.behavior===\"ask\"){let ")
+	b.WriteString(hookAskFloor)
+	b.WriteByte('=')
+	b.WriteString(behavior)
+	b.WriteString("===\"ask\";if(")
+	b.WriteString(hookAskFloor)
+	b.WriteByte(')')
+	b.WriteString(context)
+	b.WriteString(".toolDecisions??={};return{decision:await ")
+	b.WriteString(decide)
+	b.WriteByte('(')
+	b.WriteString(tool)
+	b.WriteByte(',')
+	b.WriteString(effectiveInput)
+	b.WriteByte(',')
+	b.WriteString(hookAskFloor)
+	b.WriteString("?{...")
+	b.WriteString(context)
+	b.WriteString(",hookAskFloor:!0}:")
+	b.WriteString(context)
+	b.WriteByte(',')
+	b.WriteString(assistantMessage)
+	b.WriteByte(',')
+	b.WriteString(toolUseID)
+	b.WriteString("),input:")
+	b.WriteString(effectiveInput)
+	b.WriteString("}}if(")
+	b.WriteString(behavior)
+	b.WriteString("===\"allow\"){if(")
+	b.WriteString(requireCanUseTool)
+	b.WriteString(")return{decision:await ")
+	b.WriteString(decide)
+	b.WriteByte('(')
+	b.WriteString(tool)
+	b.WriteByte(',')
+	b.WriteString(effectiveInput)
+	b.WriteByte(',')
+	b.WriteString(context)
+	b.WriteByte(',')
+	b.WriteString(assistantMessage)
+	b.WriteByte(',')
+	b.WriteString(toolUseID)
+	b.WriteString("),input:")
+	b.WriteString(effectiveInput)
+	b.WriteString("};return{decision:")
+	b.WriteString(hookResult)
+	b.WriteString(",input:")
+	b.WriteString(effectiveInput)
+	b.WriteString("}}return{decision:await ")
+	b.WriteString(decide)
+	b.WriteByte('(')
+	b.WriteString(tool)
+	b.WriteByte(',')
+	b.WriteString(effectiveInput)
+	b.WriteByte(',')
+	b.WriteString(context)
+	b.WriteByte(',')
+	b.WriteString(assistantMessage)
+	b.WriteByte(',')
+	b.WriteString(toolUseID)
+	b.WriteByte(',')
+	b.WriteString(hookResult)
+	b.WriteString("),input:")
+	b.WriteString(effectiveInput)
+	b.WriteString("}}/*")
+	b.WriteString(permissionDecisionPatchMarker)
+	b.WriteString("*/")
+	return b.String(), nil
+}
+
+func matchesHookAskFloorRuleCheckCall(params []string, ruleCheck permissionDecisionRuleCheck, segment []byte) bool {
+	pattern := fmt.Sprintf(
+		`(?:\blet\s+|,)\s*%s\s*=\s*await\s+%s\s*\(\s*%s\s*,\s*[A-Za-z0-9_$]+\s*,\s*\{\s*\.\.\.\s*%s\s*,\s*toolUseId\s*:\s*%s\s*\}\s*,\s*\{\s*hookUpdatedInput\s*:\s*%s\.updatedInput\s*\}\s*\)`,
+		regexp.QuoteMeta(ruleCheck.resultName),
+		regexp.QuoteMeta(ruleCheck.functionName),
+		regexp.QuoteMeta(params[1]),
+		regexp.QuoteMeta(params[3]),
+		regexp.QuoteMeta(params[6]),
+		regexp.QuoteMeta(params[0]),
+	)
+	callRe, err := regexp.Compile(pattern)
+	return err == nil && callRe.Match(segment)
+}
+
 func splitJSParams(raw string) []string {
 	parts := strings.Split(raw, ",")
 	params := make([]string, 0, len(parts))
@@ -664,20 +883,29 @@ func splitJSParams(raw string) []string {
 	return params
 }
 
-func findPermissionDecisionRuleCheckName(segment []byte) string {
+func findPermissionDecisionRuleCheck(segment []byte) (permissionDecisionRuleCheck, bool) {
 	search := segment
 	if anchorIdx := bytes.Index(segment, []byte(permissionDecisionAskRuleAnchor)); anchorIdx >= 0 {
 		search = segment[:anchorIdx]
 	}
 	matches := permissionDecisionRuleCheckRe.FindAllSubmatch(search, -1)
 	if len(matches) == 0 {
-		return ""
+		return permissionDecisionRuleCheck{}, false
 	}
 	match := matches[len(matches)-1]
-	if len(match) != 2 {
-		return ""
+	if len(match) != 3 {
+		return permissionDecisionRuleCheck{}, false
 	}
-	return string(match[1])
+	check := permissionDecisionRuleCheck{
+		resultName:   string(match[1]),
+		functionName: string(match[2]),
+	}
+	denyCheck := []byte("if(" + check.resultName + "?.behavior===\"deny\")")
+	askCheck := []byte("if(" + check.resultName + "?.behavior===\"ask\")")
+	if !bytes.Contains(segment, denyCheck) || !bytes.Contains(segment, askCheck) {
+		return permissionDecisionRuleCheck{}, false
+	}
+	return check, true
 }
 
 func pickJSLocalNames(params []string, count int) ([]string, error) {
