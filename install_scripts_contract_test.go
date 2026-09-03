@@ -107,6 +107,31 @@ func TestWorkflowSmokeCoverageContracts(t *testing.T) {
 	}
 }
 
+func TestCentOS7ArchiveRepositoriesUseHTTPS(t *testing.T) {
+	repoRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+
+	paths := []string{
+		"scripts/ci/container_claude_patch_smoke.sh",
+		"scripts/ci/container_install_smoke.sh",
+		"scripts/ci/container_claude_install_launch_smoke.sh",
+		"scripts/glibc/shared_storage_host_smoke.sh",
+		"scripts/glibc/test_centos7_clp_autopatch.sh",
+		"scripts/glibc/build_glibc_231_centos7.sh",
+		"scripts/glibc/test_centos7_claude_with_glibc_compat.sh",
+	}
+	for _, relativePath := range paths {
+		data := readTextFile(t, filepath.Join(repoRoot, relativePath))
+		for _, line := range strings.Split(data, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "baseurl=http://vault.centos.org") {
+				t.Fatalf("%s must not configure the CentOS archive over HTTP", relativePath)
+			}
+		}
+	}
+}
+
 func readTextFile(t *testing.T, path string) string {
 	t.Helper()
 
