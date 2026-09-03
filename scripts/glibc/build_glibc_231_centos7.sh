@@ -51,11 +51,12 @@ set -euo pipefail
 patch_base_repos() {
   if [[ -f /etc/yum.repos.d/CentOS-Base.repo ]]; then
     sed -i "s/^mirrorlist=/#mirrorlist=/g" /etc/yum.repos.d/CentOS-Base.repo || true
-    sed -i "s|^#baseurl=http://mirror.centos.org|baseurl=https://vault.centos.org|g" /etc/yum.repos.d/CentOS-Base.repo || true
+    sed -i "s|^#\?baseurl=http://mirror.centos.org|baseurl=https://vault.centos.org|g" /etc/yum.repos.d/CentOS-Base.repo || true
     sed -i \
       -e "s|/centos/\$releasever|/7.9.2009|g" \
       -e "s|/centos/7|/7.9.2009|g" \
       /etc/yum.repos.d/CentOS-Base.repo || true
+    sed -i "s|https://vault.centos.org|https://archive.kernel.org/centos-vault|g" /etc/yum.repos.d/CentOS-Base.repo || true
   fi
 }
 
@@ -67,9 +68,10 @@ patch_scl_repos() {
     -e "s|/centos/\$releasever|/7.9.2009|g" \
     -e "s|/centos/7|/7.9.2009|g" \
       /etc/yum.repos.d/CentOS-SCLo-*.repo || true
+  sed -i "s|https://vault.centos.org|https://archive.kernel.org/centos-vault|g" /etc/yum.repos.d/CentOS-SCLo-*.repo || true
   # centos-sclo-sclo sometimes has mirrorlist only; add explicit baseurl.
   if ! awk "/^\[centos-sclo-sclo\]/{flag=1;next} /^\[/{flag=0} flag && /^baseurl=/{found=1} END{exit found?0:1}" /etc/yum.repos.d/CentOS-SCLo-scl.repo; then
-    sed -i "/^\[centos-sclo-sclo\]/a baseurl=https://vault.centos.org/7.9.2009/sclo/\$basearch/sclo/" /etc/yum.repos.d/CentOS-SCLo-scl.repo
+    sed -i "/^\[centos-sclo-sclo\]/a baseurl=https://archive.kernel.org/centos-vault/7.9.2009/sclo/\$basearch/sclo/" /etc/yum.repos.d/CentOS-SCLo-scl.repo
   fi
 }
 
