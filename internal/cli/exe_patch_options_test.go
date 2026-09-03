@@ -592,6 +592,17 @@ func TestBypassPermissionDecisionPatchSpecUsesV2ApplyID(t *testing.T) {
 	}
 }
 
+func TestPolicySettingsDisablePatchSpecUsesV2ApplyID(t *testing.T) {
+	requireExePatchEnabled(t)
+	spec, err := policySettingsDisablePatchSpec()
+	if err != nil {
+		t.Fatalf("policySettingsDisablePatchSpec error: %v", err)
+	}
+	if spec.applyID != "policySettings-disable-v2" {
+		t.Fatalf("expected v2 applyID, got %q", spec.applyID)
+	}
+}
+
 func TestPatchExecutablePopulatesPatchStats(t *testing.T) {
 	requireExePatchEnabled(t)
 	dir := t.TempDir()

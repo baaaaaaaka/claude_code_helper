@@ -196,9 +196,12 @@ func policySettingsDisablePatchSpec() (exePatchSpec, error) {
 		return exePatchSpec{}, fmt.Errorf("compile policySettings getter regex: %w", err)
 	}
 	return exePatchSpec{
-		match:   startRe,
-		label:   "policySettings-disable",
-		applyID: "policySettings-disable-v1",
+		match: startRe,
+		label: "policySettings-disable",
+		// The policySettings patch also covers the managed-policy composition
+		// helper. Bump the ID so an existing cached patch is rebuilt when that
+		// additional replacement is introduced.
+		applyID: "policySettings-disable-v2",
 		apply: func(data []byte, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
 			return applyPolicySettingsDisablePatch(data, startRe, log, preview)
 		},

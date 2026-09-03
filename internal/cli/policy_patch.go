@@ -28,6 +28,8 @@ const (
 	permissionDecisionPatchMarker    = "tengu_bypass_permission_decision_v2"
 	permissionDecisionHookAskFloor   = "hookAskFloor"
 	permissionDecisionHookUpdated    = "hookUpdatedInput"
+	managedPolicyCompositionAnchor   = "helperWarnings?.()"
+	managedPolicyCompositionMarker   = "tengu_managed_policy_composition_disable_v1"
 )
 
 var policySettingsDirectReturnRe = regexp.MustCompile(policySettingsDirectReturnStage1)
@@ -59,6 +61,12 @@ func applyPolicySettingsDisablePatch(data []byte, startRe *regexp.Regexp, log io
 		return nil, stats, err
 	}
 	stats.add(returnStats)
+
+	out, compositionStats, err := applyManagedPolicyCompositionDisablePatch(out, log, preview)
+	if err != nil {
+		return nil, stats, err
+	}
+	stats.add(compositionStats)
 
 	return out, stats, nil
 }
@@ -198,6 +206,141 @@ func applyPolicySettingsDirectReturnDisablePatch(data []byte, startRe *regexp.Re
 		return data, stats, nil
 	}
 	return patched, stats, nil
+}
+
+// applyManagedPolicyCompositionDisablePatch handles the policy composition
+// function used by Claude's tiered managed-settings loader. Patching only the
+// policySettings getter above is insufficient because these builds also call
+// the composition function directly while loading effective settings.
+// Returning the same {settings, errors} shape from that function keeps both
+// generations compatible and prevents managed policy settings from re-enabling
+// the bypass gate after the legacy getter has been patched.
+func applyManagedPolicyCompositionDisablePatch(data []byte, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
+	stats := exePatchStats{Label: "policySettings-disable"}
+	anchor := []byte(managedPolicyCompositionAnchor)
+	marker := []byte(managedPolicyCompositionMarker)
+	markerCount := bytes.Count(data, marker)
+
+	if bytes.Count(data, anchor) == 0 {
+		if markerCount > 0 {
+			markManagedPolicyCompositionAlreadyPatched(&stats, markerCount)
+		}
+		return data, stats, nil
+	}
+
+	var patched []byte
+	lastEnd := 0
+	searchStart := 0
+	for {
+		rel := bytes.Index(data[searchStart:], anchor)
+		if rel < 0 {
+			break
+		}
+		anchorIdx := searchStart + rel
+		searchStart = anchorIdx + len(anchor)
+		stats.Segments++
+
+		start, end, ok := findManagedPolicyCompositionFunction(data, anchorIdx)
+		if !ok || start < lastEnd {
+			continue
+		}
+		segment := data[start:end]
+		if bytes.Contains(segment, marker) || !looksLikeManagedPolicyCompositionFunction(segment) {
+			continue
+		}
+
+		headerEnd := bytes.IndexByte(segment, '{')
+		if headerEnd < 0 || len(segment) == 0 || segment[len(segment)-1] != '}' {
+			continue
+		}
+		bodyStart := headerEnd + 1
+		bodyEnd := len(segment) - 1
+		if bodyEnd <= bodyStart {
+			continue
+		}
+
+		literal := "return{settings:null,errors:[]};/*" + managedPolicyCompositionMarker + "*/"
+		bodyLength := bodyEnd - bodyStart
+		if len(literal) > bodyLength {
+			return nil, stats, fmt.Errorf("managed policy composition replacement is longer than target body: %d > %d", len(literal), bodyLength)
+		}
+		repl := paddedLiteral(literal, bodyLength)
+		before := segment[bodyStart:bodyEnd]
+		if preview {
+			logPatchPreview(log, stats.Label+"-composition", before, repl)
+		}
+
+		stats.Eligible++
+		stats.Patched++
+		stats.Replacements++
+		if !bytes.Equal(before, repl) {
+			stats.Changed++
+			if patched == nil {
+				patched = make([]byte, len(data))
+				copy(patched, data)
+			}
+			copy(patched[start+bodyStart:start+bodyEnd], repl)
+		}
+		lastEnd = end
+	}
+
+	if stats.Eligible == 0 {
+		if markerCount > 0 {
+			markManagedPolicyCompositionAlreadyPatched(&stats, markerCount)
+		}
+		return data, stats, nil
+	}
+	if patched == nil {
+		return data, stats, nil
+	}
+	return patched, stats, nil
+}
+
+func markManagedPolicyCompositionAlreadyPatched(stats *exePatchStats, markerCount int) {
+	stats.Segments += markerCount
+	stats.Eligible += markerCount
+	stats.Patched += markerCount
+	stats.Replacements += markerCount
+}
+
+func findManagedPolicyCompositionFunction(data []byte, anchorIdx int) (int, int, bool) {
+	if anchorIdx <= 0 || anchorIdx > len(data) {
+		return 0, 0, false
+	}
+
+	windowStart := anchorIdx - 64*1024
+	if windowStart < 0 {
+		windowStart = 0
+	}
+	searchEnd := anchorIdx
+	functionToken := []byte("function ")
+	for searchEnd > windowStart {
+		rel := bytes.LastIndex(data[windowStart:searchEnd], functionToken)
+		if rel < 0 {
+			return 0, 0, false
+		}
+		start := windowStart + rel
+		openRel := bytes.IndexByte(data[start:anchorIdx], '{')
+		if openRel >= 0 {
+			blockStart := start + openRel
+			_, blockEnd, ok := findBlock(data, blockStart)
+			if ok && blockEnd > anchorIdx {
+				segment := data[start:blockEnd]
+				if looksLikeManagedPolicyCompositionFunction(segment) {
+					return start, blockEnd, true
+				}
+			}
+		}
+		searchEnd = start
+	}
+	return 0, 0, false
+}
+
+func looksLikeManagedPolicyCompositionFunction(segment []byte) bool {
+	return bytes.Contains(segment, []byte(managedPolicyCompositionAnchor)) &&
+		bytes.Contains(segment, []byte("hostModelOverlay")) &&
+		bytes.Contains(segment, []byte("settings:")) &&
+		bytes.Contains(segment, []byte("errors:"))
 }
 
 func applyBypassPermissionsGatePatch(data []byte, log io.Writer, preview bool) ([]byte, exePatchStats, error) {

@@ -26,8 +26,9 @@ const defaultClaudeGCSBucket = "https://storage.googleapis.com/claude-code-dist-
 const claudePatchSkipPrecheckEnv = "CLAUDE_PATCH_SKIP_PRECHECK"
 
 type claudePatchIntegrationOptions struct {
-	seedKnownFailure bool
-	rulesMode        bool
+	seedKnownFailure               bool
+	rulesMode                      bool
+	verifyManagedPolicyComposition bool
 }
 
 func TestClaudePatchIntegration(t *testing.T) {
@@ -39,7 +40,9 @@ func TestClaudePatchIntegration(t *testing.T) {
 		wantVersion = defaultClaudePatchVersion
 	}
 	installURL := strings.TrimSpace(os.Getenv("CLAUDE_PATCH_INSTALL_URL"))
-	runClaudePatchIntegrationCase(t, wantVersion, installURL)
+	runClaudePatchIntegrationCaseWithOptions(t, wantVersion, installURL, claudePatchIntegrationOptions{
+		verifyManagedPolicyComposition: true,
+	})
 }
 
 func TestClaudePatchIntegrationRetriesKnownFailure(t *testing.T) {
@@ -86,7 +89,9 @@ func TestClaudePatchRegressionMatrix(t *testing.T) {
 	for _, wantVersion := range versions {
 		wantVersion := wantVersion
 		t.Run(wantVersion, func(t *testing.T) {
-			runClaudePatchIntegrationCase(t, wantVersion, installURL)
+			runClaudePatchIntegrationCaseWithOptions(t, wantVersion, installURL, claudePatchIntegrationOptions{
+				verifyManagedPolicyComposition: true,
+			})
 		})
 	}
 }
@@ -199,6 +204,9 @@ func runClaudePatchIntegrationCaseWithOptions(t *testing.T, wantVersion string, 
 			}
 		}
 	}
+	if integrationOpts.verifyManagedPolicyComposition {
+		assertManagedPolicyCompositionPatched(t, outcome.TargetPath, wantVersion, log.String())
+	}
 
 	afterVersion, err := runClaudeVersion(ctx, path, outcome)
 	if err != nil {
@@ -234,6 +242,17 @@ func runClaudePatchIntegrationCaseWithOptions(t *testing.T, wantVersion string, 
 	}
 
 	assertClaudeTUIStartsWithOutcome(t, path, outcome)
+}
+
+func assertManagedPolicyCompositionPatched(t *testing.T, path, version, patchLog string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read patched Claude %s: %v", version, err)
+	}
+	if !bytes.Contains(data, []byte(managedPolicyCompositionMarker)) {
+		t.Fatalf("managed policy composition patch marker not found in Claude %s\n%s", version, patchLog)
+	}
 }
 
 func parsePatchVersionMatrix(raw string) []string {

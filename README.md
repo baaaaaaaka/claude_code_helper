@@ -204,8 +204,9 @@ patch test results (linux/mac/windows + linux distros).
   patches active without passing `--permission-mode bypassPermissions`.
 - Outside those modes, Claude-specific byte patches are disabled and any
   previously applied Claude patch is restored before launch.
-- Built-in Claude patches currently cover the `policySettings` getter,
-  bypass-permissions guards, the root bypass guard, and remote settings checks.
+- Built-in Claude patches currently cover the `policySettings` getter and
+  managed-policy composition path, bypass-permissions guards and decisions,
+  the root bypass guard, and remote settings checks.
 - On Linux, if `claude` fails with missing GLIBC symbols,
   `claude-proxy` can prepare a glibc compatibility launch path, preferring a
   `patchelf`-based mirror and falling back to a wrapper when needed. If

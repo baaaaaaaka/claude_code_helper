@@ -84,6 +84,67 @@ func TestPolicySettingsDisablePatch_ReplacesDirectReturnGetterWithMultipleParams
 	}
 }
 
+func TestManagedPolicyCompositionDisablePatchSupportsOldAndNewBundles(t *testing.T) {
+	requireExePatchEnabled(t)
+	startRe := regexp.MustCompile(policySettingsGetterStage1)
+	fixtures := map[string][]byte{
+		// Claude 2.1.222/2.1.223 have the warning path in a function that
+		// does not yet update pairedModelOverrides.
+		"old-tier-loader": []byte("function ofc(e){let t=e.helper?.();if(t)return{settings:t,errors:e.helperWarnings?.()??[]};let{tiers:r,admin:n,parentSlice:o,hostModelOverlay:i,errors:s}=yVi(e);return{settings:null,errors:s}}"),
+		// Claude 2.1.252 moved the same path into the newer composition
+		// function and added the pairedModelOverrides bookkeeping.
+		"new-tier-loader": []byte("function Dt(e){let t=UJ(e),r=e.helperWarnings?.()??[];let{tiers:o,admin:i,parentSlice:s,hostModelOverlay:l,errors:c}=I(e);e.store.policy.pairedModelOverrides={value:void 0};return{settings:u,errors:c}}"),
+	}
+
+	for name, input := range fixtures {
+		t.Run(name, func(t *testing.T) {
+			out, stats, err := applyPolicySettingsDisablePatch(input, startRe, nil, false)
+			if err != nil {
+				t.Fatalf("applyPolicySettingsDisablePatch error: %v", err)
+			}
+			if len(out) != len(input) {
+				t.Fatalf("expected output length %d, got %d", len(input), len(out))
+			}
+			if !bytes.Contains(out, []byte("return{settings:null,errors:[]};/*"+managedPolicyCompositionMarker+"*/")) {
+				t.Fatalf("expected managed policy composition to return neutral settings")
+			}
+			if bytes.Contains(out, []byte(managedPolicyCompositionAnchor)) {
+				t.Fatalf("expected composition helper warning path to be removed")
+			}
+			if stats.Segments != 1 || stats.Eligible != 1 || stats.Replacements != 1 || stats.Changed != 1 {
+				t.Fatalf("unexpected stats: %+v", stats)
+			}
+
+			out2, stats2, err := applyPolicySettingsDisablePatch(out, startRe, nil, false)
+			if err != nil {
+				t.Fatalf("reapply applyPolicySettingsDisablePatch error: %v", err)
+			}
+			if !bytes.Equal(out2, out) {
+				t.Fatalf("expected reapply to keep output unchanged")
+			}
+			if stats2.Segments != 1 || stats2.Eligible != 1 || stats2.Replacements != 1 || stats2.Changed != 0 {
+				t.Fatalf("unexpected reapply stats: %+v", stats2)
+			}
+		})
+	}
+}
+
+func TestManagedPolicyCompositionDisablePatchRejectsUnrelatedWarningFunction(t *testing.T) {
+	requireExePatchEnabled(t)
+	input := []byte("function unrelated(e){let r=e.helperWarnings?.()??[];return{settings:e.settings,errors:r}}")
+
+	out, stats, err := applyManagedPolicyCompositionDisablePatch(input, nil, false)
+	if err != nil {
+		t.Fatalf("applyManagedPolicyCompositionDisablePatch error: %v", err)
+	}
+	if !bytes.Equal(out, input) {
+		t.Fatalf("expected unrelated warning function to remain unchanged")
+	}
+	if stats.Segments != 1 || stats.Eligible != 0 || stats.Replacements != 0 || stats.Changed != 0 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+}
+
 func TestPolicySettingsDisablePatch_NoMatch(t *testing.T) {
 	requireExePatchEnabled(t)
 	startRe := regexp.MustCompile(policySettingsGetterStage1)
