@@ -62,6 +62,10 @@ install_deps() {
     if [[ -f /etc/yum.repos.d/CentOS-Base.repo ]]; then
       sed -i 's/^mirrorlist=/#mirrorlist=/g' /etc/yum.repos.d/CentOS-Base.repo || true
       sed -i 's|^#baseurl=http://mirror.centos.org|baseurl=https://vault.centos.org|g' /etc/yum.repos.d/CentOS-Base.repo || true
+      sed -i \
+        -e 's|/centos/\$releasever|/7.9.2009|g' \
+        -e 's|/centos/7|/7.9.2009|g' \
+        /etc/yum.repos.d/CentOS-Base.repo || true
     fi
     local pkgs=(ca-certificates openssh-server openssh-clients)
     if [[ "$fetcher" == "curl" ]]; then

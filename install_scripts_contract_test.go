@@ -124,6 +124,9 @@ func TestCentOS7ArchiveRepositoriesUseHTTPS(t *testing.T) {
 	}
 	for _, relativePath := range paths {
 		data := readTextFile(t, filepath.Join(repoRoot, relativePath))
+		if !strings.Contains(data, "7.9.2009") {
+			t.Fatalf("%s must pin CentOS 7 archive access to the 7.9.2009 snapshot", relativePath)
+		}
 		for _, line := range strings.Split(data, "\n") {
 			if strings.HasPrefix(strings.TrimSpace(line), "baseurl=http://vault.centos.org") {
 				t.Fatalf("%s must not configure the CentOS archive over HTTP", relativePath)
