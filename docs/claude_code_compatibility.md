@@ -11,7 +11,9 @@ CentOS 7 is tracked for the latest Claude Code release only; older rows are not 
 | 2.1.22 | v0.0.25 | pass | pass | pass |  | pass | pass |
 | 2.1.23 | v0.0.28 | pass | pass | pass |  | pass | pass |
 | 2.1.25 | v0.0.30 | pass | pass | pass |  | pass | pass |
+| 2.1.26 | v0.0.77 | fail | fail | fail | fail | fail | fail |
 | 2.1.27 | v0.0.30 | pass | pass | pass |  | pass | pass |
+| 2.1.28 | v0.0.77 | fail | fail | fail | fail | fail | fail |
 | 2.1.29 | v0.0.30 | pass | pass | pass |  | pass | pass |
 | 2.1.30 | v0.0.30 | pass | pass | pass |  | pass | pass |
 | 2.1.31 | v0.0.31 | pass | pass | pass |  | pass | pass |
@@ -44,6 +46,7 @@ CentOS 7 is tracked for the latest Claude Code release only; older rows are not 
 | 2.1.63 | v0.0.37 | pass | pass | pass |  | pass | pass |
 | 2.1.64 | v0.0.37 | pass | pass | pass |  | pass | pass |
 | 2.1.66 | v0.0.37 | pass | pass | pass |  | pass | pass |
+| 2.1.67 | v0.0.77 | fail | fail | fail | fail | fail | fail |
 | 2.1.68 | v0.0.37 | pass | pass | pass |  | pass | pass |
 | 2.1.69 | v0.0.40 | pass | pass | pass |  | pass | pass |
 | 2.1.70 | v0.0.40 | pass | pass | pass |  | pass | pass |
