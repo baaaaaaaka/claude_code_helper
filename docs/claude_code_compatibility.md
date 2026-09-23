@@ -11,7 +11,9 @@ CentOS 7 is tracked for the latest Claude Code release only; older rows are not 
 | 2.1.22 | v0.0.25 | pass | pass | pass |  | pass | pass |
 | 2.1.23 | v0.0.28 | pass | pass | pass |  | pass | pass |
 | 2.1.25 | v0.0.30 | pass | pass | pass |  | pass | pass |
+| 2.1.26 | v0.0.77 | fail | fail | fail | fail | fail | fail |
 | 2.1.27 | v0.0.30 | pass | pass | pass |  | pass | pass |
+| 2.1.28 | v0.0.77 | fail | fail | fail | fail | fail | fail |
 | 2.1.29 | v0.0.30 | pass | pass | pass |  | pass | pass |
 | 2.1.30 | v0.0.30 | pass | pass | pass |  | pass | pass |
 | 2.1.31 | v0.0.31 | pass | pass | pass |  | pass | pass |
@@ -44,6 +46,7 @@ CentOS 7 is tracked for the latest Claude Code release only; older rows are not 
 | 2.1.63 | v0.0.37 | pass | pass | pass |  | pass | pass |
 | 2.1.64 | v0.0.37 | pass | pass | pass |  | pass | pass |
 | 2.1.66 | v0.0.37 | pass | pass | pass |  | pass | pass |
+| 2.1.67 | v0.0.77 | fail | fail | fail | fail | fail | fail |
 | 2.1.68 | v0.0.37 | pass | pass | pass |  | pass | pass |
 | 2.1.69 | v0.0.40 | pass | pass | pass |  | pass | pass |
 | 2.1.70 | v0.0.40 | pass | pass | pass |  | pass | pass |
@@ -207,4 +210,22 @@ CentOS 7 is tracked for the latest Claude Code release only; older rows are not 
 | 2.1.252 | v0.0.76 | pass | pass | pass | pass | pass | pass |
 | 2.1.257 | v0.0.76 | pass | pass | pass | pass | pass | pass |
 | 2.1.258 | v0.0.76 | pass | pass | pass | pass | pass | pass |
-| 2.1.259 | v0.0.76 | pass | pass | pass | pass | pass | pass |
+| 2.1.259 | v0.0.77 | pass | pass | pass | pass | pass | pass |
+| 2.1.260 | v0.0.77 | pass | pass | pass | pass | pass | pass |
+| 2.1.261 | v0.0.77 | pass | pass | pass | pass | pass | pass |
+| 2.1.263 | v0.0.77 | pass | pass | pass | pass | pass | pass |
+| 2.1.265 | v0.0.77 | pass | pass | pass | pass | pass | pass |
+| 2.1.266 | v0.0.77 | pass | pass | pass | pass | pass | pass |
+| 2.1.267 | v0.0.77 | pass | pass | pass | pass | pass | pass |
+| 2.1.268 | v0.0.77 | pass | pass | pass | pass | pass | pass |
+| 2.1.269 | v0.0.77 | pass | pass | pass | pass | pass | pass |
+| 2.1.270 | v0.0.77 | pass | pass | pass | pass | pass | pass |
+| 2.1.271 | v0.0.77 | pass | pass | pass | pass | pass | pass |
+| 2.1.272 | v0.0.77 | pass | pass | pass | pass | pass | pass |
+| 2.1.273 | v0.0.77 | pass | pass | pass | pass | pass | pass |
+| 2.1.274 | v0.0.77 | pass | pass | pass | pass | pass | pass |
+| 2.1.275 | v0.0.77 | pass | pass | pass | pass | pass | pass |
+| 2.1.276 | v0.0.77 | pass | pass | pass | pass | pass | pass |
+| 2.1.277 | v0.0.77 | pass | pass | pass | pass | pass | pass |
+| 2.1.278 | v0.0.77 | pass | pass | pass | pass | pass | pass |
+| 2.1.280 | v0.0.77 | fail | fail | fail | fail | fail | fail |
