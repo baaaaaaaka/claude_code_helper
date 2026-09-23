@@ -443,9 +443,6 @@ func runPromptCaseWithCommand(
 	if err := writeLine(string(promptPayload)); err != nil {
 		t.Fatalf("write prompt line: %v", err)
 	}
-	if !tc.ExpectPrompt {
-		closeStdin()
-	}
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64<<10), 4<<20)

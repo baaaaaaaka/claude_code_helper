@@ -550,9 +550,6 @@ func runClaudePromptCaseWithExtraArgs(
 	if err := writeLine(promptLine); err != nil {
 		t.Fatalf("write prompt line: %v", err)
 	}
-	if !tc.ExpectPrompt {
-		closeStdin()
-	}
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64<<10), 4<<20)
@@ -610,7 +607,9 @@ func runClaudePromptCaseWithExtraArgs(
 			if err := writeLine(response); err != nil {
 				t.Fatalf("write permission response: %v", err)
 			}
-			closeStdin()
+			// Keep stdin open until the final result. Newer Claude Code builds
+			// can acknowledge the response asynchronously; closing here races
+			// that acknowledgement and reports a misleading stream-closed error.
 		case "assistant":
 			var msg struct {
 				Message struct {

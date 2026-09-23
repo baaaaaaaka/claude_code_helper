@@ -328,6 +328,55 @@ func TestBypassPermissionDecisionPatch_HookAskFloorShapePreservesSemantics(t *te
 	}
 }
 
+func TestBypassPermissionDecisionPatch_HookAskFloorShapeWithoutLegacyInitialization(t *testing.T) {
+	requireExePatchEnabled(t)
+	input := latestHookAskFloorPermissionDecisionPatchFixture()
+
+	out, stats, err := applyBypassPermissionDecisionPatch(input, nil, false)
+	if err != nil {
+		t.Fatalf("applyBypassPermissionDecisionPatch error: %v", err)
+	}
+	if len(out) != len(input) {
+		t.Fatalf("expected output length %d, got %d", len(input), len(out))
+	}
+	for _, want := range []string{
+		"if(tSe(n))",
+		"await iC(",
+		"{...s,toolUseId:y},{hookUpdatedInput:e.updatedInput}",
+		"hookAskFloor:!0",
+		permissionDecisionPatchMarker,
+	} {
+		if !bytes.Contains(out, []byte(want)) {
+			t.Fatalf("expected replacement to contain %q", want)
+		}
+	}
+	if bytes.Contains(out, []byte(permissionDecisionAskRuleAnchor)) {
+		t.Fatalf("expected ask-rule logging anchor to be removed")
+	}
+	if bytes.Contains(out, []byte("s.toolDecisions??={}")) {
+		t.Fatalf("expected latest shape not to acquire the removed legacy initialization")
+	}
+	denyIdx := bytes.Index(out, []byte(`e?.behavior==="deny"`))
+	bypassIdx := bytes.Index(out, []byte(`toolPermissionContext.mode==="bypassPermissions"`))
+	if denyIdx < 0 || bypassIdx < 0 || denyIdx >= bypassIdx {
+		t.Fatalf("expected explicit hook deny before bypass short circuit")
+	}
+	if stats.Segments != 1 || stats.Eligible != 1 || stats.Replacements != 1 || stats.Changed != 1 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+
+	out2, stats2, err := applyBypassPermissionDecisionPatch(out, nil, false)
+	if err != nil {
+		t.Fatalf("reapply applyBypassPermissionDecisionPatch error: %v", err)
+	}
+	if !bytes.Equal(out2, out) {
+		t.Fatalf("expected reapply to keep output unchanged")
+	}
+	if stats2.Eligible != 1 || stats2.Replacements != 1 || stats2.Changed != 0 {
+		t.Fatalf("unexpected reapply stats: %+v", stats2)
+	}
+}
+
 func TestBypassPermissionDecisionPatch_HookAskFloorShapeFailsClosed(t *testing.T) {
 	requireExePatchEnabled(t)
 	input := bytes.Replace(
@@ -396,6 +445,10 @@ func permissionDecisionPatchFixture() []byte {
 
 func hookAskFloorPermissionDecisionPatchFixture() []byte {
 	return []byte("async function edn(e,t,r,n,o,i,s){if(nJe(t))return{decision:{behavior:\"allow\",updatedInput:r},input:r};let a=n.requireCanUseTool;if(e?.behavior===\"deny\")return T(`Hook denied tool use for ${t.name}`),{decision:e,input:r};if(e?.behavior!==\"allow\"&&e?.behavior!==\"ask\")return{decision:await o(t,r,n,i,s),input:r};let p=await preflight(t,r,n);let l=e.behavior,c=e.updatedInput??r,u=await hyt(t,c,{...n,toolUseId:s},{hookUpdatedInput:e.updatedInput});if(u?.behavior===\"deny\")return T(`Hook returned '${l}' for ${t.name}, but deny rule overrides: ${u.message}`),{decision:u,input:c};if(u?.behavior===\"ask\"){let d=l===\"ask\";if(d)n.toolDecisions??={};return T(`Hook returned '${l}' for ${t.name}, but ask rule/safety check requires full permission pipeline${d?\" hook ask floor\":\"\"}`),{decision:await o(t,c,d?{...n,hookAskFloor:!0}:n,i,s),input:c}}if(l===\"allow\"){if(a)return T(`Hook approved tool use for ${t.name}, but canUseTool is required`),{decision:await o(t,c,n,i,s),input:c};return T(t.requiresUserInteraction?.()?`updated`:`approved`),{decision:e,input:c}}return{decision:await o(t,c,n,i,s,e),input:c}}async function tdn(){}")
+}
+
+func latestHookAskFloorPermissionDecisionPatchFixture() []byte {
+	return []byte("async function oYn(e,n,r,s,g,h,y){if(tSe(n))return{decision:{behavior:\"allow\",updatedInput:r},input:r};let w=s.requireCanUseTool;if(e?.behavior===\"deny\")return zJ(e,{tool:n,input:r,toolUseContext:s,canUseTool:g,assistantMessage:h,toolUseID:y});if(e?.behavior!==\"allow\"&&e?.behavior!==\"ask\")return{decision:await g(n,r,s,h,y),input:r};let M=e.behavior,L=e.updatedInput??r,j=await iC(n,L,{...s,toolUseId:y},{hookUpdatedInput:e.updatedInput});if(j?.behavior===\"deny\")return zJ(j,{tool:n,input:L,toolUseContext:s,canUseTool:g,assistantMessage:h,toolUseID:y});if(j?.behavior===\"ask\"){let he=M===\"ask\";return t(`Hook returned '${M}', but ask rule/safety check requires full permission pipeline${he?\" (hookAskFloor — a classifier allow re-surfaces as this ask)\":\"\"}`),{decision:await g(n,L,he?{...s,hookAskFloor:!0}:s,h,y),input:L}}if(M===\"allow\"){if(w)return t(\"Hook approved tool use for ${n.name}, but canUseTool is required\"),{decision:await g(n,L,s,h,y),input:L};if(!n.requiresUserInteraction?.())return zJ(e,{tool:n,input:L,toolUseContext:s,canUseTool:g,assistantMessage:h,toolUseID:y})}return zJ(e,{tool:n,input:L,toolUseContext:s,canUseTool:g,assistantMessage:h,toolUseID:y})}")
 }
 
 func TestRemoteSettingsDisablePatch_ReplacesPaths(t *testing.T) {

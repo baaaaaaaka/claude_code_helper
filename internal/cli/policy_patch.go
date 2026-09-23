@@ -827,10 +827,14 @@ func buildHookAskFloorPermissionDecisionReplacement(name string, params []string
 	if !matchesHookAskFloorRuleCheckCall(params, ruleCheck, segment) {
 		return "", errors.New("permission decision hook-ask-floor rule-check call did not match")
 	}
-	if !bytes.Contains(segment, []byte(params[3]+".toolDecisions??={}")) ||
-		!bytes.Contains(segment, []byte("hookAskFloor:!0")) {
+	if !bytes.Contains(segment, []byte("hookAskFloor:!0")) {
 		return "", errors.New("permission decision hook-ask-floor branch did not match")
 	}
+	// Claude Code 2.1.280 removed the toolDecisions initialization from this
+	// branch while retaining the hookAskFloor signal. Keep the legacy side
+	// effect only for bundles that still contain it so both generations use
+	// the same fixed-length replacement path.
+	initializeToolDecisions := bytes.Contains(segment, []byte(params[3]+".toolDecisions??={}"))
 
 	locals, err := pickJSLocalNames(params, 5)
 	if err != nil {
@@ -936,8 +940,11 @@ func buildHookAskFloorPermissionDecisionReplacement(name string, params []string
 	b.WriteString("===\"ask\";if(")
 	b.WriteString(hookAskFloor)
 	b.WriteByte(')')
-	b.WriteString(context)
-	b.WriteString(".toolDecisions??={};return{decision:await ")
+	if initializeToolDecisions {
+		b.WriteString(context)
+		b.WriteString(".toolDecisions??={};")
+	}
+	b.WriteString("return{decision:await ")
 	b.WriteString(decide)
 	b.WriteByte('(')
 	b.WriteString(tool)
