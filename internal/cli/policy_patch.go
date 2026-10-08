@@ -11,25 +11,27 @@ import (
 
 const maxNonPrintablePercent = 10
 const (
-	bypassPermissionsGateName        = "tengu_disable_bypass_permissions_mode"
-	bypassPermissionsGateNamePatched = "tengu_disable_bypass_permissionX_mode"
-	bypassPermissionsSettingKey      = "disableBypassPermissionsMode"
-	bypassPermissionsSettingPatched  = "disableBypassPermissionsModE"
-	rootBypassGuardCond              = `process.getuid()===0&&process.env.IS_SANDBOX!=="1"`
-	rootBypassGuardCondPatched       = `process.getuid()===1&&process.env.IS_SANDBOX!=="1"`
-	rootBypassGuardErrorMessage      = `--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons`
-	rootBypassGuardContextBytes      = 512
-	remoteSettingsFileName           = "remote-settings.json"
-	remoteSettingsFilePatched        = "remote-settings.jsoN"
-	remoteSettingsAPIPath            = "/api/claude_code/settings"
-	remoteSettingsAPIPathPatched     = "/api/claude_code/settingS"
-	permissionDecisionAskRuleAnchor  = "ask rule/safety check requires full permission pipeline"
-	permissionDecisionPatchMarkerV1  = "tengu_bypass_permission_decision_v1"
-	permissionDecisionPatchMarker    = "tengu_bypass_permission_decision_v2"
-	permissionDecisionHookAskFloor   = "hookAskFloor"
-	permissionDecisionHookUpdated    = "hookUpdatedInput"
-	managedPolicyCompositionAnchor   = "helperWarnings?.()"
-	managedPolicyCompositionMarker   = "tengu_managed_policy_composition_disable_v1"
+	bypassPermissionsGateName         = "tengu_disable_bypass_permissions_mode"
+	bypassPermissionsGateNamePatched  = "tengu_disable_bypass_permissionX_mode"
+	bypassPermissionsSettingKey       = "disableBypassPermissionsMode"
+	bypassPermissionsSettingPatched   = "disableBypassPermissionsModE"
+	rootBypassGuardCond               = `process.getuid()===0&&process.env.IS_SANDBOX!=="1"`
+	rootBypassGuardCondPatched        = `process.getuid()===1&&process.env.IS_SANDBOX!=="1"`
+	rootBypassGuardErrorMessage       = `--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons`
+	rootBypassGuardContextBytes       = 512
+	remoteSettingsFileName            = "remote-settings.json"
+	remoteSettingsFilePatched         = "remote-settings.jsoN"
+	remoteSettingsAPIPath             = "/api/claude_code/settings"
+	remoteSettingsAPIPathPatched      = "/api/claude_code/settingS"
+	permissionDecisionAskRuleAnchor   = "ask rule/safety check requires full permission pipeline"
+	permissionDecisionAskRuleAnchorV2 = "an ask rule, a safety check or a ToolHost's person-only ask requires the full permission pipeline"
+	permissionDecisionPatchMarkerV1   = "tengu_bypass_permission_decision_v1"
+	permissionDecisionPatchMarker     = "tengu_bypass_permission_decision_v2"
+	permissionDecisionPatchMarkerV3   = "tengu_bypass_permission_v3"
+	permissionDecisionHookAskFloor    = "hookAskFloor"
+	permissionDecisionHookUpdated     = "hookUpdatedInput"
+	managedPolicyCompositionAnchor    = "helperWarnings?.()"
+	managedPolicyCompositionMarker    = "tengu_managed_policy_composition_disable_v1"
 )
 
 var policySettingsDirectReturnRe = regexp.MustCompile(policySettingsDirectReturnStage1)
@@ -386,11 +388,19 @@ func applyBypassPermissionsGatePatch(data []byte, log io.Writer, preview bool) (
 
 func applyBypassPermissionDecisionPatch(data []byte, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
 	stats := exePatchStats{Label: "bypass-permission-decision"}
-	anchor := []byte(permissionDecisionAskRuleAnchor)
+	anchors := [][]byte{
+		[]byte(permissionDecisionAskRuleAnchor),
+		[]byte(permissionDecisionAskRuleAnchorV2),
+	}
 	markerCount := bytes.Count(data, []byte(permissionDecisionPatchMarker)) +
-		bytes.Count(data, []byte(permissionDecisionPatchMarkerV1))
+		bytes.Count(data, []byte(permissionDecisionPatchMarkerV1)) +
+		bytes.Count(data, []byte(permissionDecisionPatchMarkerV3))
 
-	if bytes.Count(data, anchor) == 0 {
+	anchorCount := 0
+	for _, anchor := range anchors {
+		anchorCount += bytes.Count(data, anchor)
+	}
+	if anchorCount == 0 {
 		if markerCount == 0 {
 			return data, stats, nil
 		}
@@ -402,11 +412,18 @@ func applyBypassPermissionDecisionPatch(data []byte, log io.Writer, preview bool
 	lastEnd := 0
 	searchStart := 0
 	for {
-		rel := bytes.Index(data[searchStart:], anchor)
-		if rel < 0 {
+		anchorIdx := -1
+		var anchor []byte
+		for _, candidate := range anchors {
+			rel := bytes.Index(data[searchStart:], candidate)
+			if rel >= 0 && (anchorIdx < 0 || searchStart+rel < anchorIdx) {
+				anchorIdx = searchStart + rel
+				anchor = candidate
+			}
+		}
+		if anchorIdx < 0 {
 			break
 		}
-		anchorIdx := searchStart + rel
 		searchStart = anchorIdx + len(anchor)
 		stats.Segments++
 
@@ -418,7 +435,13 @@ func applyBypassPermissionDecisionPatch(data []byte, log io.Writer, preview bool
 		if !looksLikePermissionDecisionFunction(segment) {
 			continue
 		}
-		replacement, err := buildBypassPermissionDecisionReplacement(segment)
+		var replacement string
+		var err error
+		if bytes.Contains(segment, []byte(permissionDecisionAskRuleAnchorV2)) {
+			replacement, err = buildCurrentPermissionDecisionReplacement(segment)
+		} else {
+			replacement, err = buildBypassPermissionDecisionReplacement(segment)
+		}
 		if err != nil {
 			return nil, stats, err
 		}
@@ -627,9 +650,173 @@ func findPermissionDecisionFunction(data []byte, anchorIdx int) (int, int, bool)
 }
 
 func looksLikePermissionDecisionFunction(segment []byte) bool {
+	if !bytes.Contains(segment, []byte("canUseTool is required")) {
+		return false
+	}
+	if bytes.Contains(segment, []byte(permissionDecisionAskRuleAnchorV2)) {
+		return bytes.Contains(segment, []byte("hookUpdatedInput"))
+	}
 	return bytes.Contains(segment, []byte(".requiresUserInteraction?.()")) &&
-		bytes.Contains(segment, []byte("canUseTool is required")) &&
 		bytes.Contains(segment, []byte(permissionDecisionAskRuleAnchor))
+}
+
+func buildCurrentPermissionDecisionReplacement(segment []byte) (string, error) {
+	headerEnd := bytes.IndexByte(segment, '{')
+	if headerEnd < 0 {
+		return "", errors.New("permission decision function missing opening brace")
+	}
+	match := permissionDecisionFunctionRe.FindSubmatch(segment[:headerEnd+1])
+	if len(match) != 3 {
+		return "", errors.New("permission decision function signature did not match")
+	}
+	params := splitJSParams(string(match[2]))
+	if len(params) != 7 {
+		return "", fmt.Errorf("permission decision function has %d parameters, expected 7", len(params))
+	}
+	specialAllow := permissionDecisionSpecialAllowRe.FindSubmatch(segment)
+	if len(specialAllow) != 5 || string(specialAllow[2]) != params[1] ||
+		string(specialAllow[3]) != params[2] || string(specialAllow[4]) != params[2] {
+		return "", errors.New("permission decision special-tool allow path did not match")
+	}
+	if !bytes.Contains(segment, []byte("if("+params[0]+`?.behavior==="deny")`)) {
+		return "", errors.New("permission decision explicit hook-deny path did not match")
+	}
+	if !bytes.Contains(segment, []byte("canUseTool is required")) ||
+		!bytes.Contains(segment, []byte("hookUpdatedInput:"+params[0]+".updatedInput")) {
+		return "", errors.New("permission decision hook and canUseTool shape did not match")
+	}
+	invalidHookPath := []byte("if(" + params[0] + `?.behavior!=="allow"&&` + params[0] + `?.behavior!=="ask")return{decision:await ` + params[4] + "(")
+	invalidHookPathIdx := bytes.Index(segment, invalidHookPath)
+	if invalidHookPathIdx < 0 {
+		return "", errors.New("permission decision invalid-hook fallback did not match")
+	}
+	hookDenyPath := []byte("if(" + params[0] + `?.behavior==="deny")`)
+	hookDenyPathIdx := bytes.Index(segment, hookDenyPath)
+	if hookDenyPathIdx < 0 || hookDenyPathIdx > invalidHookPathIdx {
+		return "", errors.New("permission decision explicit hook-deny ordering did not match")
+	}
+
+	identifier := `[A-Za-z_$][A-Za-z0-9_$]*`
+	identifierCapture := `([A-Za-z_$][A-Za-z0-9_$]*)`
+	guardPattern := `let\s+` + identifier + `\s*=\s*` + regexp.QuoteMeta(params[0]) + `\.behavior\s*,\s*` + identifierCapture + `\s*=\s*` + identifierCapture + `\(\s*` + regexp.QuoteMeta(params[0]) + `\s*,\s*` + regexp.QuoteMeta(params[2]) + `\s*\)\s*,\s*` + identifierCapture + `\s*=\s*` + identifierCapture + `\(\s*` + identifierCapture + `\s*\)\s*;\s*if\(\s*` + identifierCapture + `!==null\)\s*return\{decision:` + identifierCapture + `,input:` + identifierCapture + `\};`
+	guardRe, err := regexp.Compile(guardPattern)
+	if err != nil {
+		return "", fmt.Errorf("compile permission decision guard matcher: %w", err)
+	}
+	guard := guardRe.FindSubmatchIndex(segment)
+	if len(guard) < 18 {
+		return "", errors.New("permission decision normalized-input and artifact guard did not match")
+	}
+	guardNames := guardRe.FindSubmatch(segment)
+	if len(guardNames) != 9 || string(guardNames[3]) != string(guardNames[6]) ||
+		string(guardNames[3]) != string(guardNames[7]) || string(guardNames[1]) != string(guardNames[5]) ||
+		string(guardNames[1]) != string(guardNames[8]) {
+		return "", errors.New("permission decision artifact guard variables did not match")
+	}
+	effectiveInput := string(guardNames[1])
+	normalizeInput := string(guardNames[2])
+	artifactGuard := string(guardNames[4])
+	artifactDecision := string(guardNames[3])
+	ruleCallStart := guard[1]
+	if ruleCallStart >= len(segment) || !bytes.HasPrefix(segment[ruleCallStart:], []byte("let ")) {
+		return "", errors.New("permission decision rule call did not follow artifact guard")
+	}
+
+	ruleCallPattern := `let\s+` + identifierCapture + `\s*=\s*await\s+` + identifier + `\(\s*` + regexp.QuoteMeta(params[1]) + `\s*,\s*` + regexp.QuoteMeta(effectiveInput) + `\s*,\s*\{\s*\.\.\.\s*` + regexp.QuoteMeta(params[3]) + `\s*,\s*toolUseId\s*:\s*` + regexp.QuoteMeta(params[6]) + `\s*\}\s*,\s*\{\s*hookUpdatedInput\s*:\s*` + regexp.QuoteMeta(params[0]) + `\.updatedInput\s*\}\s*\)\s*\?\?\s*await\s+` + identifier + `\(\s*` + regexp.QuoteMeta(params[1]) + `\s*,\s*` + regexp.QuoteMeta(effectiveInput) + `\s*,\s*` + regexp.QuoteMeta(params[3])
+	ruleCallRe, err := regexp.Compile(ruleCallPattern)
+	if err != nil {
+		return "", fmt.Errorf("compile permission decision rule-call matcher: %w", err)
+	}
+	ruleCall := ruleCallRe.FindSubmatch(segment[ruleCallStart:])
+	if len(ruleCall) != 2 {
+		return "", errors.New("permission decision rule-check call did not match")
+	}
+	ruleResult := string(ruleCall[1])
+	ruleDenyBranch := []byte("if(" + ruleResult + `?.behavior==="deny")`)
+	askBranch := []byte("if(" + ruleResult + `?.behavior==="ask")`)
+	ruleDenyBranchIdx := bytes.Index(segment, ruleDenyBranch)
+	askBranchIdx := bytes.Index(segment, askBranch)
+	anchorIdx := bytes.Index(segment, []byte(permissionDecisionAskRuleAnchorV2))
+	if ruleDenyBranchIdx < ruleCallStart || askBranchIdx < ruleDenyBranchIdx || anchorIdx < askBranchIdx {
+		return "", errors.New("permission decision ask-rule branch did not match")
+	}
+
+	denyLogStartRel := bytes.Index(segment[ruleDenyBranchIdx:], []byte("return t(`"))
+	if denyLogStartRel < 0 {
+		return "", errors.New("permission decision deny-rule telemetry call did not match")
+	}
+	denyLogStart := ruleDenyBranchIdx + denyLogStartRel
+	denyClosingRel := bytes.Index(segment[denyLogStart:], []byte("`),"))
+	if denyClosingRel < 0 {
+		return "", errors.New("permission decision deny-rule telemetry call was unterminated")
+	}
+	denyLogEnd := denyLogStart + denyClosingRel + len("`),")
+	denyReturnEnd := denyLogStart + len("return ")
+
+	logStart := bytes.LastIndex(segment[:anchorIdx], []byte("return t(`"))
+	if logStart < askBranchIdx || denyLogEnd > logStart {
+		return "", errors.New("permission decision ask-rule telemetry call did not match")
+	}
+	closingRel := bytes.Index(segment[anchorIdx:], []byte("`),"))
+	if closingRel < 0 {
+		return "", errors.New("permission decision ask-rule telemetry call was unterminated")
+	}
+	logEnd := anchorIdx + closingRel + len("`),")
+	returnStart := logStart + len("return ")
+	if logEnd < returnStart || invalidHookPathIdx > denyReturnEnd {
+		return "", errors.New("permission decision ask-rule telemetry boundaries were invalid")
+	}
+
+	var bypass strings.Builder
+	bypass.WriteString("if(")
+	bypass.WriteString(params[3])
+	bypass.WriteString(`.getAppState().toolPermissionContext.mode==="bypassPermissions"){let `)
+	bypass.WriteString(effectiveInput)
+	bypass.WriteString("=")
+	bypass.WriteString(params[0])
+	bypass.WriteString(`?.behavior==="allow"||`)
+	bypass.WriteString(params[0])
+	bypass.WriteString(`?.behavior==="ask"?`)
+	bypass.WriteString(normalizeInput)
+	bypass.WriteByte('(')
+	bypass.WriteString(params[0])
+	bypass.WriteByte(',')
+	bypass.WriteString(params[2])
+	bypass.WriteString("):")
+	bypass.WriteString(params[0])
+	bypass.WriteString("?.updatedInput??")
+	bypass.WriteString(params[2])
+	bypass.WriteByte(',')
+	bypass.WriteString(artifactDecision)
+	bypass.WriteByte('=')
+	bypass.WriteString(artifactGuard)
+	bypass.WriteByte('(')
+	bypass.WriteString(effectiveInput)
+	bypass.WriteString(");if(")
+	bypass.WriteString(artifactDecision)
+	bypass.WriteString("!==null)return{decision:")
+	bypass.WriteString(artifactDecision)
+	bypass.WriteString(",input:")
+	bypass.WriteString(effectiveInput)
+	bypass.WriteString("};return{decision:{behavior:\"allow\",updatedInput:")
+	bypass.WriteString(effectiveInput)
+	bypass.WriteString(`,decisionReason:{type:"mode",mode:"bypassPermissions"}},input:`)
+	bypass.WriteString(effectiveInput)
+	bypass.WriteString("}}/*")
+	bypass.WriteString(permissionDecisionPatchMarkerV3)
+	bypass.WriteString("*/")
+
+	replacementLength := len(segment) + bypass.Len() - (denyLogEnd - denyReturnEnd) - (logEnd - returnStart)
+	if replacementLength > len(segment) {
+		return "", fmt.Errorf("permission decision insertion exceeds removed telemetry space by %d bytes", replacementLength-len(segment))
+	}
+	replacement := make([]byte, 0, replacementLength)
+	replacement = append(replacement, segment[:invalidHookPathIdx]...)
+	replacement = append(replacement, bypass.String()...)
+	replacement = append(replacement, segment[invalidHookPathIdx:denyReturnEnd]...)
+	replacement = append(replacement, segment[denyLogEnd:returnStart]...)
+	replacement = append(replacement, segment[logEnd:]...)
+	return string(replacement), nil
 }
 
 func buildBypassPermissionDecisionReplacement(segment []byte) (string, error) {

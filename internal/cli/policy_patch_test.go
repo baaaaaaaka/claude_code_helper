@@ -377,6 +377,98 @@ func TestBypassPermissionDecisionPatch_HookAskFloorShapeWithoutLegacyInitializat
 	}
 }
 
+func TestBypassPermissionDecisionPatch_CurrentShapePreservesNativePipeline(t *testing.T) {
+	requireExePatchEnabled(t)
+	input := currentPermissionDecisionPatchFixtureWithDenyTelemetry(t)
+
+	out, stats, err := applyBypassPermissionDecisionPatch(input, nil, false)
+	if err != nil {
+		t.Fatalf("applyBypassPermissionDecisionPatch error: %v", err)
+	}
+	if len(out) != len(input) {
+		t.Fatalf("expected output length %d, got %d", len(input), len(out))
+	}
+	for _, want := range []string{
+		"if(Gve(n))",
+		`if(e?.behavior==="deny")`,
+		`let z=e?.behavior==="allow"||e?.behavior==="ask"?Vje(e,r):e?.updatedInput??r,q=TUe(z);if(q!==null)return{decision:q,input:z};`,
+		"let H=e.behavior,z=Vje(e,r),q=TUe(z);if(q!==null)return{decision:q,input:z};",
+		`if(s.getAppState().toolPermissionContext.mode==="bypassPermissions")`,
+		"await fA(n,z,{...s,toolUseId:S},{hookUpdatedInput:e.updatedInput})??await XBo(n,z,s,h,S)",
+		"auto mode requires classifier adjudication",
+		permissionDecisionPatchMarkerV3,
+	} {
+		if !bytes.Contains(out, []byte(want)) {
+			t.Fatalf("expected patched function to preserve %q", want)
+		}
+	}
+	if bytes.Contains(out, []byte(permissionDecisionAskRuleAnchorV2)) {
+		t.Fatalf("expected ask-rule telemetry anchor to be removed")
+	}
+	denyIdx := bytes.Index(out, []byte(`if(e?.behavior==="deny")`))
+	bypassIdx := bytes.Index(out, []byte(`toolPermissionContext.mode==="bypassPermissions"`))
+	fallbackIdx := bytes.Index(out, []byte(`if(e?.behavior!=="allow"&&e?.behavior!=="ask")`))
+	guardIdx := bytes.Index(out, []byte("let H=e.behavior,z=Vje(e,r),q=TUe(z);if(q!==null)return{decision:q,input:z};"))
+	ruleIdx := bytes.Index(out, []byte("await fA("))
+	if denyIdx < 0 || bypassIdx < 0 || fallbackIdx < 0 || guardIdx < 0 || ruleIdx < 0 || denyIdx >= bypassIdx || bypassIdx >= fallbackIdx || fallbackIdx >= guardIdx || guardIdx >= ruleIdx {
+		t.Fatalf("expected explicit deny before bypass, bypass before fallback, and the native guard and rule checks to remain ordered")
+	}
+	if stats.Segments != 1 || stats.Eligible != 1 || stats.Replacements != 1 || stats.Changed != 1 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+
+	out2, stats2, err := applyBypassPermissionDecisionPatch(out, nil, false)
+	if err != nil {
+		t.Fatalf("reapply applyBypassPermissionDecisionPatch error: %v", err)
+	}
+	if !bytes.Equal(out2, out) {
+		t.Fatalf("expected reapply to keep output unchanged")
+	}
+	if stats2.Eligible != 1 || stats2.Replacements != 1 || stats2.Changed != 0 {
+		t.Fatalf("unexpected reapply stats: %+v", stats2)
+	}
+}
+
+func TestBypassPermissionDecisionPatch_CurrentShapeFailsClosed(t *testing.T) {
+	requireExePatchEnabled(t)
+	input := bytes.Replace(
+		currentPermissionDecisionPatchFixtureWithDenyTelemetry(t),
+		[]byte("if(q!==null)return{decision:q,input:z};"),
+		[]byte("if(q!==null)return{decision:q,input:r};"),
+		1,
+	)
+
+	_, _, err := applyBypassPermissionDecisionPatch(input, nil, false)
+	if err == nil || !strings.Contains(err.Error(), "artifact guard variables did not match") {
+		t.Fatalf("expected mismatched artifact-guard input to fail closed, got %v", err)
+	}
+}
+
+func TestBypassPermissionDecisionPatch_CurrentShapeRejectsInsufficientSpace(t *testing.T) {
+	requireExePatchEnabled(t)
+	input := currentPermissionDecisionPatchFixtureWithDenyTelemetry(t)
+	anchor := []byte(permissionDecisionAskRuleAnchorV2)
+	anchorIdx := bytes.Index(input, anchor)
+	if anchorIdx < 0 {
+		t.Fatal("current fixture is missing the ask-rule anchor")
+	}
+	logStart := bytes.LastIndex(input[:anchorIdx], []byte("return t(`"))
+	closingRel := bytes.Index(input[anchorIdx:], []byte("`),"))
+	if logStart < 0 || closingRel < 0 {
+		t.Fatal("current fixture is missing the ask-rule telemetry call")
+	}
+	logEnd := anchorIdx + closingRel + len("`),")
+	shortLog := []byte("return t(`" + string(anchor) + "`),")
+	shortInput := append([]byte{}, input[:logStart]...)
+	shortInput = append(shortInput, shortLog...)
+	shortInput = append(shortInput, input[logEnd:]...)
+
+	_, _, err := applyBypassPermissionDecisionPatch(shortInput, nil, false)
+	if err == nil || !strings.Contains(err.Error(), "exceeds removed telemetry space") {
+		t.Fatalf("expected insufficient fixed-length space to fail closed, got %v", err)
+	}
+}
+
 func TestBypassPermissionDecisionPatch_HookAskFloorShapeFailsClosed(t *testing.T) {
 	requireExePatchEnabled(t)
 	input := bytes.Replace(
@@ -449,6 +541,21 @@ func hookAskFloorPermissionDecisionPatchFixture() []byte {
 
 func latestHookAskFloorPermissionDecisionPatchFixture() []byte {
 	return []byte("async function oYn(e,n,r,s,g,h,y){if(tSe(n))return{decision:{behavior:\"allow\",updatedInput:r},input:r};let w=s.requireCanUseTool;if(e?.behavior===\"deny\")return zJ(e,{tool:n,input:r,toolUseContext:s,canUseTool:g,assistantMessage:h,toolUseID:y});if(e?.behavior!==\"allow\"&&e?.behavior!==\"ask\")return{decision:await g(n,r,s,h,y),input:r};let M=e.behavior,L=e.updatedInput??r,j=await iC(n,L,{...s,toolUseId:y},{hookUpdatedInput:e.updatedInput});if(j?.behavior===\"deny\")return zJ(j,{tool:n,input:L,toolUseContext:s,canUseTool:g,assistantMessage:h,toolUseID:y});if(j?.behavior===\"ask\"){let he=M===\"ask\";return t(`Hook returned '${M}', but ask rule/safety check requires full permission pipeline${he?\" (hookAskFloor — a classifier allow re-surfaces as this ask)\":\"\"}`),{decision:await g(n,L,he?{...s,hookAskFloor:!0}:s,h,y),input:L}}if(M===\"allow\"){if(w)return t(\"Hook approved tool use for ${n.name}, but canUseTool is required\"),{decision:await g(n,L,s,h,y),input:L};if(!n.requiresUserInteraction?.())return zJ(e,{tool:n,input:L,toolUseContext:s,canUseTool:g,assistantMessage:h,toolUseID:y})}return zJ(e,{tool:n,input:L,toolUseContext:s,canUseTool:g,assistantMessage:h,toolUseID:y})}")
+}
+
+func currentPermissionDecisionPatchFixture() []byte {
+	return []byte("async function T0o(e,n,r,s,g,h,S){if(Gve(n))return{decision:{behavior:\"allow\",updatedInput:r},input:r};let w=s.requireCanUseTool;if(e?.behavior===\"deny\")return mpe(lpe(e),{tool:n,input:r,toolPermissionContext:s,canUseTool:g,assistantMessage:h,toolUseID:S});if(e?.behavior!==\"allow\"&&e?.behavior!==\"ask\")return{decision:await g(n,r,s,h,S),input:r};let H=e.behavior,z=Vje(e,r),q=TUe(z);if(q!==null)return{decision:q,input:z};let Y=await fA(n,z,{...s,toolUseId:S},{hookUpdatedInput:e.updatedInput})??await XBo(n,z,s,h,S);if(Y?.behavior===\"deny\")return mpe(lpe(Y),{tool:n,input:z,toolPermissionContext:s,canUseTool:g,assistantMessage:h,toolUseID:S});if(Y?.behavior===\"ask\"){let he=H===\"ask\";return t(`Hook returned '${H}' for ${n.name}, but an ask rule, a safety check or a ToolHost's person-only ask requires the full permission pipeline${he?\" (hookAskFloor — a classifier allow re-surfaces as this ask)\":\"\"}`),{decision:await g(n,z,he?{...s,hookAskFloor:!0}:s,h,S),input:z}}if(H===\"allow\"){if(w)return t(`Hook approved tool use for ${n.name}, but canUseTool is required`),mpe(lpe(e),{tool:n,input:z,toolPermissionContext:s,canUseTool:g,assistantMessage:h,toolUseID:S});if(autoMode)return t(\"Hook approved tool use in auto mode; auto mode requires classifier adjudication\"),{decision:await g(n,z,s,h,S),input:z}}return tue(e,{tool:n,input:z,toolPermissionContext:s,canUseTool:g,assistantMessage:h,toolUseID:S})}")
+}
+
+func currentPermissionDecisionPatchFixtureWithDenyTelemetry(t *testing.T) []byte {
+	t.Helper()
+	input := currentPermissionDecisionPatchFixture()
+	before := []byte(`if(Y?.behavior==="deny")return mpe(lpe(Y),{tool:n,input:z,toolPermissionContext:s,canUseTool:g,assistantMessage:h,toolUseID:S});`)
+	after := []byte("if(Y?.behavior===\"deny\")return t(`Hook returned '${H}' for ${n.name}, but deny rule overrides (deny's reason type: ${Y.decisionReason?.type??\"none\"})`),mpe(lpe(Y),{tool:n,input:z,toolPermissionContext:s,canUseTool:g,assistantMessage:h,toolUseID:S});")
+	if !bytes.Contains(input, before) {
+		t.Fatal("current fixture is missing its rule-deny path")
+	}
+	return bytes.Replace(input, before, after, 1)
 }
 
 func TestRemoteSettingsDisablePatch_ReplacesPaths(t *testing.T) {

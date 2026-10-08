@@ -342,10 +342,10 @@ jobs:
         run: |
           go test ./internal/cli -run '^TestClaudePatch(Integration(|RetriesKnownFailure)|RulesIntegration|BypassRuntimeIntegration)$' -count=1
 
-      - name: Claude patch compatibility matrix (2.1.222, 2.1.223, and 2.1.252)
+      - name: Claude patch compatibility matrix (2.1.222, 2.1.223, 2.1.252, 2.1.280, and 2.1.290)
         env:
           CLAUDE_PATCH_TEST: "1"
-          CLAUDE_PATCH_VERSION_MATRIX: "2.1.222,2.1.223,2.1.252"
+          CLAUDE_PATCH_VERSION_MATRIX: "2.1.222,2.1.223,2.1.252,2.1.280,2.1.290"
         run: go test ./internal/cli -run '^TestClaudePatchRegressionMatrix$' -count=1
 
       - name: Claude install+launch smoke (Linux/macOS)
