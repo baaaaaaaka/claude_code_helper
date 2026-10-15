@@ -429,6 +429,82 @@ func TestBypassPermissionDecisionPatch_CurrentShapePreservesNativePipeline(t *te
 	}
 }
 
+func TestBypassPermissionDecisionPatch_PlanModeShapePreservesNativePipeline(t *testing.T) {
+	requireExePatchEnabled(t)
+	input := planModePermissionDecisionPatchFixture()
+
+	out, stats, err := applyBypassPermissionDecisionPatch(input, nil, false)
+	if err != nil {
+		t.Fatalf("applyBypassPermissionDecisionPatch error: %v", err)
+	}
+	if len(out) != len(input) {
+		t.Fatalf("expected output length %d, got %d", len(input), len(out))
+	}
+	for _, want := range []string{
+		`if(e?.behavior==="deny")return t("hook denied"),Kwe(e,`,
+		`if(s.getAppState().toolPermissionContext.mode==="bypassPermissions")return{decision:{behavior:"allow",updatedInput:V,decisionReason:{type:"mode",mode:"bypassPermissions"}},input:V};`,
+		`let be=await sT(n,V,{...s,toolUseId:S},{hookUpdatedInput:e.updatedInput,planModeWriteFloor:K==="allow",...ye!==void 0&&{crashIsObjection:!0}})??await ads(n,V,s,y,S);`,
+		`if(be?.behavior==="deny")return Kwe(Jde(be),`,
+		`if(be?.behavior==="ask"&&ye!==void 0)return m("permission_host_worded_ask","pipeline_also_asks")`,
+		`if(be?.behavior==="ask"){let Te=K==="ask";return {decision:await h(n,V,Te?{...s,hookAskFloor:!0}:s,y,S),input:V}}`,
+		permissionDecisionPatchMarkerV4,
+	} {
+		if !bytes.Contains(out, []byte(want)) {
+			t.Fatalf("expected patched function to preserve %q", want)
+		}
+	}
+	if bytes.Contains(out, []byte(permissionDecisionAskRuleAnchorV3)) {
+		t.Fatalf("expected ask-rule telemetry anchor to be removed")
+	}
+
+	hookDenyIdx := bytes.Index(out, []byte(`if(e?.behavior==="deny")`))
+	inputGuardIdx := bytes.Index(out, []byte(`if(Se!==null)return{decision:Se,input:V};`))
+	bypassIdx := bytes.Index(out, []byte(`toolPermissionContext.mode==="bypassPermissions"`))
+	nativeRulesIdx := bytes.Index(out, []byte(`let be=await sT(`))
+	nativeDenyIdx := bytes.Index(out, []byte(`if(be?.behavior==="deny")`))
+	hostAskIdx := bytes.Index(out, []byte(`if(be?.behavior==="ask"&&ye!==void 0)`))
+	genericAskIdx := bytes.Index(out, []byte(`if(be?.behavior==="ask"){`))
+	if hookDenyIdx < 0 || inputGuardIdx < 0 || bypassIdx < 0 || nativeRulesIdx < 0 || nativeDenyIdx < 0 || hostAskIdx < 0 || genericAskIdx < 0 ||
+		hookDenyIdx >= bypassIdx || inputGuardIdx >= bypassIdx || bypassIdx >= nativeRulesIdx || nativeRulesIdx >= nativeDenyIdx || nativeDenyIdx >= hostAskIdx || hostAskIdx >= genericAskIdx {
+		t.Fatalf("expected hook/input guards before bypass, with the native deny and ask flow retained")
+	}
+	if stats.Segments != 1 || stats.Eligible != 1 || stats.Replacements != 1 || stats.Changed != 1 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+
+	out2, stats2, err := applyBypassPermissionDecisionPatch(out, nil, false)
+	if err != nil {
+		t.Fatalf("reapply applyBypassPermissionDecisionPatch error: %v", err)
+	}
+	if !bytes.Equal(out2, out) {
+		t.Fatalf("expected reapply to keep output unchanged")
+	}
+	if stats2.Eligible != 1 || stats2.Replacements != 1 || stats2.Changed != 0 {
+		t.Fatalf("unexpected reapply stats: %+v", stats2)
+	}
+}
+
+func TestBypassPermissionDecisionPatch_PlanModeShapeFailsClosed(t *testing.T) {
+	requireExePatchEnabled(t)
+	input := bytes.Replace(
+		planModePermissionDecisionPatchFixture(),
+		[]byte("planModeWriteFloor:"),
+		[]byte("planModeOption:"),
+		1,
+	)
+
+	out, stats, err := applyBypassPermissionDecisionPatch(input, nil, false)
+	if err != nil {
+		t.Fatalf("applyBypassPermissionDecisionPatch error: %v", err)
+	}
+	if !bytes.Equal(out, input) {
+		t.Fatalf("expected unknown plan-mode shape to remain unchanged")
+	}
+	if stats.Segments != 1 || stats.Eligible != 0 || stats.Replacements != 0 || stats.Changed != 0 {
+		t.Fatalf("expected unknown plan-mode shape to fail closed, got %+v", stats)
+	}
+}
+
 func TestBypassPermissionDecisionPatch_CurrentShapeFailsClosed(t *testing.T) {
 	requireExePatchEnabled(t)
 	input := bytes.Replace(
@@ -541,6 +617,22 @@ func hookAskFloorPermissionDecisionPatchFixture() []byte {
 
 func latestHookAskFloorPermissionDecisionPatchFixture() []byte {
 	return []byte("async function oYn(e,n,r,s,g,h,y){if(tSe(n))return{decision:{behavior:\"allow\",updatedInput:r},input:r};let w=s.requireCanUseTool;if(e?.behavior===\"deny\")return zJ(e,{tool:n,input:r,toolUseContext:s,canUseTool:g,assistantMessage:h,toolUseID:y});if(e?.behavior!==\"allow\"&&e?.behavior!==\"ask\")return{decision:await g(n,r,s,h,y),input:r};let M=e.behavior,L=e.updatedInput??r,j=await iC(n,L,{...s,toolUseId:y},{hookUpdatedInput:e.updatedInput});if(j?.behavior===\"deny\")return zJ(j,{tool:n,input:L,toolUseContext:s,canUseTool:g,assistantMessage:h,toolUseID:y});if(j?.behavior===\"ask\"){let he=M===\"ask\";return t(`Hook returned '${M}', but ask rule/safety check requires full permission pipeline${he?\" (hookAskFloor — a classifier allow re-surfaces as this ask)\":\"\"}`),{decision:await g(n,L,he?{...s,hookAskFloor:!0}:s,h,y),input:L}}if(M===\"allow\"){if(w)return t(\"Hook approved tool use for ${n.name}, but canUseTool is required\"),{decision:await g(n,L,s,h,y),input:L};if(!n.requiresUserInteraction?.())return zJ(e,{tool:n,input:L,toolUseContext:s,canUseTool:g,assistantMessage:h,toolUseID:y})}return zJ(e,{tool:n,input:L,toolUseContext:s,canUseTool:g,assistantMessage:h,toolUseID:y})}")
+}
+
+func planModePermissionDecisionPatchFixture() []byte {
+	return []byte(`async function __r(e,n,r,s,h,y,S){if(b6(n))return{decision:{behavior:"allow",updatedInput:r},input:r};
+let w=Rue();if(w!==null)return{decision:w,input:r};
+let H=s.requireCanUseTool;
+if(e?.behavior==="deny")return t("hook denied"),Kwe(e,{tool:n,input:r,toolUseContext:s,canUseTool:h,assistantMessage:y,toolUseID:S});
+if(e?.behavior!=="allow"&&e?.behavior!=="ask")return{decision:await h(n,r,s,y,S),input:r};
+let K=e.behavior,V=Vwe(e,r),Q=e.behavior==="ask"?Qcr(e,V):e,ye=Q.behavior==="ask"&&Q.hostDisplay!==void 0?Q:void 0,Se=b3(V);if(Se!==null)return{decision:Se,input:V};
+let be=await sT(n,V,{...s,toolUseId:S},{hookUpdatedInput:e.updatedInput,planModeWriteFloor:K==="allow",...ye!==void 0&&{crashIsObjection:!0}})??await ads(n,V,s,y,S);
+if(be?.behavior==="deny")return t("Hook returned for tool, but deny rule overrides (deny's reason type: none)"),Kwe(Jde(be),{tool:n,input:V,toolUseContext:s,canUseTool:h,assistantMessage:y,toolUseID:S});
+if(be?.behavior==="ask"&&ye!==void 0)return m("permission_host_worded_ask","pipeline_also_asks"),{decision:Jce(n.name,"plain prompt",{hostWorded:!0}),input:V};
+if(be?.behavior==="ask"){let Te=K==="ask";return t("Hook returned for tool, but an ask rule, a safety check, a ToolHost's person-only ask or plan mode requires the full permission pipeline (hookAskFloor — classifier allow returns as this ask)"),{decision:await h(n,V,Te?{...s,hookAskFloor:!0}:s,y,S),input:V}}
+if(K==="allow"){if(H)return t("canUseTool is required"),{decision:await h(n,V,s,y,S),input:V};return{decision:e,input:V}}
+return Kwe(Q,{tool:n,input:V,toolUseContext:s,canUseTool:h,assistantMessage:y,toolUseID:S})
+}`)
 }
 
 func currentPermissionDecisionPatchFixture() []byte {
