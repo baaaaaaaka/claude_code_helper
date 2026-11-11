@@ -295,3 +295,43 @@ func TestHTTPProxyCONNECTPreservesHalfCloseResponse(t *testing.T) {
 	}
 	<-peerDone
 }
+
+// The HTTP transport detaches its dial context from request cancellation.
+// A canceled request must still cancel its pending SOCKS handshake.
+type cancelObservedDialer struct{ started, canceled chan struct{} }
+
+func (d cancelObservedDialer) Dial(n, a string) (net.Conn, error) {
+	return d.DialContext(context.Background(), n, a)
+}
+func (d cancelObservedDialer) DialContext(ctx context.Context, _, _ string) (net.Conn, error) {
+	close(d.started)
+	<-ctx.Done()
+	close(d.canceled)
+	return nil, ctx.Err()
+}
+func TestHTTPProxyRequestCancellationStopsTransportDial(t *testing.T) {
+	d := cancelObservedDialer{make(chan struct{}), make(chan struct{})}
+	p := NewHTTPProxy(d, Options{})
+	defer p.Close(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "http://example.org/", nil).WithContext(ctx)
+	done := make(chan struct{})
+	go func() { p.serveHTTP(httptest.NewRecorder(), req); close(done) }()
+	select {
+	case <-d.started:
+	case <-time.After(time.Second):
+		t.Fatal("transport did not start dial")
+	}
+	cancel()
+	select {
+	case <-d.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("HTTP request canceled but transport dial kept running")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("HTTP handler did not finish")
+	}
+}

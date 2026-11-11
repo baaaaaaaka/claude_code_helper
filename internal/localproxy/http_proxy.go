@@ -79,6 +79,9 @@ func NewHTTPProxy(d Dialer, opts Options) *HTTPProxy {
 // Capture the underlying TCP connection so CONNECT can preserve TCP half-close
 // semantics. The SOCKS library's returned wrapper hides CloseWrite.
 type rawSOCKSConnKey struct{}
+
+// Transport preserves context values while detaching request cancellation for dials.
+type requestDialContextKey struct{}
 type socksForward struct{ net.Dialer }
 
 func (d *socksForward) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -157,6 +160,13 @@ func (p *HTTPProxy) dialContext(ctx context.Context, network, addr string) (net.
 	defer cancel()
 	stop := context.AfterFunc(p.dialRoot, cancel)
 	defer stop()
+	if requestCtx, ok := ctx.Value(requestDialContextKey{}).(context.Context); ok {
+		stopRequest := context.AfterFunc(requestCtx, cancel)
+		defer stopRequest()
+		if requestCtx.Err() != nil {
+			cancel()
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -384,7 +394,7 @@ func (p *HTTPProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Minimal forward-proxy support for absolute-form requests.
 	// Many clients will only use CONNECT for HTTPS; this covers plain HTTP too.
 
-	outReq := r.Clone(r.Context())
+	outReq := r.Clone(context.WithValue(r.Context(), requestDialContextKey{}, r.Context()))
 	outReq.RequestURI = ""
 	outReq.Header.Del("Proxy-Connection")
 
