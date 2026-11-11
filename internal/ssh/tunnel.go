@@ -74,10 +74,15 @@ func BuildArgs(c TunnelConfig) ([]string, error) {
 type Tunnel struct {
 	cfg TunnelConfig
 
-	mu      sync.Mutex
-	cmd     *exec.Cmd
-	waitErr error
-	done    chan struct{}
+	mu           sync.Mutex
+	cmd          *exec.Cmd
+	waitErr      error
+	done         chan struct{}
+	diagnosticMu sync.Mutex
+	diagnostic   string
+	bindingReady bool
+	stopOnce     sync.Once
+	stopErr      error
 }
 
 func NewTunnel(cfg TunnelConfig) (*Tunnel, error) {
@@ -93,7 +98,7 @@ func NewTunnel(cfg TunnelConfig) (*Tunnel, error) {
 	}
 	t.cmd.Stdin = cfg.Stdin
 	t.cmd.Stdout = cfg.Stdout
-	t.cmd.Stderr = cfg.Stderr
+	t.cmd.Stderr = tunnelDiagnostics{t: t}
 	return t, nil
 }
 
@@ -109,7 +114,7 @@ func (t *Tunnel) PID() int {
 func (t *Tunnel) Start() error {
 	t.mu.Lock()
 	cmd := t.cmd
-	t.mu.Unlock()
+	defer t.mu.Unlock()
 
 	if cmd == nil {
 		return errors.New("tunnel not initialized")
@@ -136,7 +141,47 @@ func (t *Tunnel) Wait() error {
 	<-t.done
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.waitErr != nil && t.BindConflict() {
+		return fmt.Errorf("%w: %v", ErrBindConflict, t.waitErr)
+	}
 	return t.waitErr
+}
+
+var ErrBindConflict = errors.New("SSH SOCKS port already in use")
+
+type tunnelDiagnostics struct{ t *Tunnel }
+
+func (w tunnelDiagnostics) Write(b []byte) (int, error) {
+	t := w.t
+	t.diagnosticMu.Lock()
+	t.diagnostic += string(b)
+	if len(t.diagnostic) > 8192 {
+		t.diagnostic = t.diagnostic[len(t.diagnostic)-8192:]
+	}
+	if strings.Contains(t.diagnostic, "Local forwarding listening on 127.0.0.1 port "+strconv.Itoa(t.cfg.SocksPort)+".") {
+		t.bindingReady = true
+	}
+	t.diagnosticMu.Unlock()
+	// Keep operational errors, not the verbose protocol trace used for startup confirmation.
+	if t.cfg.Stderr != nil {
+		for _, line := range strings.SplitAfter(string(b), "\n") {
+			if !strings.HasPrefix(line, "debug") {
+				_, _ = io.WriteString(t.cfg.Stderr, line)
+			}
+		}
+	}
+	return len(b), nil
+}
+func (t *Tunnel) BindingReady() bool {
+	t.diagnosticMu.Lock()
+	defer t.diagnosticMu.Unlock()
+	return t.bindingReady
+}
+func (t *Tunnel) BindConflict() bool {
+	t.diagnosticMu.Lock()
+	defer t.diagnosticMu.Unlock()
+	s := strings.ToLower(t.diagnostic)
+	return strings.Contains(s, "address already in use") || strings.Contains(s, "only one usage of each socket address")
 }
 
 func (t *Tunnel) Stop(grace time.Duration) error {
@@ -148,6 +193,10 @@ func (t *Tunnel) Stop(grace time.Duration) error {
 		return nil
 	}
 
+	t.stopOnce.Do(func() { t.stopErr = t.stopStarted(cmd, grace) })
+	return t.stopErr
+}
+func (t *Tunnel) stopStarted(cmd *exec.Cmd, grace time.Duration) error {
 	_ = cmd.Process.Signal(os.Interrupt)
 
 	select {

@@ -263,3 +263,24 @@ func startHealthServer(t *testing.T, instanceID string) (port int, closeFn func(
 		_ = ln.Close()
 	}
 }
+
+func TestFindReusableInstanceKeepsRecoveringDaemon(t *testing.T) {
+	prev := procIsAlive
+	procIsAlive = func(int) bool { return true }
+	defer func() { procIsAlive = prev }()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"instanceId":"recovering","backendState":"recovering"}`))
+	})}
+	go srv.Serve(ln)
+	defer srv.Close()
+	hc := NewHealthClient(time.Second)
+	defer hc.Close()
+	instances := []config.Instance{{ID: "recovering", ProfileID: "p", Kind: config.InstanceKindDaemon, DaemonPID: 123, HTTPPort: ln.Addr().(*net.TCPAddr).Port}}
+	if FindReusableInstance(instances, "p", hc) == nil {
+		t.Fatal("recovering daemon would be replaced by another stack")
+	}
+}

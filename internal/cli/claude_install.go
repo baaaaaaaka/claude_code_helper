@@ -643,8 +643,12 @@ func resolveInstallerProxy(ctx context.Context, opts installProxyOptions) (strin
 		return "", nil, err
 	}
 
-	hc := manager.HealthClient{}
+	hc := manager.NewHealthClient(0)
+	defer hc.Close()
 	if inst := manager.FindReusableInstance(opts.Instances, opts.Profile.ID, hc); inst != nil {
+		if err := hc.WaitReady(ctx, inst.HTTPPort, inst.ID); err != nil {
+			return "", nil, err
+		}
 		return fmt.Sprintf("http://127.0.0.1:%d", inst.HTTPPort), nil, nil
 	}
 

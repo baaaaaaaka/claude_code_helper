@@ -365,3 +365,27 @@ Clean up dead or unhealthy instances:
 ```bash
 claude-proxy proxy prune
 ```
+
+### Proxy connection lifecycle
+
+Health checks reuse a command-owned connection pool (one idle connection per
+instance, up to 16 idle connections, 30-second idle timeout). Plain HTTP
+forwarding reuses a proxy-owned pool (up to 64 idle upstream connections,
+eight per destination, 90-second idle timeout). Closing the proxy releases
+upstream connections and CONNECT tunnels, including pending SOCKS handshakes.
+The 10-second SOCKS timeout covers TCP connection and protocol negotiation;
+it does not limit the lifetime of a successful streaming request.
+
+Each proxy admits at most 512 upstream TCP connections and 32 simultaneous
+connection attempts. Overload and SSH recovery return HTTP 503 with
+`Retry-After: 1`; health requests remain available. `proxy list` distinguishes
+`recovering` instances, and `proxy prune` preserves them. New commands wait
+up to 90 seconds for an existing recovering daemon rather than creating
+another proxy. Running commands also allow bounded backend recovery.
+
+SSH restart attempts use capped exponential backoff with jitter. The retry
+budget resets only after 30 seconds of stable operation. Each proxy uses its
+own SSH process, without reusing an SSH ControlMaster. Automatic SOCKS port
+selection retries confirmed bind conflicts up to three attempts; explicitly
+configured ports are not changed. Existing instances started by older
+versions must be restarted after upgrading to release their leaked sockets.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net"
 	"os"
 	"sync"
@@ -31,7 +32,6 @@ var (
 	newHTTPProxy       = func(d localproxy.Dialer, opts localproxy.Options) httpProxy { return localproxy.NewHTTPProxy(d, opts) }
 	newTunnelForStack  = func(profile config.Profile, socksPort int) (tunnel, error) { return newTunnel(profile, socksPort) }
 	waitForTunnelReady = waitForTCPTunnel
-	sleepForRestart    = time.Sleep
 )
 
 type Options struct {
@@ -40,9 +40,11 @@ type Options struct {
 
 	SocksReadyTimeout time.Duration
 
-	MaxRestarts     int
-	RestartBackoff  time.Duration
-	TunnelStopGrace time.Duration
+	MaxRestarts       int
+	RestartBackoff    time.Duration
+	TunnelStopGrace   time.Duration
+	StableWindow      time.Duration
+	MaxRestartBackoff time.Duration
 }
 
 type Stack struct {
@@ -53,10 +55,12 @@ type Stack struct {
 	HTTPAddr  string
 	HTTPPort  int
 
-	mu     sync.Mutex
-	proxy  httpProxy
-	tunnel tunnel
-	closed bool
+	mu        sync.Mutex
+	proxy     httpProxy
+	tunnel    tunnel
+	closed    bool
+	closeOnce sync.Once
+	closeErr  error
 
 	fatalCh chan error
 	stopCh  chan struct{}
@@ -78,6 +82,14 @@ func ValidateProfile(p config.Profile) error {
 }
 
 func Start(profile config.Profile, instanceID string, opts Options) (*Stack, error) {
+	for attempt := 0; ; attempt++ {
+		s, err := startOnce(profile, instanceID, opts)
+		if err == nil || opts.SocksPort != 0 || !errors.Is(err, ssh.ErrBindConflict) || attempt >= 2 {
+			return s, err
+		}
+	}
+}
+func startOnce(profile config.Profile, instanceID string, opts Options) (*Stack, error) {
 	if err := ValidateProfile(profile); err != nil {
 		return nil, err
 	}
@@ -117,20 +129,6 @@ func Start(profile config.Profile, instanceID string, opts Options) (*Stack, err
 	}
 
 	hp := newHTTPProxy(dialer, localproxy.Options{InstanceID: instanceID})
-	httpAddr, err := hp.Start(opts.HTTPListenAddr)
-	if err != nil {
-		return nil, err
-	}
-	_, portStr, err := net.SplitHostPort(httpAddr)
-	if err != nil {
-		_ = hp.Close(context.Background())
-		return nil, err
-	}
-	httpPort, err := parsePort(portStr)
-	if err != nil {
-		_ = hp.Close(context.Background())
-		return nil, err
-	}
 
 	tun, err := newTunnelForStack(profile, socksPort)
 	if err != nil {
@@ -142,6 +140,25 @@ func Start(profile config.Profile, instanceID string, opts Options) (*Stack, err
 		return nil, err
 	}
 	if err := waitForTunnelReady(socksAddr, opts.SocksReadyTimeout, tun); err != nil {
+		_ = tun.Stop(opts.TunnelStopGrace)
+		_ = hp.Close(context.Background())
+		return nil, err
+	}
+
+	httpAddr, err := hp.Start(opts.HTTPListenAddr)
+	if err != nil {
+		_ = tun.Stop(opts.TunnelStopGrace)
+		_ = hp.Close(context.Background())
+		return nil, err
+	}
+	_, portStr, err := net.SplitHostPort(httpAddr)
+	if err != nil {
+		_ = tun.Stop(opts.TunnelStopGrace)
+		_ = hp.Close(context.Background())
+		return nil, err
+	}
+	httpPort, err := parsePort(portStr)
+	if err != nil {
 		_ = tun.Stop(opts.TunnelStopGrace)
 		_ = hp.Close(context.Background())
 		return nil, err
@@ -170,90 +187,131 @@ func (s *Stack) HTTPProxyURL() string {
 func (s *Stack) Fatal() <-chan error { return s.fatalCh }
 
 func (s *Stack) Close(ctx context.Context) error {
-	select {
-	case <-s.stopCh:
-		// already closed
-	default:
-		close(s.stopCh)
-	}
-
-	s.mu.Lock()
-	s.closed = true
-	tun := s.tunnel
-	proxy := s.proxy
-	s.tunnel = nil
-	s.proxy = nil
-	s.mu.Unlock()
-
-	var firstErr error
-	if tun != nil {
-		if err := tun.Stop(2 * time.Second); err != nil && firstErr == nil {
-			firstErr = err
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		s.closed = true
+		if s.stopCh != nil {
+			close(s.stopCh)
 		}
-	}
-	if proxy != nil {
-		if err := proxy.Close(ctx); err != nil && firstErr == nil {
-			firstErr = err
+		tun, proxy := s.tunnel, s.proxy
+		s.tunnel = nil
+		s.proxy = nil
+		s.mu.Unlock()
+		var proxyErr error
+		if proxy != nil {
+			proxyErr = proxy.Close(ctx)
 		}
-	}
-	return firstErr
+		if tun != nil {
+			s.closeErr = tun.Stop(2 * time.Second)
+		}
+		if s.closeErr == nil {
+			s.closeErr = proxyErr
+		}
+	})
+	return s.closeErr
 }
 
+func (s *Stack) backend(state string) {
+	s.mu.Lock()
+	p := s.proxy
+	s.mu.Unlock()
+	if p, ok := p.(interface{ SetBackendState(string) }); ok {
+		p.SetBackendState(state)
+	}
+}
+func (s *Stack) restartDelay(opts Options, failures int) bool {
+	d := opts.RestartBackoff
+	capDelay := opts.MaxRestartBackoff
+	if capDelay <= 0 {
+		capDelay = 10 * time.Second
+	}
+	for i := 1; i < failures && d < capDelay; i++ {
+		if d > capDelay/2 {
+			d = capDelay
+		} else {
+			d *= 2
+		}
+	}
+	if d > capDelay {
+		d = capDelay
+	}
+	if d > 0 {
+		d = d*4/5 + time.Duration(rand.Int64N(int64(d/5)+1))
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-s.stopCh:
+		return false
+	case <-timer.C:
+		return !s.stopRequested()
+	}
+}
 func (s *Stack) monitor(opts Options) {
-	restarts := 0
+	failures := 0
+	started := time.Now()
+	stable := opts.StableWindow
+	if stable <= 0 {
+		stable = 30 * time.Second
+	}
 	for {
 		current := s.currentTunnel()
 		if current == nil {
 			return
 		}
 		err := current.Wait()
-
 		if s.stopRequested() {
 			return
 		}
-
-		restarts++
-		if restarts > opts.MaxRestarts {
-			s.fatalCh <- fmt.Errorf("ssh tunnel exited too many times: %w", err)
-			return
+		if time.Since(started) >= stable {
+			failures = 0
 		}
-
-		sleepForRestart(opts.RestartBackoff)
-		if s.stopRequested() {
-			return
+		s.backend("recovering")
+		for {
+			failures++
+			if failures > opts.MaxRestarts {
+				s.backend("failed")
+				s.fatalCh <- fmt.Errorf("ssh tunnel exited too many times: %w", err)
+				return
+			}
+			if !s.restartDelay(opts, failures) {
+				return
+			}
+			tun, terr := newTunnelForStack(s.Profile, s.SocksPort)
+			if terr == nil {
+				// Publish even a starting tunnel so Close owns and stops it while readiness waits.
+				s.mu.Lock()
+				if s.closed {
+					s.mu.Unlock()
+					return
+				}
+				terr = tun.Start()
+				if terr == nil {
+					s.tunnel = tun
+				}
+				s.mu.Unlock()
+				if terr == nil {
+					terr = waitForTunnelReady(fmt.Sprintf("127.0.0.1:%d", s.SocksPort), opts.SocksReadyTimeout, tun)
+					if terr != nil {
+						_ = tun.Stop(opts.TunnelStopGrace)
+					}
+				}
+			}
+			if s.stopRequested() {
+				return
+			}
+			if terr == nil {
+				started = time.Now()
+				s.backend("ready")
+				break
+			}
+			err = terr
+			if failures >= opts.MaxRestarts {
+				s.backend("failed")
+				s.fatalCh <- terr
+				return
+			}
 		}
-
-		tun, terr := newTunnelForStack(s.Profile, s.SocksPort)
-		if terr != nil {
-			s.fatalCh <- terr
-			return
-		}
-		if s.stopRequested() {
-			return
-		}
-		if terr := tun.Start(); terr != nil {
-			s.fatalCh <- terr
-			return
-		}
-		if s.stopRequested() {
-			_ = tun.Stop(opts.TunnelStopGrace)
-			return
-		}
-		if terr := waitForTunnelReady(fmt.Sprintf("127.0.0.1:%d", s.SocksPort), opts.SocksReadyTimeout, tun); terr != nil {
-			_ = tun.Stop(opts.TunnelStopGrace)
-			s.fatalCh <- terr
-			return
-		}
-
-		s.mu.Lock()
-		if s.closed {
-			s.mu.Unlock()
-			_ = tun.Stop(opts.TunnelStopGrace)
-			return
-		}
-		s.tunnel = tun
-		s.mu.Unlock()
-		restarts = 0
 	}
 }
 
@@ -278,7 +336,7 @@ func newTunnel(profile config.Profile, socksPort int) (*ssh.Tunnel, error) {
 		Port:      profile.Port,
 		User:      profile.User,
 		SocksPort: socksPort,
-		ExtraArgs: profile.SSHArgs,
+		ExtraArgs: append([]string{"-o", "ControlMaster=no", "-o", "ControlPath=none", "-v"}, profile.SSHArgs...),
 		BatchMode: true,
 		Stdout:    os.Stderr,
 		Stderr:    os.Stderr,
@@ -315,6 +373,10 @@ func waitForTCPTunnel(addr string, timeout time.Duration, tun tunnel) error {
 			}
 		}
 
+		if own, ok := tun.(interface{ BindingReady() bool }); ok && !own.BindingReady() {
+			time.Sleep(25 * time.Millisecond)
+			continue
+		}
 		c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
 		if err == nil {
 			_ = c.Close()

@@ -143,6 +143,8 @@ jobs:
           go test -race -count=1 \
             ./cmd/claude-proxy/... \
             ./internal/cli/... \
+            ./internal/localproxy/... \
+            ./internal/ssh/... \
             ./internal/stack/... \
             ./internal/manager/...
 

@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -290,7 +291,8 @@ func newProxyListCmd(root *rootOptions) *cobra.Command {
 				return err
 			}
 
-			hc := manager.HealthClient{Timeout: 500 * time.Millisecond}
+			hc := manager.NewHealthClient(500 * time.Millisecond)
+			defer hc.Close()
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
 			_, _ = fmt.Fprintln(w, "INSTANCE\tPROFILE\tPID\tHTTP\tSOCKS\tSTATUS\tLAST_SEEN")
 			for _, inst := range cfg.Instances {
@@ -299,7 +301,11 @@ func newProxyListCmd(root *rootOptions) *cobra.Command {
 					status = "alive"
 					if inst.HTTPPort > 0 {
 						if err := hc.CheckHTTPProxy(inst.HTTPPort, inst.ID); err != nil {
-							status = "unhealthy"
+							if errors.Is(err, manager.ErrRecovering) {
+								status = "recovering"
+							} else {
+								status = "unhealthy"
+							}
 						}
 					}
 				}
@@ -382,7 +388,8 @@ func newProxyPruneCmd(root *rootOptions) *cobra.Command {
 				return err
 			}
 
-			hc := manager.HealthClient{Timeout: 500 * time.Millisecond}
+			hc := manager.NewHealthClient(500 * time.Millisecond)
+			defer hc.Close()
 			removed := 0
 
 			instancesDir := filepath.Join(filepath.Dir(store.Path()), "instances")
@@ -395,7 +402,7 @@ func newProxyPruneCmd(root *rootOptions) *cobra.Command {
 						continue
 					}
 					if inst.HTTPPort > 0 {
-						if err := hc.CheckHTTPProxy(inst.HTTPPort, inst.ID); err != nil {
+						if err := hc.CheckHTTPProxy(inst.HTTPPort, inst.ID); err != nil && !errors.Is(err, manager.ErrRecovering) {
 							removed++
 							_ = os.Remove(filepath.Join(instancesDir, inst.ID+".log"))
 							continue

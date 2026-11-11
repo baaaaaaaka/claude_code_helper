@@ -234,9 +234,12 @@ func runWithExistingInstanceOptions(
 	patchOutcome *patchOutcome,
 	opts runTargetOptions,
 ) error {
+	if err := hc.WaitReady(ctx, inst.HTTPPort, inst.ID); err != nil {
+		return err
+	}
 	proxyURL := fmt.Sprintf("http://127.0.0.1:%d", inst.HTTPPort)
 	return runTargetSupervisedWithOptions(ctx, cmdArgs, proxyURL, func() error {
-		return hc.CheckHTTPProxy(inst.HTTPPort, inst.ID)
+		return hc.CheckHTTPProxyContext(ctx, inst.HTTPPort, inst.ID)
 	}, patchOutcome, nil, opts)
 }
 
@@ -269,9 +272,10 @@ func runWithNewStackOptions(
 		return fmt.Errorf("missing command")
 	}
 
-	hc := manager.HealthClient{Timeout: 1 * time.Second}
+	hc := manager.NewHealthClient(1 * time.Second)
+	defer hc.Close()
 	return runTargetSupervisedWithOptions(ctx, cmdArgs, proxyURL, func() error {
-		return hc.CheckHTTPProxy(st.HTTPPort, instanceID)
+		return hc.CheckHTTPProxyContext(ctx, st.HTTPPort, instanceID)
 	}, patchOutcome, st.Fatal(), opts)
 }
 
@@ -295,7 +299,8 @@ func runWithProfileOptions(
 	patchOutcome *patchOutcome,
 	opts runTargetOptions,
 ) error {
-	hc := manager.HealthClient{Timeout: 1 * time.Second}
+	hc := manager.NewHealthClient(1 * time.Second)
+	defer hc.Close()
 	if inst := manager.FindReusableInstance(instances, profile.ID, hc); inst != nil {
 		return runWithExistingInstanceOptions(ctx, hc, *inst, cmdArgs, patchOutcome, opts)
 	}
@@ -591,6 +596,19 @@ func runTargetOnce(
 	return runTargetOnceWithOptions(ctx, cmdArgs, proxyURL, healthCheck, fatalCh, stdoutBuf, stderrBuf, defaultRunTargetOptions())
 }
 
+// recoveryBudget preserves the existing failure policy while allowing a bounded SSH recovery.
+type recoveryBudget struct{ since time.Time }
+
+func (b *recoveryBudget) Allow(err error, now time.Time) bool {
+	if !errors.Is(err, manager.ErrRecovering) {
+		return false
+	}
+	if b.since.IsZero() {
+		b.since = now
+	}
+	return now.Sub(b.since) < 90*time.Second
+}
+
 func runTargetOnceWithOptions(
 	ctx context.Context,
 	cmdArgs []string,
@@ -677,6 +695,7 @@ func runTargetOnceWithOptions(
 	}
 
 	failures := 0
+	var recovery recoveryBudget
 	for {
 		select {
 		case err := <-done:
@@ -694,6 +713,9 @@ func runTargetOnceWithOptions(
 				continue
 			}
 			if err := healthCheck(); err != nil {
+				if recovery.Allow(err, time.Now()) {
+					continue
+				}
 				failures++
 				if failures >= 3 {
 					_ = terminateProcess(cmd.Process, 2*time.Second)
@@ -703,6 +725,7 @@ func runTargetOnceWithOptions(
 				continue
 			}
 			failures = 0
+			recovery = recoveryBudget{}
 		case <-tickerChan(runtimeTicker):
 			if !looksLikeYoloRuntimeFailure(capturedTTYOutput(stdoutBuf, stderrBuf)) {
 				continue

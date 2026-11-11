@@ -40,13 +40,25 @@ func TestRunTargetOnceSuccess(t *testing.T) {
 
 func TestRunWithExistingInstance(t *testing.T) {
 	shell := requireShell(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"instanceId":"inst-1"}`))
+	})}
+	go srv.Serve(ln)
+	defer srv.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+	hc := manager.NewHealthClient(time.Second)
+	defer hc.Close()
 	inst := config.Instance{
 		ID:        "inst-1",
 		ProfileID: "p1",
-		HTTPPort:  0,
+		HTTPPort:  port,
 		DaemonPID: os.Getpid(),
 	}
-	if err := runWithExistingInstance(context.Background(), manager.HealthClient{Timeout: time.Second}, inst, []string{shell, "-c", "exit 0"}, nil); err != nil {
+	if err := runWithExistingInstance(context.Background(), hc, inst, []string{shell, "-c", "exit 0"}, nil); err != nil {
 		t.Fatalf("runWithExistingInstance error: %v", err)
 	}
 }

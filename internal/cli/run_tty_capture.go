@@ -79,6 +79,7 @@ func runTargetOnceWithCapturedTTYOutput(
 	defer runtimeTicker.Stop()
 
 	failures := 0
+	var recovery recoveryBudget
 	for {
 		select {
 		case err := <-waitDone:
@@ -99,6 +100,9 @@ func runTargetOnceWithCapturedTTYOutput(
 				continue
 			}
 			if err := healthCheck(); err != nil {
+				if recovery.Allow(err, time.Now()) {
+					continue
+				}
 				failures++
 				if failures >= 3 {
 					_ = session.Terminate(2 * time.Second)
@@ -108,6 +112,7 @@ func runTargetOnceWithCapturedTTYOutput(
 				continue
 			}
 			failures = 0
+			recovery = recoveryBudget{}
 		case <-runtimeTicker.C:
 			if !opts.YoloEnabled || !looksLikeYoloRuntimeFailure(capturedTTYOutput(stdoutBuf, stderrBuf)) {
 				continue

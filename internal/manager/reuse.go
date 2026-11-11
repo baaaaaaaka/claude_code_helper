@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"errors"
 	"time"
 
 	"github.com/baaaaaaaka/claude_code_helper/internal/config"
@@ -25,7 +26,7 @@ func FindReusableInstance(instances []config.Instance, profileID string, hc Heal
 		if !isReusableDaemonInstance(*inst) {
 			continue
 		}
-		if err := hc.CheckHTTPProxy(inst.HTTPPort, inst.ID); err != nil {
+		if err := hc.CheckHTTPProxy(inst.HTTPPort, inst.ID); err != nil && !errors.Is(err, ErrRecovering) {
 			continue
 		}
 

@@ -102,13 +102,11 @@ func withStackTestHooks(t *testing.T, dialerFn func(string, time.Duration) (loca
 	prevProxy := newHTTPProxy
 	prevTunnel := newTunnelForStack
 	prevWait := waitForTunnelReady
-	prevSleep := sleepForRestart
 	t.Cleanup(func() {
 		newSOCKS5Dialer = prevDialer
 		newHTTPProxy = prevProxy
 		newTunnelForStack = prevTunnel
 		waitForTunnelReady = prevWait
-		sleepForRestart = prevSleep
 	})
 
 	if dialerFn != nil {
@@ -123,7 +121,6 @@ func withStackTestHooks(t *testing.T, dialerFn func(string, time.Duration) (loca
 	if waitFn != nil {
 		waitForTunnelReady = waitFn
 	}
-	sleepForRestart = func(time.Duration) {}
 }
 
 func TestStartSuccessWithInjectedDependencies(t *testing.T) {
