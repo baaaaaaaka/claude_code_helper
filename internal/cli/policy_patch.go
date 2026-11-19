@@ -26,6 +26,7 @@ const (
 	permissionDecisionAskRuleAnchor   = "ask rule/safety check requires full permission pipeline"
 	permissionDecisionAskRuleAnchorV2 = "an ask rule, a safety check or a ToolHost's person-only ask requires the full permission pipeline"
 	permissionDecisionAskRuleAnchorV3 = "a safety check, a ToolHost's person-only ask or plan mode requires the full permission pipeline"
+	permissionDecisionAskRuleAnchorV4 = "the rule check objected or could not run, so the full permission pipeline decides"
 	permissionDecisionPatchMarkerV1   = "tengu_bypass_permission_decision_v1"
 	permissionDecisionPatchMarker     = "tengu_bypass_permission_decision_v2"
 	permissionDecisionPatchMarkerV3   = "tengu_bypass_permission_v3"
@@ -41,6 +42,10 @@ var permissionDecisionFunctionRe = regexp.MustCompile(`async function\s+([A-Za-z
 
 // Claude 2.1.222 moved the awaited rule decision into a comma-separated let declaration.
 var permissionDecisionRuleCheckRe = regexp.MustCompile(`(?:\blet\s+|,)\s*([A-Za-z0-9_$]+)\s*=\s*await\s+([A-Za-z0-9_$]+)\s*\(`)
+var planModePermissionRuleCheckRe = regexp.MustCompile(`^\s*let\s+(?:([A-Za-z_$][A-Za-z0-9_$]*)\s*,\s*)?([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*await\s+[A-Za-z_$][A-Za-z0-9_$]*\s*\(`)
+var permissionDecisionOnCheckedRe = regexp.MustCompile(`onChecked:\(([A-Za-z_$][A-Za-z0-9_$]*)\)=>\{([A-Za-z_$][A-Za-z0-9_$]*)=([A-Za-z_$][A-Za-z0-9_$]*)\}`)
+var permissionDecisionHostAskRe = regexp.MustCompile(`^if\([A-Za-z_$][A-Za-z0-9_$]*\?\.behavior==="ask"&&[A-Za-z_$][A-Za-z0-9_$]*!==void 0\)return [A-Za-z_$][A-Za-z0-9_$]*\("permission_host_worded_ask","pipeline_also_asks"\),\{decision:`)
+var permissionDecisionReturnLogRe = regexp.MustCompile(`return ([A-Za-z_$][A-Za-z0-9_$]*)\(["\x60]`)
 var permissionDecisionSpecialAllowRe = regexp.MustCompile(`\{if\(([A-Za-z0-9_$]+)\(([A-Za-z0-9_$]+)\)\)return\{decision:\{behavior:"allow",updatedInput:([A-Za-z0-9_$]+)\},input:([A-Za-z0-9_$]+)\};`)
 
 type permissionDecisionRuleCheck struct {
@@ -394,6 +399,7 @@ func applyBypassPermissionDecisionPatch(data []byte, log io.Writer, preview bool
 		[]byte(permissionDecisionAskRuleAnchor),
 		[]byte(permissionDecisionAskRuleAnchorV2),
 		[]byte(permissionDecisionAskRuleAnchorV3),
+		[]byte(permissionDecisionAskRuleAnchorV4),
 	}
 	markerCount := bytes.Count(data, []byte(permissionDecisionPatchMarker)) +
 		bytes.Count(data, []byte(permissionDecisionPatchMarkerV1)) +
@@ -436,16 +442,17 @@ func applyBypassPermissionDecisionPatch(data []byte, log io.Writer, preview bool
 			continue
 		}
 		segment := data[start:end]
-		if !looksLikePermissionDecisionFunction(segment) {
+		if !looksLikePermissionDecisionFunction(segment, string(anchor)) {
 			continue
 		}
 		var replacement string
 		var err error
-		if bytes.Contains(segment, []byte(permissionDecisionAskRuleAnchorV3)) {
-			replacement, err = buildPlanModePermissionDecisionReplacement(segment)
-		} else if bytes.Contains(segment, []byte(permissionDecisionAskRuleAnchorV2)) {
+		switch string(anchor) {
+		case permissionDecisionAskRuleAnchorV3, permissionDecisionAskRuleAnchorV4:
+			replacement, err = buildPlanModePermissionDecisionReplacement(segment, anchor)
+		case permissionDecisionAskRuleAnchorV2:
 			replacement, err = buildCurrentPermissionDecisionReplacement(segment)
-		} else {
+		default:
 			replacement, err = buildBypassPermissionDecisionReplacement(segment)
 		}
 		if err != nil {
@@ -655,21 +662,21 @@ func findPermissionDecisionFunction(data []byte, anchorIdx int) (int, int, bool)
 	return start, blockEnd, true
 }
 
-func looksLikePermissionDecisionFunction(segment []byte) bool {
+func looksLikePermissionDecisionFunction(segment []byte, anchor string) bool {
 	if !bytes.Contains(segment, []byte("canUseTool is required")) {
 		return false
 	}
-	if bytes.Contains(segment, []byte(permissionDecisionAskRuleAnchorV3)) {
+	switch anchor {
+	case permissionDecisionAskRuleAnchorV3, permissionDecisionAskRuleAnchorV4:
 		return bytes.Contains(segment, []byte("hookUpdatedInput")) &&
 			bytes.Contains(segment, []byte("planModeWriteFloor")) &&
 			bytes.Contains(segment, []byte("crashIsObjection")) &&
 			bytes.Contains(segment, []byte("permission_host_worded_ask"))
-	}
-	if bytes.Contains(segment, []byte(permissionDecisionAskRuleAnchorV2)) {
+	case permissionDecisionAskRuleAnchorV2:
 		return bytes.Contains(segment, []byte("hookUpdatedInput"))
+	default:
+		return bytes.Contains(segment, []byte(".requiresUserInteraction?.()"))
 	}
-	return bytes.Contains(segment, []byte(".requiresUserInteraction?.()")) &&
-		bytes.Contains(segment, []byte(permissionDecisionAskRuleAnchor))
 }
 
 func buildCurrentPermissionDecisionReplacement(segment []byte) (string, error) {
@@ -835,7 +842,7 @@ func buildCurrentPermissionDecisionReplacement(segment []byte) (string, error) {
 // adds ToolHost worded asks and plan-mode write floors. It inserts the bypass
 // after the hook and normalized-input validation paths, while leaving the
 // native rule pipeline intact for every other permission mode.
-func buildPlanModePermissionDecisionReplacement(segment []byte) (string, error) {
+func buildPlanModePermissionDecisionReplacement(segment []byte, anchor []byte) (string, error) {
 	headerEnd := bytes.IndexByte(segment, '{')
 	if headerEnd < 0 {
 		return "", errors.New("permission decision function missing opening brace")
@@ -906,44 +913,46 @@ func buildPlanModePermissionDecisionReplacement(segment []byte) (string, error) 
 		return "", errors.New("permission decision normalized-input validation guard did not match")
 	}
 
-	ruleStartRel := permissionDecisionRuleCheckRe.FindIndex(segment[guardEnd:])
-	ruleResultMatch := permissionDecisionRuleCheckRe.FindSubmatch(segment[guardEnd:])
-	if len(ruleStartRel) != 2 || len(ruleResultMatch) != 3 {
+	ruleCall := planModePermissionRuleCheckRe.FindSubmatch(segment[guardEnd:])
+	if len(ruleCall) != 3 {
 		return "", errors.New("permission decision native rule-check call did not match")
 	}
-	ruleCallStart := guardEnd + ruleStartRel[0]
-	ruleResult := string(ruleResultMatch[1])
-	if !bytes.HasPrefix(segment[ruleCallStart:], []byte("let ")) {
-		return "", errors.New("permission decision native rule-check did not follow input validation")
-	}
-	planModeOffset := bytes.Index(segment[ruleCallStart:], []byte("planModeWriteFloor:"))
-	if planModeOffset < 0 {
-		return "", errors.New("permission decision plan-mode rule-check option did not match")
-	}
-	planModePrefix := segment[ruleCallStart : ruleCallStart+planModeOffset]
-	planModeSuffix := segment[ruleCallStart+planModeOffset:]
-	if !bytes.Contains(planModePrefix, []byte("hookUpdatedInput:"+hookResult+".updatedInput")) ||
-		!bytes.Contains(planModePrefix, []byte("toolUseId:"+params[6])) ||
-		!bytes.Contains(planModeSuffix, []byte("crashIsObjection:!0")) ||
-		!bytes.Contains(planModeSuffix, []byte(behaviorName+`==="allow"`)) {
-		return "", fmt.Errorf("permission decision plan-mode rule-check options did not match (hookUpdatedInput=%t, toolUseId=%t, crashIsObjection=%t, behavior=%q)",
-			bytes.Contains(planModePrefix, []byte("hookUpdatedInput:"+hookResult+".updatedInput")),
-			bytes.Contains(planModePrefix, []byte("toolUseId:"+params[6])),
-			bytes.Contains(planModeSuffix, []byte("crashIsObjection:!0")),
-			behaviorName)
-	}
-
+	ruleResult := string(ruleCall[2])
 	denyBranch := []byte("if(" + ruleResult + `?.behavior==="deny")`)
-	denyBranchIdx := bytes.Index(segment[ruleCallStart:], denyBranch)
-	if denyBranchIdx < 0 {
+	denyBranchRel := bytes.Index(segment[guardEnd+len(ruleCall[0]):], denyBranch)
+	if denyBranchRel < 0 {
 		return "", errors.New("permission decision native rule-deny branch did not match")
 	}
-	denyBranchIdx += ruleCallStart
-	denyLogStartRel := bytes.Index(segment[denyBranchIdx:], []byte("return t("))
-	if denyLogStartRel < 0 {
+	denyBranchIdx := guardEnd + len(ruleCall[0]) + denyBranchRel
+	ruleOptions := segment[guardEnd:denyBranchIdx]
+	if !bytes.Contains(ruleOptions, []byte("hookUpdatedInput:"+hookResult+".updatedInput")) ||
+		!bytes.Contains(ruleOptions, []byte("toolUseId:"+params[6])) ||
+		!bytes.Contains(ruleOptions, []byte("planModeWriteFloor:"+behaviorName+`==="allow"`)) {
+		return "", errors.New("permission decision plan-mode rule-check options did not match")
+	}
+	if bytes.Equal(anchor, []byte(permissionDecisionAskRuleAnchorV4)) {
+		// Claude 2.1.323 computes crash behavior from the hook result.
+		// Later builds also record the result in an onChecked callback.
+		if !bytes.Contains(ruleOptions, []byte("hookAsked:"+behaviorName+`==="ask"`)) ||
+			!bytes.Contains(ruleOptions, []byte("crashIsObjection:"+behaviorName+`==="allow"`)) {
+			return "", errors.New("permission decision hook rule-check options did not match")
+		}
+		if len(ruleCall[1]) != 0 || bytes.Contains(ruleOptions, []byte("onChecked:")) {
+			checked := permissionDecisionOnCheckedRe.FindSubmatch(ruleOptions)
+			if len(checked) != 4 || !bytes.Equal(checked[1], checked[3]) || !bytes.Equal(checked[2], ruleCall[1]) {
+				return "", errors.New("permission decision rule-check callback did not match")
+			}
+		}
+	} else if len(ruleCall[1]) != 0 || !bytes.Contains(ruleOptions, []byte("crashIsObjection:!0")) {
+		return "", errors.New("permission decision legacy rule-check options did not match")
+	}
+	denyTail := segment[denyBranchIdx+len(denyBranch):]
+	denyLog := permissionDecisionReturnLogRe.FindSubmatchIndex(denyTail)
+	if len(denyLog) != 4 || denyLog[0] != 0 {
 		return "", errors.New("permission decision native rule-deny telemetry did not match")
 	}
-	denyLogStart := denyBranchIdx + denyLogStartRel
+	denyLogStart := denyBranchIdx + len(denyBranch)
+	logFunction := denyTail[denyLog[2]:denyLog[3]]
 	denyCallPattern := regexp.MustCompile(`\),[A-Za-z_$][A-Za-z0-9_$]*\(`)
 	denyCall := denyCallPattern.FindIndex(segment[denyLogStart:])
 	if len(denyCall) != 2 {
@@ -953,7 +962,7 @@ func buildPlanModePermissionDecisionReplacement(segment []byte) (string, error) 
 
 	hostAskBranch := []byte("if(" + ruleResult + `?.behavior==="ask"&&`)
 	hostAskBranchIdx := bytes.Index(segment[denyKeepStart:], hostAskBranch)
-	if hostAskBranchIdx < 0 || !bytes.Contains(segment[denyKeepStart+hostAskBranchIdx:], []byte(`return m("permission_host_worded_ask","pipeline_also_asks")`)) {
+	if hostAskBranchIdx < 0 || !permissionDecisionHostAskRe.Match(segment[denyKeepStart+hostAskBranchIdx:]) {
 		return "", errors.New("permission decision ToolHost ask branch did not match")
 	}
 	genericAskBranch := []byte("if(" + ruleResult + `?.behavior==="ask"){`)
@@ -962,7 +971,8 @@ func buildPlanModePermissionDecisionReplacement(segment []byte) (string, error) 
 		return "", errors.New("permission decision native ask branch did not match")
 	}
 	genericAskBranchIdx += denyKeepStart + hostAskBranchIdx
-	askLogStartRel := bytes.Index(segment[genericAskBranchIdx:], []byte("return t("))
+	askReturn := []byte("return " + string(logFunction) + "(")
+	askLogStartRel := bytes.Index(segment[genericAskBranchIdx:], askReturn)
 	if askLogStartRel < 0 {
 		return "", errors.New("permission decision native ask telemetry did not match")
 	}
@@ -974,6 +984,9 @@ func buildPlanModePermissionDecisionReplacement(segment []byte) (string, error) 
 	askKeepStart := askLogStart + askLogEndRel + len("),")
 	if denyLogStart >= denyKeepStart || denyKeepStart > askLogStart || askLogStart >= askKeepStart {
 		return "", errors.New("permission decision telemetry boundaries were invalid")
+	}
+	if !bytes.Contains(segment[askLogStart:askKeepStart], anchor) {
+		return "", errors.New("permission decision ask telemetry anchor was outside the native ask branch")
 	}
 
 	var bypass strings.Builder

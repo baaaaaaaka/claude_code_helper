@@ -581,14 +581,14 @@ func TestPatchSpecsHashChangesWithApplyID(t *testing.T) {
 	}
 }
 
-func TestBypassPermissionDecisionPatchSpecUsesV5ApplyID(t *testing.T) {
+func TestBypassPermissionDecisionPatchSpecUsesV6ApplyID(t *testing.T) {
 	requireExePatchEnabled(t)
 	spec, err := bypassPermissionDecisionPatchSpec()
 	if err != nil {
 		t.Fatalf("bypassPermissionDecisionPatchSpec error: %v", err)
 	}
-	if spec.applyID != "bypass-permission-decision-v5" {
-		t.Fatalf("expected v5 applyID, got %q", spec.applyID)
+	if spec.applyID != "bypass-permission-decision-v6" {
+		t.Fatalf("expected v6 applyID, got %q", spec.applyID)
 	}
 }
 

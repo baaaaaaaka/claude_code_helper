@@ -505,6 +505,55 @@ func TestBypassPermissionDecisionPatch_PlanModeShapeFailsClosed(t *testing.T) {
 	}
 }
 
+func TestBypassPermissionDecisionPatch_ObservedRuleCheck(t *testing.T) {
+	requireExePatchEnabled(t)
+	input := observedRuleCheckPermissionDecisionPatchFixture()
+	out, stats, err := applyBypassPermissionDecisionPatch(input, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != len(input) || stats.Eligible != 1 || stats.Changed != 1 {
+		t.Fatalf("expected one fixed-length patch, got %d bytes and %+v", len(out), stats)
+	}
+	for _, want := range []string{
+		`if(e?.behavior==="deny"){return rejectHook(e,n,r,s,h,y,S)}`,
+		`if(Se!==null)return{decision:Se,input:V};if(s.getAppState().toolPermissionContext.mode==="bypassPermissions")`,
+		observedPermissionRuleCall,
+		`if(be?.behavior==="deny")return Kwe(Jde(be),`,
+		`if(be?.behavior==="ask"&&ye!==void 0)return g("permission_host_worded_ask","pipeline_also_asks")`,
+		`{decision:await h(n,V,Te?{...s,hookAskFloor:!0}:s,y,S),input:V}`,
+	} {
+		if !bytes.Contains(out, []byte(want)) {
+			t.Fatalf("patched function lost %q", want)
+		}
+	}
+	reapplied, stats, err := applyBypassPermissionDecisionPatch(out, nil, false)
+	if err != nil || stats.Eligible != 1 || stats.Changed != 0 || !bytes.Equal(out, reapplied) {
+		t.Fatalf("reapplying modified the result, stats=%+v, err=%v", stats, err)
+	}
+}
+
+func TestBypassPermissionDecisionPatch_ObservedRuleCheckRejectsDifferentCallback(t *testing.T) {
+	requireExePatchEnabled(t)
+	input := bytes.Replace(observedRuleCheckPermissionDecisionPatchFixture(),
+		[]byte("observed=checked"), []byte("other=checked"), 1)
+	out, stats, err := applyBypassPermissionDecisionPatch(input, nil, false)
+	if err == nil || out != nil || stats.Changed != 0 {
+		t.Fatalf("expected an unknown rule callback to fail closed, stats=%+v, err=%v", stats, err)
+	}
+}
+
+func TestBypassPermissionDecisionPatch_HookRuleCheckWithoutCallback(t *testing.T) {
+	requireExePatchEnabled(t)
+	ruleCall := strings.NewReplacer("let observed,be=", "let be=", "onChecked:(checked)=>{observed=checked},", "").Replace(observedPermissionRuleCall)
+	input := bytes.Replace(observedRuleCheckPermissionDecisionPatchFixture(),
+		[]byte(observedPermissionRuleCall), []byte(ruleCall), 1)
+	out, stats, err := applyBypassPermissionDecisionPatch(input, nil, false)
+	if err != nil || stats.Changed != 1 || !bytes.Contains(out, []byte(ruleCall)) {
+		t.Fatalf("expected callback-free rule check to be preserved, stats=%+v, err=%v", stats, err)
+	}
+}
+
 func TestBypassPermissionDecisionPatch_CurrentShapeFailsClosed(t *testing.T) {
 	requireExePatchEnabled(t)
 	input := bytes.Replace(
@@ -633,6 +682,22 @@ if(be?.behavior==="ask"){let Te=K==="ask";return t("Hook returned for tool, but 
 if(K==="allow"){if(H)return t("canUseTool is required"),{decision:await h(n,V,s,y,S),input:V};return{decision:e,input:V}}
 return Kwe(Q,{tool:n,input:V,toolUseContext:s,canUseTool:h,assistantMessage:y,toolUseID:S})
 }`)
+}
+
+const observedPermissionRuleCall = `let observed,be=await sT(n,V,{...s,toolUseId:S},{hookUpdatedInput:e.updatedInput,planModeWriteFloor:K==="allow",hookAsked:K==="ask",onChecked:(checked)=>{observed=checked},crashIsObjection:K==="allow"||ye!==void 0||enabled()})??await ads(n,V,s,y,S);`
+
+func observedRuleCheckPermissionDecisionPatchFixture() []byte {
+	fixture := string(planModePermissionDecisionPatchFixture())
+	fixture = strings.Replace(fixture, permissionDecisionAskRuleAnchorV3, permissionDecisionAskRuleAnchorV4, 1)
+	fixture = strings.Replace(fixture, `m("permission_host_worded_ask"`, `g("permission_host_worded_ask"`, 1)
+	fixture = strings.ReplaceAll(fixture, `return t("Hook returned`, `return L("Hook returned`)
+	fixture = strings.Replace(fixture,
+		`let be=await sT(n,V,{...s,toolUseId:S},{hookUpdatedInput:e.updatedInput,planModeWriteFloor:K==="allow",...ye!==void 0&&{crashIsObjection:!0}})??await ads(n,V,s,y,S);`,
+		observedPermissionRuleCall, 1)
+	fixture = strings.Replace(fixture,
+		`if(e?.behavior==="deny")return t("hook denied"),Kwe(e,{tool:n,input:r,toolUseContext:s,canUseTool:h,assistantMessage:y,toolUseID:S});`,
+		`if(e?.behavior==="deny"){return rejectHook(e,n,r,s,h,y,S)}`, 1)
+	return []byte(fixture)
 }
 
 func currentPermissionDecisionPatchFixture() []byte {
