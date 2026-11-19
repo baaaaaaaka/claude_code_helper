@@ -273,7 +273,7 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 		defaultCwd, _ := os.Getwd()
 		selection, err := selectSession(ctx, tui.Options{
 			LoadProjects: func(ctx context.Context) ([]claudehistory.Project, error) {
-				return discoverHistoryFunc(ctx, claudeDir)
+				return claudehistory.DiscoverProjectSummariesContext(ctx, claudeDir)
 			},
 			Version:         version,
 			ProxyEnabled:    useProxy,
@@ -317,6 +317,10 @@ func runHistoryTui(cmd *cobra.Command, root *rootOptions, profileRef string, cla
 		if selection == nil {
 			return nil
 		}
+		if err := claudehistory.ValidateSessionSource(selection.Session); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Opening Claude Code…")
 		if selection.Cwd != "" {
 			return runClaudeNewSessionFn(
 				ctx,

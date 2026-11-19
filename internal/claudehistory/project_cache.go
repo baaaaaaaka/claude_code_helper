@@ -35,6 +35,9 @@ type projectCachePathState struct {
 }
 
 type projectCacheManifest struct {
+	Summary       bool                    `json:"summary,omitempty"`
+	HistoryIDs    []string                `json:"historyIds,omitempty"`
+	HistoryHash   string                  `json:"historyHash,omitempty"`
 	HistoryExists bool                    `json:"historyExists"`
 	HistoryKey    fileCacheKey            `json:"historyKey"`
 	IndexExists   bool                    `json:"indexExists"`
@@ -52,16 +55,17 @@ type persistentProject struct {
 }
 
 type persistentProjectSession struct {
-	SessionID    string                      `json:"sessionId"`
-	Aliases      []string                    `json:"aliases,omitempty"`
-	Summary      string                      `json:"summary"`
-	FirstPrompt  string                      `json:"firstPrompt"`
-	MessageCount int                         `json:"messageCount"`
-	CreatedAt    time.Time                   `json:"createdAt"`
-	ModifiedAt   time.Time                   `json:"modifiedAt"`
-	ProjectPath  string                      `json:"projectPath"`
-	FilePath     string                      `json:"filePath"`
-	Subagents    []persistentSubagentSession `json:"subagents,omitempty"`
+	SessionID     string                      `json:"sessionId"`
+	Aliases       []string                    `json:"aliases,omitempty"`
+	Summary       string                      `json:"summary"`
+	FirstPrompt   string                      `json:"firstPrompt"`
+	MessageCount  int                         `json:"messageCount"`
+	CreatedAt     time.Time                   `json:"createdAt"`
+	ModifiedAt    time.Time                   `json:"modifiedAt"`
+	ProjectPath   string                      `json:"projectPath"`
+	FilePath      string                      `json:"filePath"`
+	SourceVersion string                      `json:"sourceVersion,omitempty"`
+	Subagents     []persistentSubagentSession `json:"subagents,omitempty"`
 }
 
 type persistentSubagentSession struct {
@@ -73,6 +77,7 @@ type persistentSubagentSession struct {
 	ModifiedAt      time.Time `json:"modifiedAt"`
 	ProjectPath     string    `json:"projectPath"`
 	FilePath        string    `json:"filePath"`
+	SourceVersion   string    `json:"sourceVersion,omitempty"`
 }
 
 type persistentProjectCacheEntry struct {
@@ -86,14 +91,21 @@ type persistentProjectCacheFile struct {
 	Entry   persistentProjectCacheEntry `json:"entry"`
 }
 
-func lookupPersistentProjectContext(ctx context.Context, dir string, history historyDependency, inv projectInventory) (Project, projectInventory, bool, error) {
-	path, err := projectPersistentCachePathForDir(dir)
+func lookupPersistentProjectContext(ctx context.Context, dir string, history historyDependency, index historyIndex, inv projectInventory) (Project, projectInventory, bool, error) {
+	path, err := projectPersistentCachePathForMode(dir, inv.summary)
 	if err != nil {
 		return Project{}, inv, false, nil
 	}
 	entry, ok := readPersistentProjectCacheEntry(path, dir)
-	if !ok || !entry.Manifest.matchesCurrent(history, inv) {
+	if !ok || !entry.Manifest.matchesCurrent(history, index, inv) {
 		return Project{}, inv, false, nil
+	}
+
+	// Browser rows describe the inventory we just checked, and the selected
+	// source is validated again at launch. Exact discovery keeps its second
+	// inventory check.
+	if inv.summary {
+		return projectFromPersistent(entry.Project), inv, true, nil
 	}
 
 	revalidatedInv, err := revalidateProjectCacheInventoryContext(ctx, dir, inv.recursive)
@@ -111,7 +123,7 @@ func storePersistentProject(dir string, manifest projectCacheManifest, project P
 	if dir == "" {
 		return
 	}
-	path, err := projectPersistentCachePathForDir(dir)
+	path, err := projectPersistentCachePathForMode(dir, manifest.Summary)
 	if err != nil {
 		return
 	}
@@ -150,8 +162,9 @@ func deletePersistentProject(dir string) {
 	_ = os.Remove(path)
 }
 
-func buildProjectCacheManifest(history historyDependency, inv projectInventory, externalPaths []string, pathDeps []string) (projectCacheManifest, bool) {
+func buildProjectCacheManifest(history historyDependency, index historyIndex, inv projectInventory, externalPaths []string, pathDeps []string) (projectCacheManifest, bool) {
 	manifest := projectCacheManifest{
+		Summary:       inv.summary,
 		HistoryExists: history.Exists,
 		HistoryKey:    history.Key,
 		IndexExists:   inv.indexExists,
@@ -159,6 +172,13 @@ func buildProjectCacheManifest(history historyDependency, inv projectInventory, 
 		SessionFiles:  make([]projectCacheFileState, 0, len(inv.sessionFiles)),
 		AgentFiles:    make([]projectCacheFileState, 0, len(inv.agentFiles)),
 		PathStates:    snapshotProjectCachePathStates(pathDeps),
+	}
+	if index.dependencies != nil {
+		for id := range index.dependencies {
+			manifest.HistoryIDs = append(manifest.HistoryIDs, id)
+		}
+		sort.Strings(manifest.HistoryIDs)
+		manifest.HistoryHash = index.fingerprint(manifest.HistoryIDs)
 	}
 	for _, path := range inv.sessionFiles {
 		key, ok := inv.fileKey(path)
@@ -233,12 +253,14 @@ func snapshotProjectCachePathStates(paths []string) []projectCachePathState {
 	return states
 }
 
-func (m projectCacheManifest) matchesCurrent(history historyDependency, inv projectInventory) bool {
-	if m.HistoryExists != history.Exists || m.IndexExists != inv.indexExists {
+func (m projectCacheManifest) matchesCurrent(history historyDependency, index historyIndex, inv projectInventory) bool {
+	if m.Summary != inv.summary || m.IndexExists != inv.indexExists {
 		return false
 	}
-	if m.HistoryExists && m.HistoryKey != history.Key {
-		return false
+	if m.HistoryExists != history.Exists || (m.HistoryExists && m.HistoryKey != history.Key) {
+		if m.HistoryHash == "" || m.HistoryHash != index.fingerprint(m.HistoryIDs) {
+			return false
+		}
 	}
 	if m.IndexExists && m.IndexKey != inv.indexKey {
 		return false
@@ -444,6 +466,7 @@ func readPersistentProjectCacheEntry(path string, dir string) (persistentProject
 
 func cloneProjectCacheManifest(manifest projectCacheManifest) projectCacheManifest {
 	out := manifest
+	out.HistoryIDs = append([]string(nil), manifest.HistoryIDs...)
 	out.SessionFiles = append([]projectCacheFileState(nil), manifest.SessionFiles...)
 	out.AgentFiles = append([]projectCacheFileState(nil), manifest.AgentFiles...)
 	out.ExternalFiles = append([]projectCacheFileState(nil), manifest.ExternalFiles...)
@@ -485,19 +508,21 @@ func projectToPersistent(project Project) persistentProject {
 				ModifiedAt:      sub.ModifiedAt,
 				ProjectPath:     sub.ProjectPath,
 				FilePath:        sub.FilePath,
+				SourceVersion:   sub.SourceVersion,
 			}
 		}
 		out.Sessions[i] = persistentProjectSession{
-			SessionID:    session.SessionID,
-			Aliases:      append([]string(nil), session.Aliases...),
-			Summary:      session.Summary,
-			FirstPrompt:  session.FirstPrompt,
-			MessageCount: session.MessageCount,
-			CreatedAt:    session.CreatedAt,
-			ModifiedAt:   session.ModifiedAt,
-			ProjectPath:  session.ProjectPath,
-			FilePath:     session.FilePath,
-			Subagents:    subagents,
+			SessionID:     session.SessionID,
+			Aliases:       append([]string(nil), session.Aliases...),
+			Summary:       session.Summary,
+			FirstPrompt:   session.FirstPrompt,
+			MessageCount:  session.MessageCount,
+			CreatedAt:     session.CreatedAt,
+			ModifiedAt:    session.ModifiedAt,
+			ProjectPath:   session.ProjectPath,
+			FilePath:      session.FilePath,
+			SourceVersion: session.SourceVersion,
+			Subagents:     subagents,
 		}
 	}
 	return out
@@ -523,20 +548,22 @@ func projectFromPersistent(project persistentProject) Project {
 					ModifiedAt:      sub.ModifiedAt,
 					ProjectPath:     sub.ProjectPath,
 					FilePath:        sub.FilePath,
+					SourceVersion:   sub.SourceVersion,
 				}
 			}
 		}
 		out.Sessions[i] = Session{
-			SessionID:    session.SessionID,
-			Aliases:      append([]string(nil), session.Aliases...),
-			Summary:      session.Summary,
-			FirstPrompt:  session.FirstPrompt,
-			MessageCount: session.MessageCount,
-			CreatedAt:    session.CreatedAt,
-			ModifiedAt:   session.ModifiedAt,
-			ProjectPath:  session.ProjectPath,
-			FilePath:     session.FilePath,
-			Subagents:    subagents,
+			SessionID:     session.SessionID,
+			Aliases:       append([]string(nil), session.Aliases...),
+			Summary:       session.Summary,
+			FirstPrompt:   session.FirstPrompt,
+			MessageCount:  session.MessageCount,
+			CreatedAt:     session.CreatedAt,
+			ModifiedAt:    session.ModifiedAt,
+			ProjectPath:   session.ProjectPath,
+			FilePath:      session.FilePath,
+			SourceVersion: session.SourceVersion,
+			Subagents:     subagents,
 		}
 	}
 	return out
@@ -551,12 +578,19 @@ func projectPersistentCacheDir() (string, error) {
 }
 
 func projectPersistentCachePathForDir(dir string) (string, error) {
+	return projectPersistentCachePathForMode(dir, false)
+}
+
+func projectPersistentCachePathForMode(dir string, summary bool) (string, error) {
 	base, err := projectPersistentCacheDir()
 	if err != nil {
 		return "", err
 	}
 	sum := sha256.Sum256([]byte(filepath.Clean(strings.TrimSpace(dir))))
 	name := fmt.Sprintf("%x", sum[:])
+	if summary {
+		name += "-summary"
+	}
 	return filepath.Join(base, name[:2], name+".json"), nil
 }
 

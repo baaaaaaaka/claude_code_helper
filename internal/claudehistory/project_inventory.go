@@ -2,6 +2,7 @@ package claudehistory
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 )
 
 type projectInventory struct {
+	summary                 bool
+	summaryMeta             map[string]sessionFileMeta
 	dir                     string
 	recursive               bool
 	cacheEligible           bool
@@ -126,6 +129,18 @@ func (inv *projectInventory) sort() {
 func (inv projectInventory) fileKey(path string) (fileCacheKey, bool) {
 	key, ok := inv.fileKeys[path]
 	return key, ok
+}
+
+func (inv projectInventory) sourceVersion(path string) string {
+	key, ok := inv.fileKey(path)
+	if !ok {
+		var err error
+		key, err = currentFileCacheKey(path)
+		if err != nil {
+			return ""
+		}
+	}
+	return fmt.Sprintf("%d:%d:%d:%d:%d:%d", key.Device, key.Inode, key.ChangeTimeUnixNano, key.ModTimeUnixNano, key.Size, key.Mode)
 }
 
 func (inv projectInventory) sessionPath(sessionID string) string {

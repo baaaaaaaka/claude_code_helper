@@ -560,66 +560,30 @@ func TestHandleKeyEnterStartsNewSessionWhenNoHistory(t *testing.T) {
 	}
 }
 
-func TestRefreshStateUpdatesOrPreserves(t *testing.T) {
-	t.Run("preserves projects on error", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		state := newTestState([]claudehistory.Project{{Key: "one"}})
-		opts := Options{
-			LoadProjects: func(ctx context.Context) ([]claudehistory.Project, error) {
-				return nil, ctx.Err()
-			},
-		}
-		refreshState(ctx, state, opts)
-		if !errors.Is(state.loadError, context.Canceled) {
-			t.Fatalf("expected canceled error, got %v", state.loadError)
-		}
-		if len(state.projects) != 1 || state.projects[0].Key != "one" {
-			t.Fatalf("expected projects to remain unchanged, got %#v", state.projects)
-		}
-	})
+func TestRefreshKeepsSelectionAcrossReordering(t *testing.T) {
+	project := claudehistory.Project{Key: "first", Sessions: []claudehistory.Session{
+		{SessionID: "selected", ModifiedAt: time.Unix(1, 0)},
+	}}
+	state := newTestState([]claudehistory.Project{project, {Key: "second"}})
+	state.sessionState.selected = 1
+	state.previewState.scroll = 5
+	updated := []claudehistory.Project{
+		{Key: "second", Sessions: []claudehistory.Session{{SessionID: "latest", ModifiedAt: time.Unix(3, 0)}}},
+		{Key: "first", Sessions: []claudehistory.Session{
+			{SessionID: "new", ModifiedAt: time.Unix(2, 0)}, project.Sessions[0],
+		}},
+	}
+	state.applyProjects(projectLoadEvent{projects: updated, changed: true}, "")
+	current := selectedProject(state.projectItems(""), state.projectState.selected)
+	selected, _ := selectedSessionItem(state.sessionItems(current), state.sessionState.selected)
+	if current.Key != "first" || selected.session.SessionID != "selected" || state.previewState.scroll != 5 {
+		t.Fatalf("selection changed after reordering: project=%v session=%v preview=%v", current.Key, selected.session.SessionID, state.previewState)
+	}
 
-	t.Run("resets selection state on success", func(t *testing.T) {
-		state := newTestState([]claudehistory.Project{{Key: "old"}})
-		state.projectState.selected = 3
-		state.sessionState.selected = 2
-		state.previewState.scroll = 5
-		opts := Options{
-			LoadProjects: func(ctx context.Context) ([]claudehistory.Project, error) {
-				return []claudehistory.Project{{Key: "new"}}, nil
-			},
-		}
-		refreshState(context.Background(), state, opts)
-		if state.loadError != nil {
-			t.Fatalf("expected no error, got %v", state.loadError)
-		}
-		if len(state.projects) != 1 || state.projects[0].Key != "new" {
-			t.Fatalf("expected projects to be updated, got %#v", state.projects)
-		}
-		if state.projectState.selected != 0 || state.sessionState.selected != 0 || state.previewState.scroll != 0 {
-			t.Fatalf("expected state to be reset, got %#v %#v %#v", state.projectState, state.sessionState, state.previewState)
-		}
-	})
-
-	t.Run("preserves selection state on auto refresh", func(t *testing.T) {
-		state := newTestState([]claudehistory.Project{{Key: "one"}, {Key: "two"}})
-		state.projectState.selected = 1
-		state.sessionState.selected = 2
-		state.sessionState.scroll = 1
-		state.previewState.scroll = 5
-		opts := Options{
-			LoadProjects: func(ctx context.Context) ([]claudehistory.Project, error) {
-				return []claudehistory.Project{{Key: "one"}, {Key: "two"}}, nil
-			},
-		}
-		refreshStatePreserveSelection(context.Background(), state, opts)
-		if state.loadError != nil {
-			t.Fatalf("expected no error, got %v", state.loadError)
-		}
-		if state.projectState.selected != 1 || state.sessionState.selected != 2 || state.sessionState.scroll != 1 || state.previewState.scroll != 5 {
-			t.Fatalf("expected selection to be preserved, got %#v %#v %#v", state.projectState, state.sessionState, state.previewState)
-		}
-	})
+	state.applyProjects(projectLoadEvent{err: context.Canceled}, "")
+	if !errors.Is(state.loadError, context.Canceled) || len(state.projects) != 2 {
+		t.Fatalf("refresh failure lost current projects: %v, %v", state.loadError, state.projects)
+	}
 }
 
 func TestTextHelpers(t *testing.T) {
@@ -814,7 +778,9 @@ func TestEnsurePreview(t *testing.T) {
 	session := &claudehistory.Session{FilePath: path}
 	previewCh := make(chan previewEvent, 1)
 
-	ensurePreview(context.Background(), make(chan struct{}), screen, state, Options{PreviewMessages: 1}, session, nil, previewCh)
+	done := make(chan struct{})
+	defer close(done)
+	ensurePreview(context.Background(), done, screen, state, Options{PreviewMessages: 1}, session, nil, previewCh)
 	cacheKey := previewCacheKey(session, nil)
 	if !state.previewLoading[cacheKey] {
 		t.Fatalf("expected preview loading to be set")
@@ -835,7 +801,7 @@ func TestEnsurePreview(t *testing.T) {
 	}
 
 	state.previewCache[cacheKey] = "cached"
-	ensurePreview(context.Background(), make(chan struct{}), screen, state, Options{}, session, nil, previewCh)
+	ensurePreview(context.Background(), done, screen, state, Options{}, session, nil, previewCh)
 	if !state.previewLoading[cacheKey] {
 		t.Fatalf("expected preview loading to remain set")
 	}
@@ -897,8 +863,8 @@ func TestHandleKeyIgnoresActionsWhileProjectsLoading(t *testing.T) {
 	if selection, err := handleKey(context.Background(), screen, state, opts, tcell.NewEventKey(tcell.KeyRune, 'r', 0)); err != nil || selection != nil {
 		t.Fatalf("expected r to be ignored, got selection=%#v err=%v", selection, err)
 	}
-	if selection, err := handleKey(context.Background(), screen, state, opts, tcell.NewEventKey(tcell.KeyCtrlN, 0, 0)); err != nil || selection != nil {
-		t.Fatalf("expected Ctrl+N to be ignored, got selection=%#v err=%v", selection, err)
+	if selection, err := handleKey(context.Background(), screen, state, opts, tcell.NewEventKey(tcell.KeyCtrlN, 0, 0)); err != nil || selection == nil || selection.Cwd != dir {
+		t.Fatalf("expected Ctrl+N to open the current directory, got selection=%#v err=%v", selection, err)
 	}
 	if selection, err := handleKey(context.Background(), screen, state, opts, tcell.NewEventKey(tcell.KeyEnter, 0, 0)); err != nil || selection != nil {
 		t.Fatalf("expected Enter to be ignored, got selection=%#v err=%v", selection, err)
@@ -1346,6 +1312,157 @@ func TestSelectSessionAutoRefreshPreservesSelection(t *testing.T) {
 	}
 	if selection == nil || selection.Session.SessionID != "sess-2" {
 		t.Fatalf("unexpected selection: %#v", selection)
+	}
+}
+
+func TestSelectSessionAcceptsEnterDuringBlockedRefresh(t *testing.T) {
+	screen := tcell.NewSimulationScreen("UTF-8")
+	initDone := make(chan struct{})
+	prevNewScreen := newScreen
+	newScreen = func() (tcell.Screen, error) {
+		return &sizedScreen{Screen: screen, initDone: initDone}, nil
+	}
+	t.Cleanup(func() { newScreen = prevNewScreen })
+
+	dir := t.TempDir()
+	projects := []claudehistory.Project{{
+		Key: "project", Path: dir,
+		Sessions: []claudehistory.Session{{SessionID: "resume-this-session"}},
+	}}
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	overlap := make(chan struct{}, 2)
+	var mu sync.Mutex
+	calls := 0
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	driver := make(chan error, 1)
+	go func() {
+		select {
+		case <-initDone:
+		case <-ctx.Done():
+			driver <- ctx.Err()
+			return
+		}
+		if !waitForScreenText(screen, "resume-this-session", time.Second) {
+			driver <- errors.New("history never rendered")
+			return
+		}
+		if err := screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, 'r', 0)); err != nil {
+			driver <- err
+			return
+		}
+		select {
+		case <-started:
+		case <-ctx.Done():
+			driver <- ctx.Err()
+			return
+		}
+		for _, key := range []*tcell.EventKey{
+			tcell.NewEventKey(tcell.KeyRune, 'r', 0),
+			tcell.NewEventKey(tcell.KeyCtrlR, 0, 0),
+			tcell.NewEventKey(tcell.KeyRight, 0, 0),
+			tcell.NewEventKey(tcell.KeyDown, 0, 0),
+			tcell.NewEventKey(tcell.KeyEnter, 0, 0),
+		} {
+			if err := screen.PostEvent(key); err != nil {
+				driver <- err
+				return
+			}
+		}
+		driver <- nil
+	}()
+	selection, err := SelectSession(ctx, Options{
+		LoadProjects: func(ctx context.Context) ([]claudehistory.Project, error) {
+			mu.Lock()
+			calls++
+			call := calls
+			mu.Unlock()
+			switch call {
+			case 1:
+				return projects, nil
+			case 2:
+				close(started)
+				<-ctx.Done()
+				close(canceled)
+				return nil, ctx.Err()
+			default:
+				overlap <- struct{}{}
+				return projects, nil
+			}
+		},
+	})
+	if driverErr := <-driver; driverErr != nil {
+		t.Fatal(driverErr)
+	}
+	if err != nil || selection == nil || selection.Session.SessionID != "resume-this-session" {
+		t.Fatalf("expected the session to open during refresh, got %#v, %v", selection, err)
+	}
+	select {
+	case <-canceled:
+	case <-ctx.Done():
+		t.Fatal("closing the picker did not cancel the refresh")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 2 || len(overlap) != 0 {
+		t.Fatalf("expected refresh requests to coalesce, got %d loads", calls)
+	}
+}
+
+func TestPreviewIgnoresCanceledFileVersion(t *testing.T) {
+	state := &uiState{
+		previewCache: map[string]string{}, previewError: map[string]string{}, previewLoading: map[string]bool{},
+	}
+	session := claudehistory.Session{SessionID: "parent", FilePath: "/project/parent.jsonl", SourceVersion: "old"}
+	oldKey := previewCacheKey(&session, nil)
+	old, cancel := context.WithCancel(context.Background())
+	cancel()
+	session.SourceVersion = "new"
+	newKey := previewCacheKey(&session, nil)
+	state.applyPreview(previewEvent{cacheKey: newKey, ctx: context.Background(), text: "new text"})
+	state.applyPreview(previewEvent{cacheKey: oldKey, ctx: old, text: "stale text"})
+	if oldKey == newKey || len(state.previewCache) != 1 || previewTextForItem(state, &session, nil) != "new text" {
+		t.Fatalf("unexpected preview cache: %#v", state.previewCache)
+	}
+}
+
+func TestSubagentDetailsKeepOtherExpandedRowsAndSelection(t *testing.T) {
+	project := claudehistory.Project{Key: "project", Path: t.TempDir()}
+	for _, id := range []string{"one", "two"} {
+		project.Sessions = append(project.Sessions, claudehistory.Session{
+			SessionID: id, FilePath: filepath.Join(project.Path, id+".jsonl"),
+			Subagents: []claudehistory.SubagentSession{{
+				AgentID: id + "-agent", FilePath: filepath.Join(project.Path, id+"-agent.jsonl"), SourceVersion: "v1",
+			}},
+		})
+	}
+	state := &uiState{
+		projects: []claudehistory.Project{project}, expandedSessions: map[string]bool{"one": true, "two": true},
+	}
+	items := state.sessionItems(project)
+	state.sessionState.selected = len(items) - 1
+	wantSelected := identityOfSession(items[state.sessionState.selected])
+	for _, session := range project.Sessions {
+		detail := session.Subagents[0]
+		detail.FirstPrompt = "prompt for " + session.SessionID
+		state.applySubagentDetails(subagentLoadEvent{
+			parent:    subagentParentIdentity(session),
+			summaries: map[string]claudehistory.SubagentSession{previewCacheKey(nil, &detail): detail},
+		}, "")
+	}
+	items = state.sessionItems(project)
+	if identityOfSession(items[state.sessionState.selected]) != wantSelected {
+		t.Fatal("loading subagent details moved the selection")
+	}
+	var titles []string
+	for _, item := range items {
+		if item.kind == sessionItemSubagent {
+			titles = append(titles, item.subagent.FirstPrompt)
+		}
+	}
+	if !reflect.DeepEqual(titles, []string{"prompt for one", "prompt for two"}) {
+		t.Fatalf("expected both expanded rows to retain their details, got %q", titles)
 	}
 }
 

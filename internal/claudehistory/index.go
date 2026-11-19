@@ -44,6 +44,7 @@ type SessionMatch struct {
 type discoverProjectsOptions struct {
 	parallel     bool
 	projectCache bool
+	summary      bool
 }
 
 type discoverProjectResult struct {
@@ -80,6 +81,17 @@ func DiscoverProjectsContext(ctx context.Context, claudeDir string) ([]Project, 
 		return nil, err
 	}
 	return discoverProjectsResolvedContext(ctx, root, defaultDiscoverProjectsOptions)
+}
+
+// DiscoverProjectSummariesContext loads the browser without reading complete transcripts.
+func DiscoverProjectSummariesContext(ctx context.Context, claudeDir string) ([]Project, error) {
+	root, err := ResolveClaudeDir(claudeDir)
+	if err != nil {
+		return nil, err
+	}
+	opts := defaultDiscoverProjectsOptions
+	opts.summary = true
+	return discoverProjectsResolvedContext(ctx, root, opts)
 }
 
 func discoverProjectsResolvedContext(ctx context.Context, root string, opts discoverProjectsOptions) ([]Project, error) {
@@ -350,14 +362,16 @@ func mergeSessionMetadata(base Session, other Session) Session {
 	otherPath := strings.TrimSpace(other.FilePath)
 	baseFileOK := isFile(basePath)
 	otherFileOK := isFile(otherPath)
-	if !baseFileOK && otherFileOK {
+	if (!baseFileOK && otherFileOK) || (basePath == "" && otherPath != "") {
 		base.FilePath = otherPath
-	} else if basePath == "" && otherPath != "" {
-		base.FilePath = otherPath
+		base.SourceVersion = other.SourceVersion
 	}
 
 	if base.Summary == "" && other.Summary != "" {
 		base.Summary = other.Summary
+	}
+	if base.FilePath == other.FilePath && base.SourceVersion == "" {
+		base.SourceVersion = other.SourceVersion
 	}
 	if base.FirstPrompt == "" && other.FirstPrompt != "" {
 		base.FirstPrompt = other.FirstPrompt
@@ -515,9 +529,13 @@ func loadProjectContextWithOptions(ctx context.Context, projectsDir string, key 
 	if invErr != nil {
 		return Project{}, invErr
 	}
+	inv.summary = opts.summary
+	if opts.summary {
+		inv.summaryMeta = make(map[string]sessionFileMeta)
+	}
 	useProjectCache := opts.projectCache && inv.projectCacheEligible(historyDep)
 	if useProjectCache {
-		if project, refreshedInv, ok, err := lookupPersistentProjectContext(projectCtx, dir, historyDep, inv); err != nil {
+		if project, refreshedInv, ok, err := lookupPersistentProjectContext(projectCtx, dir, historyDep, history, inv); err != nil {
 			return Project{}, err
 		} else {
 			inv = refreshedInv
@@ -527,6 +545,9 @@ func loadProjectContextWithOptions(ctx context.Context, projectsDir string, key 
 		}
 	}
 
+	if useProjectCache {
+		history.dependencies = make(map[string]struct{})
+	}
 	indexPath := filepath.Join(dir, "sessions-index.json")
 	if err := projectCtx.Err(); err != nil {
 		return Project{}, err
@@ -590,7 +611,7 @@ func loadProjectContextWithOptions(ctx context.Context, projectsDir string, key 
 			}
 			externalPaths := collectSessionExternalFilePaths(sessions, inv.fileKeys)
 			sessions = dropAttachedSubagentSessions(sessions)
-			sessions = filterEmptySessionsContext(projectCtx, sessions)
+			sessions = filterInventorySessions(projectCtx, &inv, sessions)
 			project := Project{
 				Key:      key,
 				Path:     projectPath,
@@ -598,7 +619,7 @@ func loadProjectContextWithOptions(ctx context.Context, projectsDir string, key 
 			}
 			if rehydrateErr == nil && useProjectCache {
 				pathDeps := collectProjectPathDependencies(indexProjectPathCandidates(parsed), &inv, project)
-				if manifest, ok := buildProjectCacheManifest(historyDep, inv, externalPaths, pathDeps); ok {
+				if manifest, ok := buildProjectCacheManifest(historyDep, history, inv, externalPaths, pathDeps); ok {
 					storePersistentProject(dir, manifest, project)
 				}
 			}
@@ -615,7 +636,7 @@ func loadProjectContextWithOptions(ctx context.Context, projectsDir string, key 
 	}
 	if scanErr == nil && useProjectCache {
 		pathDeps := collectProjectPathDependencies(nil, &inv, project)
-		if manifest, ok := buildProjectCacheManifest(historyDep, inv, collectSessionExternalFilePaths(project.Sessions, inv.fileKeys), pathDeps); ok {
+		if manifest, ok := buildProjectCacheManifest(historyDep, history, inv, collectSessionExternalFilePaths(project.Sessions, inv.fileKeys), pathDeps); ok {
 			storePersistentProject(dir, manifest, project)
 		}
 	}
@@ -652,7 +673,7 @@ func loadProjectFromInventoryContext(ctx context.Context, inv *projectInventory,
 		firstErr = attachErr
 	}
 	sessions = dropAttachedSubagentSessions(sessions)
-	sessions = filterEmptySessionsContext(ctx, sessions)
+	sessions = filterInventorySessions(ctx, inv, sessions)
 	return Project{
 		Key:      key,
 		Path:     projectPath,

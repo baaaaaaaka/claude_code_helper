@@ -1,6 +1,8 @@
 package claudehistory
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -71,4 +73,36 @@ func canonicalizeSessionIdentity(session Session) Session {
 	}
 	session.Aliases = normalizeSessionAliases(session.Aliases, session.SessionID)
 	return session
+}
+
+// ValidateSessionSource rejects a browser selection whose local source vanished
+// or was replaced after discovery. Appends to the same file remain valid.
+func ValidateSessionSource(session Session) error {
+	if session.SourceVersion == "" {
+		return nil // An index-only entry has no local file to check.
+	}
+	stale := func() error {
+		return fmt.Errorf("session %q changed since history was loaded; refresh the list", session.SessionID)
+	}
+	if sessionIDFromFilePath(session.FilePath) != session.SessionID {
+		return stale()
+	}
+	f, err := os.Open(session.FilePath)
+	if err != nil {
+		return stale()
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return stale()
+	}
+	key := fileCacheKey{}
+	populateFileCacheKeyPlatform(session.FilePath, info, &key)
+	if key.StrongIdentity {
+		object := fmt.Sprintf("%d:%d:", key.Device, key.Inode)
+		if !strings.HasPrefix(session.SourceVersion, object) {
+			return stale()
+		}
+	}
+	return nil
 }

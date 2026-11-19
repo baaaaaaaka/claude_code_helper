@@ -3,7 +3,9 @@ package claudehistory
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -21,23 +23,51 @@ type sessionFileMeta struct {
 	SnapshotOnly bool
 }
 
+const sessionSummaryMaxBytes = 128 * 1024
+
 func readSessionFileMeta(filePath string) (sessionFileMeta, error) {
+	return readSessionFileMetadata(context.Background(), filePath, false)
+}
+
+func readSessionFileMetadata(ctx context.Context, filePath string, summary bool) (sessionFileMeta, error) {
 	var meta sessionFileMeta
+	if err := ctx.Err(); err != nil {
+		return meta, err
+	}
 	f, err := os.Open(filePath)
 	if err != nil {
 		return meta, err
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return meta, err
+	}
+	if !info.Mode().IsRegular() {
+		return meta, fmt.Errorf("session is not a regular file: %s", filePath)
+	}
 
-	reader := bufio.NewReader(f)
+	var source io.Reader = f
+	limited := summary && info.Size() > sessionSummaryMaxBytes
+	if summary {
+		source = io.LimitReader(f, min(info.Size(), sessionSummaryMaxBytes))
+	}
+
+	reader := bufio.NewReader(source)
 	snapshotLines := 0
 	nonSnapshotLines := 0
 	sessionIDs := []string{}
 	seenSessionIDs := map[string]bool{}
 	for {
+		if err := ctx.Err(); err != nil {
+			return meta, err
+		}
 		line, err := reader.ReadBytes('\n')
 		if err != nil && err != io.EOF {
 			return meta, err
+		}
+		if limited && err == io.EOF {
+			break // This record may cross the summary byte limit.
 		}
 		line = bytes.TrimSpace(line)
 		if len(line) > 0 {
@@ -83,18 +113,17 @@ func readSessionFileMeta(filePath string) (sessionFileMeta, error) {
 		}
 	}
 
-	if meta.ParseErrors == 0 && snapshotLines > 0 && nonSnapshotLines == 0 {
+	if limited {
+		meta.MessageCount = -1
+		meta.ModifiedAt = info.ModTime()
+	} else if meta.ParseErrors == 0 && snapshotLines > 0 && nonSnapshotLines == 0 {
 		meta.SnapshotOnly = true
 	}
-	if meta.CreatedAt.IsZero() || meta.ModifiedAt.IsZero() {
-		if st, err := os.Stat(filePath); err == nil {
-			if meta.CreatedAt.IsZero() {
-				meta.CreatedAt = st.ModTime()
-			}
-			if meta.ModifiedAt.IsZero() {
-				meta.ModifiedAt = st.ModTime()
-			}
-		}
+	if meta.CreatedAt.IsZero() {
+		meta.CreatedAt = info.ModTime()
+	}
+	if meta.ModifiedAt.IsZero() {
+		meta.ModifiedAt = info.ModTime()
 	}
 	meta.SessionIDs = sessionIDs
 	return meta, nil

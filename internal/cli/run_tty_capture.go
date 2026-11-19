@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"time"
 
 	"golang.org/x/term"
@@ -26,6 +27,10 @@ func isYoloRuntimeFailure(err error) bool {
 	return errors.Is(err, errYoloRuntimeFailure)
 }
 
+type ttyCaptureResizer interface {
+	Resize()
+}
+
 type ttyCaptureSession interface {
 	Input() io.Writer
 	Output() io.Reader
@@ -44,13 +49,17 @@ func runTargetOnceWithCapturedTTYOutput(
 	stderrBuf io.Writer,
 	opts runTargetOptions,
 ) error {
+	resizeEvents, stopResize := ttyCaptureResizeEvents()
+	defer stopResize()
 	session, err := startTTYCaptureSessionFn(cmdArgs, envVars, opts.Cwd)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = session.Close() }()
 	restoreTTY, err := prepareTTYRelayFn()
 	if err != nil {
+		_ = session.Terminate(2 * time.Second)
+		_ = session.Close()
+		_ = session.Wait()
 		return err
 	}
 	defer restoreTTY()
@@ -59,16 +68,31 @@ func runTargetOnceWithCapturedTTYOutput(
 	if stdoutBuf != nil {
 		outputWriter = io.MultiWriter(os.Stdout, stdoutBuf)
 	}
-	stdin := os.Stdin
+	outputDone := make(chan struct{})
 	go func() {
+		defer close(outputDone)
 		_, _ = io.Copy(outputWriter, session.Output())
 	}()
-	go func() {
-		if stdin == nil {
-			return
+	inputCtx, cancelInput := context.WithCancel(ctx)
+	input := session.Input()
+	waitInput := startTTYInputRelay(inputCtx, input, os.Stdin)
+	stopInput := sync.OnceFunc(func() {
+		cancelInput()
+		if d, ok := input.(interface{ SetWriteDeadline(time.Time) error }); ok {
+			_ = d.SetWriteDeadline(time.Now())
 		}
-		_, _ = io.Copy(session.Input(), stdin)
+		waitInput()
+	})
+	defer func() {
+		stopInput()
+		_ = session.Close()
+		waitForTTYRelayOutput(outputDone)
 	}()
+
+	resizer, _ := session.(ttyCaptureResizer)
+	if resizer != nil {
+		resizer.Resize()
+	}
 
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- session.Wait() }()
@@ -83,15 +107,19 @@ func runTargetOnceWithCapturedTTYOutput(
 	for {
 		select {
 		case err := <-waitDone:
+			// The exit status can arrive before the final startup diagnostic.
+			waitForTTYRelayOutput(outputDone)
 			if opts.YoloEnabled && looksLikeYoloRuntimeFailure(capturedTTYOutput(stdoutBuf, stderrBuf)) {
 				return errYoloRuntimeFailure
 			}
 			return err
 		case err := <-fatalCh:
+			stopInput()
 			_ = session.Terminate(2 * time.Second)
 			waitForTTYSessionExit(waitDone)
 			return fmt.Errorf("proxy stack failed; terminated target: %w", err)
 		case <-ctx.Done():
+			stopInput()
 			_ = session.Terminate(2 * time.Second)
 			waitForTTYSessionExit(waitDone)
 			return ctx.Err()
@@ -105,6 +133,7 @@ func runTargetOnceWithCapturedTTYOutput(
 				}
 				failures++
 				if failures >= 3 {
+					stopInput()
 					_ = session.Terminate(2 * time.Second)
 					waitForTTYSessionExit(waitDone)
 					return fmt.Errorf("proxy unhealthy; terminated target: %w", err)
@@ -113,14 +142,31 @@ func runTargetOnceWithCapturedTTYOutput(
 			}
 			failures = 0
 			recovery = recoveryBudget{}
+		case <-resizeEvents:
+			if resizer != nil {
+				resizer.Resize()
+			}
 		case <-runtimeTicker.C:
+			if resizer != nil && resizeEvents == nil {
+				resizer.Resize()
+			}
 			if !opts.YoloEnabled || !looksLikeYoloRuntimeFailure(capturedTTYOutput(stdoutBuf, stderrBuf)) {
 				continue
 			}
+			stopInput()
 			_ = session.Terminate(2 * time.Second)
 			waitForTTYSessionExit(waitDone)
 			return errYoloRuntimeFailure
 		}
+	}
+}
+
+func waitForTTYRelayOutput(done <-chan struct{}) {
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
 	}
 }
 

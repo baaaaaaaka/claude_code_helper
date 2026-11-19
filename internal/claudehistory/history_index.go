@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,7 +17,8 @@ import (
 )
 
 type historyIndex struct {
-	sessions map[string]*historySessionInfo
+	sessions     map[string]*historySessionInfo
+	dependencies map[string]struct{}
 }
 
 type historySessionInfo struct {
@@ -116,6 +119,9 @@ func loadHistoryIndexStateContext(ctx context.Context, root string) (historyInde
 }
 
 func (idx historyIndex) lookup(sessionID string) (historySessionInfo, bool) {
+	if idx.dependencies != nil {
+		idx.dependencies[sessionID] = struct{}{}
+	}
 	if sessionID == "" || idx.sessions == nil {
 		return historySessionInfo{}, false
 	}
@@ -124,6 +130,21 @@ func (idx historyIndex) lookup(sessionID string) (historySessionInfo, bool) {
 		return historySessionInfo{}, false
 	}
 	return *info, true
+}
+
+func (idx historyIndex) fingerprint(ids []string) string {
+	hash := sha256.New()
+	encoder := json.NewEncoder(hash)
+	for _, id := range ids {
+		info := idx.sessions[id]
+		if info != nil {
+			value := *info
+			value.FirstPromptTime = value.FirstPromptTime.UTC()
+			info = &value
+		}
+		_ = encoder.Encode(info)
+	}
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 func historyTimestamp(raw json.RawMessage) time.Time {

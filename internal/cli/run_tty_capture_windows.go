@@ -8,18 +8,22 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf16"
 
 	"github.com/UserExistsError/conpty"
+	"golang.org/x/sys/windows"
 	"golang.org/x/term"
 )
 
 type windowsTTYCaptureSession struct {
-	cpty      *conpty.ConPty
-	closeOnce sync.Once
+	cpty          *conpty.ConPty
+	closeOnce     sync.Once
+	width, height int
 }
 
 func startTTYCaptureSession(cmdArgs []string, envVars []string, cwd string) (ttyCaptureSession, error) {
@@ -27,6 +31,9 @@ func startTTYCaptureSession(cmdArgs []string, envVars []string, cwd string) (tty
 		return nil, fmt.Errorf("missing command")
 	}
 	width, height := ttyCaptureDimensions()
+	if width == 0 {
+		width, height = 120, 40
+	}
 	commandLine := windowsCommandLine(cmdArgs)
 	cpty, err := conpty.Start(
 		commandLine,
@@ -40,7 +47,7 @@ func startTTYCaptureSession(cmdArgs []string, envVars []string, cwd string) (tty
 	if err != nil {
 		return nil, err
 	}
-	return &windowsTTYCaptureSession{cpty: cpty}, nil
+	return &windowsTTYCaptureSession{cpty: cpty, width: width, height: height}, nil
 }
 
 func (s *windowsTTYCaptureSession) Input() io.Writer {
@@ -92,5 +99,123 @@ func ttyCaptureDimensions() (int, int) {
 			return width, height
 		}
 	}
-	return 120, 40
+	return 0, 0
+}
+
+func (s *windowsTTYCaptureSession) Resize() {
+	width, height := ttyCaptureDimensions()
+	if width > 0 && (width != s.width || height != s.height) && s.cpty.Resize(width, height) == nil {
+		s.width, s.height = width, height
+	}
+}
+
+func ttyCaptureResizeEvents() (<-chan os.Signal, func()) {
+	return nil, func() {}
+}
+
+var cancelTTYThreadIO = windows.NewLazySystemDLL("kernel32.dll").NewProc("CancelSynchronousIo")
+
+func startTTYInputRelay(ctx context.Context, dst io.Writer, src *os.File) func() {
+	if src == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	release := make(chan struct{})
+	thread := make(chan windows.Handle, 1)
+	console := term.IsTerminal(int(src.Fd()))
+	go func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		defer func() {
+			close(done)
+			<-release
+		}()
+		handle, err := windows.OpenThread(windows.THREAD_TERMINATE, false, windows.GetCurrentThreadId())
+		thread <- handle
+		if err != nil {
+			return
+		}
+		if console {
+			relayWindowsConsoleInput(ctx, dst, windows.Handle(src.Fd()))
+			return
+		}
+		var buf [4096]byte
+		for ctx.Err() == nil {
+			n, err := src.Read(buf[:])
+			if ctx.Err() != nil {
+				return
+			}
+			if n > 0 {
+				if _, writeErr := dst.Write(buf[:n]); writeErr != nil {
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	handle := <-thread
+	return func() {
+		defer close(release)
+		if handle != 0 {
+			defer windows.CloseHandle(handle)
+		}
+		// Retry cancellation in case the reader entered Read after the first
+		// cancellation request. Only this relay's thread is affected.
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			if handle != 0 {
+				_, _, _ = cancelTTYThreadIO.Call(uintptr(handle))
+			}
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+			}
+		}
+	}
+}
+
+func relayWindowsConsoleInput(ctx context.Context, dst io.Writer, console windows.Handle) {
+	var buf [1025]uint16
+	carry := 0
+	for ctx.Err() == nil {
+		// Leave the console without a pending ReadConsole while it is idle.
+		// Canceling an idle read can swallow the first line after handoff.
+		ready, err := windows.WaitForSingleObject(console, 25)
+		if err != nil || ctx.Err() != nil {
+			return
+		}
+		if ready == uint32(windows.WAIT_TIMEOUT) {
+			continue
+		}
+		if ready != windows.WAIT_OBJECT_0 {
+			return
+		}
+		var read uint32
+		err = windows.ReadConsole(console, &buf[carry], 1024, &read, nil)
+		if err != nil || read == 0 || ctx.Err() != nil {
+			return
+		}
+		n := int(read) + carry
+		carry = 0
+		last := buf[n-1]
+		if last >= 0xD800 && last <= 0xDBFF {
+			n--
+			carry = 1
+		}
+		if _, err := io.WriteString(dst, string(utf16.Decode(buf[:n]))); err != nil {
+			return
+		}
+		if carry != 0 {
+			buf[0] = last
+		}
+	}
 }

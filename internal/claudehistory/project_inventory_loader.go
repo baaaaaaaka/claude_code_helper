@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 func scanSessionsFromInventoryContext(ctx context.Context, inv *projectInventory, history historyIndex) ([]Session, string, error) {
@@ -26,13 +27,7 @@ func scanSessionsFromInventoryContext(ctx context.Context, inv *projectInventory
 		if strings.TrimSpace(sessionID) == "" {
 			continue
 		}
-		key, ok := inv.fileKey(filePath)
-		var meta sessionFileMeta
-		if ok {
-			meta, err = readSessionFileMetaCachedWithKeyContext(ctx, filePath, key)
-		} else {
-			meta, err = readSessionFileMetaCachedContext(ctx, filePath)
-		}
+		meta, err := readInventorySessionMeta(ctx, inv, filePath)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("read session %s: %w", filePath, err)
@@ -71,6 +66,9 @@ func scanSessionsFromInventoryContext(ctx context.Context, inv *projectInventory
 			ProjectPath:  strings.TrimSpace(meta.ProjectPath),
 			FilePath:     filePath,
 		})
+		if inv.summary {
+			session.SourceVersion = inv.sourceVersion(filePath)
+		}
 		if existingIdx, ok := sessionIndex[sessionID]; ok {
 			sessions[existingIdx] = mergeSessionMetadata(sessions[existingIdx], session)
 			continue
@@ -124,19 +122,16 @@ func rehydrateSessionsFromInventoryContext(ctx context.Context, inv *projectInve
 		if filePath == "" {
 			continue
 		}
-		key, ok := inv.fileKey(filePath)
+		_, ok := inv.fileKey(filePath)
 		if !ok && !isFile(filePath) {
 			continue
 		}
 
-		validFiles++
-		var meta sessionFileMeta
-		var err error
-		if ok {
-			meta, err = readSessionFileMetaCachedWithKeyContext(ctx, filePath, key)
-		} else {
-			meta, err = readSessionFileMetaCachedContext(ctx, filePath)
+		if inv.summary {
+			sessions[i].SourceVersion = inv.sourceVersion(filePath)
 		}
+		validFiles++
+		meta, err := readInventorySessionMeta(ctx, inv, filePath)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("read session %s: %w", filePath, err)
@@ -199,7 +194,9 @@ func attachSubagentsFromInventoryContext(ctx context.Context, inv *projectInvent
 		key, ok := inv.fileKey(filePath)
 		var parentSessionID string
 		var err error
-		if ok {
+		if inv.summary {
+			parentSessionID, err = summaryAgentParent(ctx, inv, filePath)
+		} else if ok {
 			parentSessionID, err = parentSessionIDForAgentFileWithKey(filePath, key)
 		} else {
 			parentSessionID, err = parentSessionIDForAgentFile(filePath)
@@ -214,11 +211,17 @@ func attachSubagentsFromInventoryContext(ctx context.Context, inv *projectInvent
 		if !ok {
 			continue
 		}
-		var meta sessionFileMeta
-		if ok {
-			meta, err = readSessionFileMetaCachedWithKeyContext(ctx, filePath, key)
-		} else {
-			meta, err = readSessionFileMetaCachedContext(ctx, filePath)
+		meta := sessionFileMeta{MessageCount: -1}
+		version := ""
+		if inv.summary {
+			if !inv.fileReadable(filePath) {
+				continue
+			}
+			meta.ModifiedAt = time.Unix(0, key.ModTimeUnixNano)
+			version = inv.sourceVersion(filePath)
+		}
+		if !inv.summary {
+			meta, err = readInventorySessionMeta(ctx, inv, filePath)
 		}
 		if err != nil {
 			if firstErr == nil {
@@ -241,6 +244,7 @@ func attachSubagentsFromInventoryContext(ctx context.Context, inv *projectInvent
 			ModifiedAt:      meta.ModifiedAt,
 			ProjectPath:     projectPath,
 			FilePath:        filePath,
+			SourceVersion:   version,
 		})
 	}
 
@@ -253,6 +257,71 @@ func attachSubagentsFromInventoryContext(ctx context.Context, inv *projectInvent
 		})
 	}
 	return sessions, firstErr
+}
+
+func readInventorySessionMeta(ctx context.Context, inv *projectInventory, path string) (sessionFileMeta, error) {
+	key, known := inv.fileKey(path)
+	if !inv.summary {
+		if known {
+			return readSessionFileMetaCachedWithKeyContext(ctx, path, key)
+		}
+		return readSessionFileMetaCachedContext(ctx, path)
+	}
+
+	if meta, ok := inv.summaryMeta[path]; ok {
+		return meta, nil
+	}
+	meta, err := readSessionFileMetadata(ctx, path, true)
+	if err != nil {
+		return meta, err
+	}
+	inv.summaryMeta[path] = meta
+	return meta, nil
+}
+
+func summaryAgentParent(ctx context.Context, inv *projectInventory, path string) (string, error) {
+	dir := filepath.Dir(path)
+	if strings.EqualFold(filepath.Base(dir), "subagents") {
+		return filepath.Base(filepath.Dir(dir)), nil
+	}
+	meta, err := readInventorySessionMeta(ctx, inv, path)
+	if err != nil || len(meta.SessionIDs) == 0 {
+		return "", err
+	}
+	return meta.SessionIDs[0], nil
+}
+
+func filterInventorySessions(ctx context.Context, inv *projectInventory, sessions []Session) []Session {
+	if !inv.summary {
+		return filterEmptySessionsContext(ctx, sessions)
+	}
+	out := sessions[:0]
+	for _, session := range sessions {
+		if meta, ok := inv.summaryMeta[session.FilePath]; ok {
+			if !meta.SnapshotOnly {
+				out = append(out, session)
+			}
+		} else if session.FilePath != "" || !isEmptySessionContext(ctx, session) {
+			out = append(out, session)
+		}
+	}
+	return out
+}
+
+// LoadSubagentSummary resolves the title and metadata only for a requested row.
+func LoadSubagentSummary(ctx context.Context, subagent SubagentSession) (SubagentSession, error) {
+	meta, err := readSessionFileMetadata(ctx, subagent.FilePath, true)
+	if err != nil {
+		return subagent, err
+	}
+	subagent.FirstPrompt = meta.FirstPrompt
+	subagent.MessageCount = meta.MessageCount
+	subagent.CreatedAt = meta.CreatedAt
+	subagent.ModifiedAt = meta.ModifiedAt
+	if meta.ProjectPath != "" {
+		subagent.ProjectPath = meta.ProjectPath
+	}
+	return subagent, nil
 }
 
 func parentSessionIDForAgentFileWithKey(filePath string, key fileCacheKey) (string, error) {

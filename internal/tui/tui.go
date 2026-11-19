@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -65,6 +66,7 @@ func (e *uiEvent) When() time.Time { return e.when }
 
 type previewEvent struct {
 	cacheKey string
+	ctx      context.Context
 	text     string
 	err      error
 }
@@ -76,6 +78,8 @@ type updateEvent struct {
 
 type projectLoadEvent struct {
 	projects []claudehistory.Project
+	items    []projectItem
+	changed  bool
 	err      error
 }
 
@@ -127,22 +131,34 @@ const (
 )
 
 type uiState struct {
-	projects         []claudehistory.Project
-	loadError        error
-	focus            string
-	lastListFocus    string
-	inputMode        string
-	inputBuffer      string
-	projectFilter    string
-	sessionFilter    string
-	projectState     listState
-	sessionState     listState
-	previewState     previewState
-	updateStatus     *update.Status
-	updateChecking   bool
-	updateErrorUntil time.Time
-	updateErrorTimer *time.Timer
-	loadingProjects  bool
+	projects           []claudehistory.Project
+	loadError          error
+	focus              string
+	lastListFocus      string
+	inputMode          string
+	inputBuffer        string
+	projectFilter      string
+	sessionFilter      string
+	projectState       listState
+	sessionState       listState
+	previewState       previewState
+	updateStatus       *update.Status
+	updateChecking     bool
+	updateErrorUntil   time.Time
+	updateErrorTimer   *time.Timer
+	loadingProjects    bool
+	opening            bool
+	refreshingProjects bool
+	refreshPending     bool
+	requestRefresh     func(manual bool)
+	requestSubagents   func(claudehistory.Session)
+	subagentSlot       chan struct{}
+	cancelSubagents    context.CancelFunc
+	subagentGeneration int
+	subagentParent     sessionIdentity
+	subagentDetails    map[sessionIdentity]map[string]claudehistory.SubagentSession
+	subagentOrder      []sessionIdentity
+	views              listViews
 
 	proxyEnabled    bool
 	proxyConfigured bool
@@ -153,11 +169,17 @@ type uiState struct {
 	previewCache     map[string]string
 	previewError     map[string]string
 	previewLoading   map[string]bool
+	previewActive    string
+	previewRequests  chan previewRequest
+	cancelPreview    context.CancelFunc
+	previewOrder     []string
 	previewSearch    string
 	previewSearchBuf string
 	previewMatches   []int
 	previewMatchIdx  int
-	previewSearchKey string
+	previewLayout    previewLayout
+	searchedLayout   int
+	searchedText     string
 	statusHeight     int
 }
 
@@ -207,18 +229,25 @@ func startProjectLoad(
 	done <-chan struct{},
 	screen tcell.Screen,
 	loadProjects func(context.Context) ([]claudehistory.Project, error),
+	previous []claudehistory.Project,
+	defaultCwd string,
 	loadCh chan projectLoadEvent,
 ) {
 	go func() {
 		projects, err := loadProjects(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		ev := projectLoadEvent{projects: projects, err: err, changed: !reflect.DeepEqual(previous, projects)}
+		if previous == nil || (ev.changed && err == nil) {
+			ev.items = buildProjectItems(projects, defaultCwd)
+		}
 		select {
-		case loadCh <- projectLoadEvent{projects: projects, err: err}:
-		default:
-			select {
-			case <-loadCh:
-			default:
-			}
-			loadCh <- projectLoadEvent{projects: projects, err: err}
+		case <-ctx.Done():
+			return
+		case <-done:
+			return
+		case loadCh <- ev:
 		}
 		postUIEventWithRetry(ctx, done, screen, &uiEvent{when: time.Now(), kind: "projects"})
 	}()
@@ -282,9 +311,25 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 	updateCh := make(chan updateEvent, 2)
 	projectLoadCh := make(chan projectLoadEvent, 1)
 	previewCh := make(chan previewEvent, 8)
+	subagentCh := make(chan subagentLoadEvent, 1)
 	refreshStarted := false
 
-	startProjectLoad(loadCtx, done, screen, opts.LoadProjects, projectLoadCh)
+	startProjectLoad(loadCtx, done, screen, opts.LoadProjects, nil, opts.DefaultCwd, projectLoadCh)
+	state.requestRefresh = func(manual bool) {
+		if state.loadingProjects {
+			return
+		}
+		if state.refreshingProjects {
+			state.refreshPending = state.refreshPending || manual
+			return
+		}
+		state.refreshPending = false
+		state.refreshingProjects = true
+		startProjectLoad(loadCtx, done, screen, opts.LoadProjects, state.projects, opts.DefaultCwd, projectLoadCh)
+	}
+	state.requestSubagents = func(session claudehistory.Session) {
+		state.loadSubagentDetails(loadCtx, done, screen, session, subagentCh)
+	}
 
 	if opts.CheckUpdate != nil {
 		state.updateChecking = true
@@ -322,7 +367,7 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 	go func() {
 		select {
 		case <-ctx.Done():
-			postUIEventWithRetry(ctx, done, screen, &uiEvent{when: time.Now(), kind: "quit"})
+			postUIEventWithRetry(context.Background(), done, screen, &uiEvent{when: time.Now(), kind: "quit"})
 		case <-done:
 		}
 	}()
@@ -339,22 +384,17 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 			case "quit":
 				return nil, ctx.Err()
 			case "projects":
-				for {
-					select {
-					case ev := <-projectLoadCh:
-						state.loadingProjects = false
-						state.projects = ev.projects
-						state.loadError = ev.err
-						state.projectState = listState{}
-						state.sessionState = listState{}
-						state.previewState = previewState{}
-					default:
-						if !refreshStarted {
-							startRefreshLoop(loadCtx, done, screen, opts.RefreshInterval)
-							refreshStarted = true
-						}
-						goto nextEvent
+				select {
+				case ev := <-projectLoadCh:
+					state.applyProjects(ev, opts.DefaultCwd)
+					if state.refreshPending {
+						state.requestRefresh(false)
 					}
+					if !refreshStarted {
+						startRefreshLoop(loadCtx, done, screen, opts.RefreshInterval)
+						refreshStarted = true
+					}
+				default:
 				}
 			case "update":
 				for {
@@ -388,21 +428,22 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 					}
 				}
 			case "refresh":
-				if !state.loadingProjects {
-					refreshStatePreserveSelection(loadCtx, state, opts)
-				}
+				state.requestRefresh(false)
 			case "preview":
 				for {
 					select {
 					case ev := <-previewCh:
-						if ev.cacheKey != "" {
-							if ev.err != nil {
-								state.previewError[ev.cacheKey] = ev.err.Error()
-							} else {
-								state.previewCache[ev.cacheKey] = ev.text
-								delete(state.previewError, ev.cacheKey)
-							}
-							state.previewLoading[ev.cacheKey] = false
+						state.applyPreview(ev)
+					default:
+						goto nextEvent
+					}
+				}
+			case "subagents":
+				for {
+					select {
+					case ev := <-subagentCh:
+						if ev.generation == state.subagentGeneration {
+							state.applySubagentDetails(ev, opts.DefaultCwd)
 						}
 					default:
 						goto nextEvent
@@ -423,6 +464,8 @@ func SelectSession(ctx context.Context, opts Options) (*Selection, error) {
 				return nil, err
 			}
 			if selection != nil {
+				state.opening = true
+				_ = draw(loadCtx, done, screen, state, opts, previewCh)
 				return selection, nil
 			}
 		}
@@ -456,7 +499,7 @@ func handleKey(
 				state.previewSearch = strings.TrimSpace(state.previewSearchBuf)
 				state.previewSearchBuf = state.previewSearch
 				state.previewMatchIdx = 0
-				state.previewSearchKey = ""
+				state.searchedLayout = 0
 			}
 			state.inputMode = ""
 			state.inputBuffer = ""
@@ -506,10 +549,9 @@ func handleKey(
 		state.yoloMode = nextMode
 		return nil, nil
 	case tcell.KeyCtrlR:
-		if state.loadingProjects {
-			return nil, nil
+		if state.requestRefresh != nil {
+			state.requestRefresh(true)
 		}
-		refreshState(ctx, state, opts)
 		return nil, nil
 	case tcell.KeyCtrlC:
 		return nil, errQuit
@@ -520,10 +562,9 @@ func handleKey(
 		case 'q', 'Q':
 			return nil, errQuit
 		case 'r', 'R':
-			if state.loadingProjects {
-				return nil, nil
+			if state.requestRefresh != nil {
+				state.requestRefresh(true)
 			}
-			refreshState(ctx, state, opts)
 			return nil, nil
 		case '/':
 			if state.focus == "projects" {
@@ -605,13 +646,11 @@ func handleKey(
 		listFocus = state.lastListFocus
 	}
 
-	projects := buildProjectItems(state.projects, opts.DefaultCwd)
-	filteredProjects := filterProjects(projects, state.projectFilter)
+	filteredProjects := state.projectItems(opts.DefaultCwd)
 	state.projectState.clamp(len(filteredProjects))
 	selectedProject := selectedProject(filteredProjects, state.projectState.selected)
 
-	sessions := buildSessionItems(selectedProject, state.expandedSessions)
-	filteredSessions := filterSessions(sessions, state.sessionFilter)
+	filteredSessions := state.sessionItems(selectedProject)
 	state.sessionState.clamp(len(filteredSessions))
 	selectedItem, selectedOk := selectedSessionItem(filteredSessions, state.sessionState.selected)
 	selectedSession, selectedSubagent, selectedIsNew := sessionSelection(selectedItem)
@@ -633,8 +672,8 @@ func handleKey(
 			return nil, nil
 		}
 		state.expandedSessions[parentID] = !state.expandedSessions[parentID]
-		sessions = buildSessionItems(selectedProject, state.expandedSessions)
-		filteredSessions = filterSessions(sessions, state.sessionFilter)
+		state.views.builtSessions = false
+		filteredSessions = state.sessionItems(selectedProject)
 		state.sessionState.clamp(len(filteredSessions))
 		if idx := findSessionIndex(filteredSessions, parentID); idx >= 0 {
 			state.sessionState.selected = idx
@@ -644,9 +683,6 @@ func handleKey(
 	}
 
 	if ev.Key() == tcell.KeyCtrlN {
-		if state.loadingProjects {
-			return nil, nil
-		}
 		if cwd := newSessionCwd(selectedProject, opts.DefaultCwd); cwd != "" {
 			return &Selection{Project: selectedProject, Cwd: cwd, UseProxy: state.proxyEnabled, YoloMode: state.yoloMode}, nil
 		}
@@ -674,9 +710,7 @@ func handleKey(
 	}
 
 	if state.focus == "preview" && isPreviewNavKey(ev) {
-		previewText := previewTextForItem(state, selectedSession, selectedSubagent)
-		lines := buildPreviewLines(selectedProject, selectedSession, selectedSubagent, selectedIsNew, state, previewText, opts)
-		lines = buildWrappedLines(lines, max(0, layoutMode.preview.w-2))
+		lines := state.previewLines(selectedProject, selectedSession, selectedSubagent, selectedIsNew, opts, layoutMode.preview.w-2)
 		applyPreviewNavigation(&state.previewState, len(lines), max(0, layoutMode.preview.h-2), ev)
 		return nil, nil
 	}
@@ -701,38 +735,7 @@ func handleKey(
 		return nil, nil
 	}
 
-	if state.focus == "preview" {
-		previewText := previewTextForItem(state, selectedSession, selectedSubagent)
-		lines := buildPreviewLines(selectedProject, selectedSession, selectedSubagent, selectedIsNew, state, previewText, opts)
-		lines = buildWrappedLines(lines, max(0, layoutMode.preview.w-2))
-		applyPreviewNavigation(&state.previewState, len(lines), max(0, layoutMode.preview.h-2), ev)
-		return nil, nil
-	}
-
 	return nil, nil
-}
-
-func refreshState(ctx context.Context, state *uiState, opts Options) {
-	projects, err := opts.LoadProjects(ctx)
-	if err != nil {
-		state.loadError = err
-		return
-	}
-	state.loadError = nil
-	state.projects = projects
-	state.projectState = listState{}
-	state.sessionState = listState{}
-	state.previewState = previewState{}
-}
-
-func refreshStatePreserveSelection(ctx context.Context, state *uiState, opts Options) {
-	projects, err := opts.LoadProjects(ctx)
-	if err != nil {
-		state.loadError = err
-		return
-	}
-	state.loadError = nil
-	state.projects = projects
 }
 
 func computeLayout(screen tcell.Screen, statusHeight int) layout {
@@ -785,14 +788,12 @@ func computeLayout(screen tcell.Screen, statusHeight int) layout {
 func draw(ctx context.Context, done <-chan struct{}, screen tcell.Screen, state *uiState, opts Options, previewCh chan<- previewEvent) error {
 	screen.Clear()
 
-	projects := buildProjectItems(state.projects, opts.DefaultCwd)
-	filteredProjects := filterProjects(projects, state.projectFilter)
+	filteredProjects := state.projectItems(opts.DefaultCwd)
 	state.projectState.clamp(len(filteredProjects))
 
 	selectedProject := selectedProject(filteredProjects, state.projectState.selected)
 
-	sessions := buildSessionItems(selectedProject, state.expandedSessions)
-	filteredSessions := filterSessions(sessions, state.sessionFilter)
+	filteredSessions := state.sessionItems(selectedProject)
 	state.sessionState.clamp(len(filteredSessions))
 
 	selectedItem, selectedOk := selectedSessionItem(filteredSessions, state.sessionState.selected)
@@ -812,8 +813,15 @@ func draw(ctx context.Context, done <-chan struct{}, screen tcell.Screen, state 
 		sessionFilter = state.inputBuffer
 	}
 
-	if selectedSession != nil || selectedSubagent != nil {
+	if !state.opening {
 		ensurePreview(ctx, done, screen, state, opts, selectedSession, selectedSubagent, previewCh)
+		if state.requestSubagents != nil {
+			parent := claudehistory.Session{}
+			if selectedSession != nil {
+				parent = *selectedSession
+			}
+			state.requestSubagents(parent)
+		}
 	}
 
 	proxyLabel := "Proxy mode (Ctrl+P): off"
@@ -872,7 +880,7 @@ func draw(ctx context.Context, done <-chan struct{}, screen tcell.Screen, state 
 	}
 	if state.loadingProjects {
 		statusSegments = []statusSegment{
-			{text: "Loading history...  " + proxyLabel + "  ", style: baseStatusStyle},
+			{text: "Loading history..." + newHint + "  " + proxyLabel + "  ", style: baseStatusStyle},
 		}
 		statusSegments = appendYoloSegment(statusSegments)
 		statusSegments = append(statusSegments, statusSegment{text: "  q: quit", style: baseStatusStyle})
@@ -916,6 +924,10 @@ func draw(ctx context.Context, done <-chan struct{}, screen tcell.Screen, state 
 			updateRight = updateRight + " update failed"
 			updateBold = true
 		}
+	}
+
+	if state.opening {
+		statusSegments = []statusSegment{{text: "Opening Claude Code…", style: baseStatusStyle}}
 	}
 
 	maxX, maxY := screen.Size()
@@ -970,26 +982,20 @@ func draw(ctx context.Context, done <-chan struct{}, screen tcell.Screen, state 
 		)
 	}
 
-	previewText := previewTextForItem(state, selectedSession, selectedSubagent)
-
 	previewFilter := ""
 	if state.inputMode == "preview" {
 		previewFilter = state.previewSearchBuf
 	} else if state.previewSearch != "" {
 		previewFilter = state.previewSearch
 	}
-	if previewText == "" && state.loadingProjects {
-		previewText = "Loading history..."
-	}
 	drawBox(screen, layoutMode.preview, "Preview", state.focus == "preview", previewFilter)
-	lines := buildPreviewLines(selectedProject, selectedSession, selectedSubagent, selectedIsNew, state, previewText, opts)
-	lines = buildWrappedLines(lines, max(0, layoutMode.preview.w-2))
+	lines := state.previewLines(selectedProject, selectedSession, selectedSubagent, selectedIsNew, opts, layoutMode.preview.w-2)
 	viewH := max(0, layoutMode.preview.h-2)
 	state.previewState.scroll = clamp(state.previewState.scroll, 0, max(0, len(lines)-viewH))
 
-	previewKey := fmt.Sprintf("%s|%d|%s|%s", previewCacheKey(selectedSession, selectedSubagent), layoutMode.preview.w, previewText, state.previewSearch)
-	if previewKey != state.previewSearchKey {
-		state.previewSearchKey = previewKey
+	if state.previewLayout.revision != state.searchedLayout || state.searchedText != state.previewSearch {
+		state.searchedLayout = state.previewLayout.revision
+		state.searchedText = state.previewSearch
 		if state.previewSearch != "" {
 			state.previewMatches = previewFindMatches(lines, state.previewSearch)
 			state.previewMatchIdx = clamp(state.previewMatchIdx, 0, max(0, len(state.previewMatches)-1))
@@ -1016,67 +1022,31 @@ func draw(ctx context.Context, done <-chan struct{}, screen tcell.Screen, state 
 	return nil
 }
 
-func ensurePreview(
-	ctx context.Context,
-	done <-chan struct{},
-	screen tcell.Screen,
-	state *uiState,
-	opts Options,
-	session *claudehistory.Session,
-	subagent *claudehistory.SubagentSession,
-	previewCh chan<- previewEvent,
-) {
-	cacheKey := previewCacheKey(session, subagent)
-	filePath := previewFilePath(session, subagent)
-	if cacheKey == "" || filePath == "" {
-		return
-	}
-	if _, ok := state.previewCache[cacheKey]; ok {
-		return
-	}
-	if state.previewLoading[cacheKey] {
-		return
-	}
-	state.previewLoading[cacheKey] = true
-
-	maxMessages := opts.PreviewMessages
-	if maxMessages <= 0 {
-		maxMessages = 20
-	}
-
-	go func(key string, path string, maxMsgs int) {
-		msgs, err := claudehistory.ReadSessionMessages(path, maxMsgs)
-		text := ""
-		if err == nil {
-			text = claudehistory.FormatMessages(msgs, 400)
-		}
-		previewCh <- previewEvent{cacheKey: key, text: text, err: err}
-		postUIEventWithRetry(ctx, done, screen, &uiEvent{when: time.Now(), kind: "preview"})
-	}(cacheKey, filePath, maxMessages)
-}
-
 func buildProjectItems(projects []claudehistory.Project, defaultCwd string) []projectItem {
 	currentPath := strings.TrimSpace(defaultCwd)
 	currentResolved := normalizePathForCompare(currentPath)
-	sortedProjects := append([]claudehistory.Project(nil), projects...)
+	type rankedProject struct {
+		project  claudehistory.Project
+		modified time.Time
+		key      string
+	}
+	sortedProjects := make([]rankedProject, len(projects))
+	for i, project := range projects {
+		sortedProjects[i] = rankedProject{project, projectLastModified(project), projectSortKey(project)}
+	}
 	sort.SliceStable(sortedProjects, func(i, j int) bool {
-		leftModified := projectLastModified(sortedProjects[i])
-		rightModified := projectLastModified(sortedProjects[j])
-		leftZero := leftModified.IsZero()
-		rightZero := rightModified.IsZero()
-		if leftZero != rightZero {
-			return !leftZero
+		left, right := sortedProjects[i], sortedProjects[j]
+		if !left.modified.Equal(right.modified) {
+			return left.modified.After(right.modified)
 		}
-		if !leftModified.Equal(rightModified) {
-			return leftModified.After(rightModified)
-		}
-		return projectSortKey(sortedProjects[i]) < projectSortKey(sortedProjects[j])
+		return left.key < right.key
 	})
 
 	items := make([]projectItem, 0, len(sortedProjects)+1)
 	currentIdx := -1
 
-	for _, project := range sortedProjects {
+	for _, ranked := range sortedProjects {
+		project := ranked.project
 		isCurrent := currentResolved != "" && isSamePath(project.Path, currentResolved)
 		items = append(items, projectItem{
 			project:       project,
@@ -1174,14 +1144,8 @@ func buildSessionItems(project claudehistory.Project, expanded map[string]bool) 
 		})
 		if expanded != nil && expanded[session.SessionID] {
 			for _, sub := range session.Subagents {
-				subTitle := sub.DisplayTitle()
-				subTS := "unknown"
-				if !sub.ModifiedAt.IsZero() {
-					subTS = sub.ModifiedAt.Format("2006-01-02 15:04")
-				}
-				subLabel := fmt.Sprintf("  |- subagent %s  (%s)", subTitle, subTS)
 				items = append(items, sessionItem{
-					label:         subLabel,
+					label:         subagentLabel(sub),
 					subagent:      sub,
 					parentSession: session,
 					kind:          sessionItemSubagent,
@@ -1190,6 +1154,14 @@ func buildSessionItems(project claudehistory.Project, expanded map[string]bool) 
 		}
 	}
 	return items
+}
+
+func subagentLabel(sub claudehistory.SubagentSession) string {
+	ts := "unknown"
+	if !sub.ModifiedAt.IsZero() {
+		ts = sub.ModifiedAt.Format("2006-01-02 15:04")
+	}
+	return fmt.Sprintf("  |- subagent %s  (%s)", sub.DisplayTitle(), ts)
 }
 
 func selectedProject(items []projectItem, idx int) claudehistory.Project {
@@ -1286,7 +1258,7 @@ func buildPreviewLines(
 	previewText string,
 	opts Options,
 ) []string {
-	if state.loadError != nil {
+	if state.loadError != nil && len(state.projects) == 0 {
 		return []string{fmt.Sprintf("Load error: %v", state.loadError)}
 	}
 	if project.Path == "" && len(state.projects) == 0 {
@@ -1594,21 +1566,31 @@ type row struct {
 func previewCacheKey(session *claudehistory.Session, subagent *claudehistory.SubagentSession) string {
 	if subagent != nil {
 		if path := strings.TrimSpace(subagent.FilePath); path != "" {
-			return "subagent:" + path
+			return "subagent:" + path + previewVersionSuffix(subagent.SourceVersion)
 		}
 		if agentID := strings.TrimSpace(subagent.AgentID); agentID != "" {
 			return "subagent:" + agentID
 		}
 	}
 	if session != nil {
+		if session.SourceVersion != "" && session.FilePath != "" {
+			return "session:" + session.FilePath + previewVersionSuffix(session.SourceVersion)
+		}
 		if sessionID := strings.TrimSpace(session.SessionID); sessionID != "" {
-			return "session:" + sessionID
+			return "session:" + sessionID + previewVersionSuffix(session.SourceVersion)
 		}
 		if path := strings.TrimSpace(session.FilePath); path != "" {
-			return "session:" + path
+			return "session:" + path + previewVersionSuffix(session.SourceVersion)
 		}
 	}
 	return ""
+}
+
+func previewVersionSuffix(version string) string {
+	if version == "" {
+		return ""
+	}
+	return "|" + version
 }
 
 func previewFilePath(session *claudehistory.Session, subagent *claudehistory.SubagentSession) string {

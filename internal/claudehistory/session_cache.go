@@ -113,7 +113,7 @@ func readSessionFileMetaCachedFromState(ctx context.Context, filePath string, en
 		setSessionFileCacheEntry(filePath, entry)
 		return cloneSessionFileMeta(meta), nil
 	}
-	meta, err := readSessionFileMeta(filePath)
+	meta, err := readSessionFileMetadata(ctx, filePath, false)
 	if err != nil {
 		return meta, err
 	}

@@ -17,6 +17,7 @@ type SubagentSession struct {
 	ModifiedAt      time.Time
 	ProjectPath     string
 	FilePath        string
+	SourceVersion   string `json:"-"`
 }
 
 func (s SubagentSession) DisplayTitle() string {
@@ -30,16 +31,17 @@ func (s SubagentSession) DisplayTitle() string {
 }
 
 type Session struct {
-	SessionID    string
-	Aliases      []string `json:"-"`
-	Summary      string
-	FirstPrompt  string
-	MessageCount int
-	CreatedAt    time.Time
-	ModifiedAt   time.Time
-	ProjectPath  string
-	FilePath     string
-	Subagents    []SubagentSession `json:"-"`
+	SessionID     string
+	Aliases       []string `json:"-"`
+	Summary       string
+	FirstPrompt   string
+	MessageCount  int
+	CreatedAt     time.Time
+	ModifiedAt    time.Time
+	ProjectPath   string
+	FilePath      string
+	Subagents     []SubagentSession `json:"-"`
+	SourceVersion string            `json:"-"`
 }
 
 func (s Session) DisplayTitle() string {
