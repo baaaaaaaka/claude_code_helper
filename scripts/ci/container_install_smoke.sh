@@ -26,23 +26,13 @@ retry_cmd() {
 
 install_deps() {
   if command -v apt-get >/dev/null 2>&1; then
-    export DEBIAN_FRONTEND=noninteractive
     local pkgs=(ca-certificates openssh-client openssh-server)
     if [[ "$fetcher" == "curl" ]]; then
       pkgs+=(curl)
     else
       pkgs+=(wget)
     fi
-    retry_cmd apt-get \
-      -o Acquire::Retries=3 \
-      -o Acquire::http::Timeout=30 \
-      -o Acquire::https::Timeout=30 \
-      update
-    retry_cmd apt-get \
-      -o Acquire::Retries=3 \
-      -o Acquire::http::Timeout=30 \
-      -o Acquire::https::Timeout=30 \
-      install -y --no-install-recommends "${pkgs[@]}"
+    bash "$(dirname "${BASH_SOURCE[0]}")/apt_install.sh" --no-install-recommends "${pkgs[@]}"
     return
   fi
 

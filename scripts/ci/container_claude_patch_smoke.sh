@@ -25,21 +25,11 @@ retry_cmd() {
 
 install_deps() {
   if command -v apt-get >/dev/null 2>&1; then
-    export DEBIAN_FRONTEND=noninteractive
     pkgs=(ca-certificates)
     if [[ "$needs_patchelf" == "1" ]]; then
       pkgs+=(patchelf)
     fi
-    retry_cmd apt-get \
-      -o Acquire::Retries=3 \
-      -o Acquire::http::Timeout=30 \
-      -o Acquire::https::Timeout=30 \
-      update
-    retry_cmd apt-get \
-      -o Acquire::Retries=3 \
-      -o Acquire::http::Timeout=30 \
-      -o Acquire::https::Timeout=30 \
-      install -y --no-install-recommends "${pkgs[@]}"
+    bash "$(dirname "${BASH_SOURCE[0]}")/apt_install.sh" --no-install-recommends "${pkgs[@]}"
     return
   fi
 

@@ -48,13 +48,10 @@ jobs:
           go-version: "1.24.12"
           cache: true
 
-      - name: Install extra shells for installer tests (Linux only)
+      - name: Install shell and SSH test dependencies (Linux only)
         if: runner.os == 'Linux'
         shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y zsh fish csh tcsh
+        run: sudo bash scripts/ci/apt_install.sh zsh fish csh tcsh openssh-server
 
       - name: gofmt (verify)
         shell: bash
@@ -71,8 +68,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y openssh-server
           sudo mkdir -p /run/sshd
           SSH_TEST_USER="ssh-test"
           if ! id -u "$SSH_TEST_USER" >/dev/null 2>&1; then
@@ -527,10 +522,7 @@ jobs:
 
       - name: Install strace for native Claude ENOSYS smoke
         shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y strace
+        run: sudo bash scripts/ci/apt_install.sh strace
 
       - name: Smoke test on runner (Claude native path on forced old kernel + ENOSYS)
         shell: bash
