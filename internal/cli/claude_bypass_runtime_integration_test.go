@@ -259,7 +259,7 @@ func TestClaudePatchBypassRuntimeIntegrationWithProxy(t *testing.T) {
 		ctx,
 		proxyBin,
 		proxyArgs,
-		runtimeCommandEnv(configDir),
+		runtimeCommandEnv(configDir, outcome),
 		projectDir,
 		runtimePromptCase{
 			Name:              "patched-bypass-runtime-proxy",

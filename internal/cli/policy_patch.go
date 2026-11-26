@@ -395,6 +395,11 @@ func applyBypassPermissionsGatePatch(data []byte, log io.Writer, preview bool) (
 
 func applyBypassPermissionDecisionPatch(data []byte, log io.Writer, preview bool) ([]byte, exePatchStats, error) {
 	stats := exePatchStats{Label: "bypass-permission-decision"}
+	// The local rule patch runs inside the native permission checks. Keep the
+	// native hook path so an early allow cannot skip those checks.
+	if bytes.Contains(data, []byte(localAskPatchMarker)) || bytes.Contains(data, []byte(bashAskPatchV1Marker)) {
+		return data, stats, nil
+	}
 	anchors := [][]byte{
 		[]byte(permissionDecisionAskRuleAnchor),
 		[]byte(permissionDecisionAskRuleAnchorV2),

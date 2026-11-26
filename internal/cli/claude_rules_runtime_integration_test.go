@@ -383,7 +383,7 @@ func runClaudeGetSettingsSnapshot(
 	})
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = projectDir
-	cmd.Env = runtimeCommandEnv(configDir)
+	cmd.Env = runtimeCommandEnv(configDir, outcome)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -491,7 +491,7 @@ func runClaudePromptCaseWithExtraArgs(
 	args := commandArgsForOutcome(outcome, launchArgs)
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = projectDir
-	cmd.Env = runtimeCommandEnv(configDir)
+	cmd.Env = runtimeCommandEnv(configDir, outcome)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -680,10 +680,13 @@ func runClaudePromptCaseWithExtraArgs(
 	return result
 }
 
-func runtimeCommandEnv(configDir string) []string {
+func runtimeCommandEnv(configDir string, outcome *patchOutcome) []string {
 	env := append([]string{}, os.Environ()...)
 	env = append(env, "CLAUDE_CONFIG_DIR="+configDir)
 	env = append(env, "CLAUDE_CODE_ENABLE_TELEMETRY=0")
+	if outcome != nil {
+		env = append(env, outcome.LaunchEnv...)
+	}
 	return env
 }
 

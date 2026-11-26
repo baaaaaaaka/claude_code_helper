@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -187,7 +188,7 @@ func policySettingsSpecs() ([]exePatchSpec, error) {
 		return nil, err
 	}
 
-	return []exePatchSpec{disableSpec, gateSpec, decisionSpec, rootSpec, remoteSpec}, nil
+	return []exePatchSpec{disableSpec, gateSpec, bypassLocalAskPatchSpec(), decisionSpec, rootSpec, remoteSpec}, nil
 }
 
 func policySettingsDisablePatchSpec() (exePatchSpec, error) {
@@ -359,6 +360,11 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 		builtinSpecs = nil
 	}
 	yoloRequested := hasYoloBypassPermissionsArg(cmdArgs)
+	if !yoloRequested {
+		builtinSpecs = slices.DeleteFunc(builtinSpecs, func(spec exePatchSpec) bool {
+			return spec.label == localAskPatchLabel
+		})
+	}
 	builtinPatchAllowed := (yoloRequested || opts.allowBuiltInWithoutBypass) && len(builtinSpecs) > 0
 	glibcCompatHost := isClaude && glibcCompat && glibcCompatHostEligibleFn()
 	patchTargetPath := resolvedPath
@@ -508,6 +514,11 @@ func maybePatchExecutableWithContext(ctx context.Context, cmdArgs []string, opts
 	outcome.IsClaude = isClaude
 	outcome.ConfigPath = configPath
 	outcome.LogWriter = log
+	if yoloRequested && builtinPatchAllowed && !opts.dryRun {
+		if err := configureLocalAskPatchLaunch(outcome); err != nil {
+			return nil, err
+		}
+	}
 	if runtimeGOOS == "windows" &&
 		outcome.IsClaude &&
 		outcome.AlreadyPatched &&
