@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -188,11 +189,20 @@ func runClaudePatchIntegrationCaseWithOptions(t *testing.T, wantVersion string, 
 		})
 	}
 
-	// Verify every built-in policy patch matched at least once.
-	// This catches silent pattern breakage (e.g. upstream code refactoring)
-	// that would otherwise go undetected until a user hits the issue.
+	// The native rule patch replaces the legacy hook shortcut in bypass mode.
+	// The other built-in patches must each still match.
 	if outcome.Applied {
+		decisionMatches := 0
 		for _, stat := range outcome.PatchStats {
+			if stat.Label == localAskPatchLabel || stat.Label == "bypass-permission-decision" {
+				if stat.Eligible > 0 || stat.Replacements > 0 {
+					decisionMatches++
+					if stat.Label == localAskPatchLabel && (integrationOpts.rulesMode || !slices.Contains(outcome.LaunchEnv, bunSourceLaunchEnv)) {
+						t.Fatalf("local ask patch requires bypass mode and source execution for Claude %s\n%s", wantVersion, log.String())
+					}
+				}
+				continue
+			}
 			if stat.Eligible == 0 && stat.Replacements == 0 {
 				// process.getuid() is Unix-only; Windows binaries don't contain the root guard.
 				if runtime.GOOS == "windows" && stat.Label == "root-bypass-guard" {
@@ -202,6 +212,10 @@ func runClaudePatchIntegrationCaseWithOptions(t *testing.T, wantVersion string, 
 				t.Fatalf("patch %q found no matches in claude %s — the target pattern may have changed upstream\n%s",
 					stat.Label, wantVersion, log.String())
 			}
+		}
+		if decisionMatches != 1 {
+			t.Fatalf("expected exactly one permission decision patch for Claude %s, got %d\n%s",
+				wantVersion, decisionMatches, log.String())
 		}
 	}
 	if integrationOpts.verifyManagedPolicyComposition {
@@ -321,6 +335,9 @@ func compactOutput(s string) string {
 func runClaudeVersion(ctx context.Context, path string, outcome *patchOutcome) (string, error) {
 	cmdArgs := commandArgsForOutcome(outcome, []string{path, "--version"})
 	cmd := exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)
+	if outcome != nil && len(outcome.LaunchEnv) > 0 {
+		cmd.Env = append(os.Environ(), outcome.LaunchEnv...)
+	}
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
